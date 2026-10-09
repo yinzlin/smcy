@@ -2291,6 +2291,16 @@ pub async fn page_purchase(headers: axum::http::HeaderMap) -> Html<String> {
 
                 <button onclick="saveOrder()" class="btn btn-success mt-3" id="savePurchaseBtn">保存采购订单</button>
                 <button onclick="resetForm()" class="btn btn-secondary mt-3 ml-2">新建订单</button>
+
+                <div id="priceComparePanel" style="display:none; margin-top:15px;">
+                    <div class="card border-info">
+                        <div class="card-header d-flex justify-content-between align-items-center" style="background:#d1ecf1;">
+                            <span id="priceCompareTitle" class="fw-bold">采购比价</span>
+                            <button type="button" class="btn-close" onclick="document.getElementById('priceComparePanel').style.display='none'"></button>
+                        </div>
+                        <div class="card-body p-0" id="priceCompareBody"></div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -2543,6 +2553,141 @@ pub async fn page_purchase(headers: axum::http::HeaderMap) -> Html<String> {
                     renderSupplierProfileById(id);
                 }}
             }});
+
+            // 采购比价面板：展示各供应商历史采购价，点击选用供应商
+            let priceCompareIndex = -1;
+            let priceCompareData = null;
+
+            async function showPriceCompare(productId, productName, baseUnit, index) {{
+                priceCompareIndex = index !== undefined ? index : priceCompareIndex;
+                try {{
+                    const currentSupplierId = document.getElementById('supplierId').value;
+                    const orderDate = (document.getElementById('orderDateInput') || {{}}).value || new Date().toISOString().slice(0, 10);
+
+                    // 并行：历史采购比价 + 当前供应商的约定采购价
+                    const tasks = [fetch('/api/query/purchase_price_compare?product_id=' + productId)];
+                    if (currentSupplierId) {{
+                        tasks.push(fetch('/api/price_schedule/lookup?product_id=' + productId
+                            + '&price_type=supplier_contract&supplier_id=' + currentSupplierId
+                            + '&query_date=' + orderDate));
+                    }} else {{
+                        tasks.push(Promise.resolve({{ ok: false, json: async () => ({{}}) }}));
+                    }}
+                    const [res, contractRes] = await Promise.all(tasks);
+                    if (!res.ok) return;
+                    const data = await res.json();
+                    priceCompareData = data;
+                    const suppliers = data.suppliers || [];
+
+                    const contractData = contractRes.ok ? await contractRes.json() : null;
+                    const contractPrice = (contractData && contractData.matched) ? contractData.price : 0;
+
+                    // 价格优先级：
+                    // 1. 当前供应商在价格策略中的约定采购价（最高优先）
+                    // 2. 当前供应商的今日采集价（product_supplier_price）
+                    // 3. 当前供应商的历史最近采购价（基础单位）
+                    // 4. 其他供应商中今日价/最近价最低的
+                    // 5. 保留商品信息里的进价（已在 selectProduct 中设为 fallback）
+                    let bestPrice = 0;
+                    let bestSource = '';
+
+                    if (contractPrice > 0) {{
+                        bestPrice = contractPrice;
+                        bestSource = '约定采购价（' + (contractData.effective_date || '') + ' 生效）';
+                    }} else if (suppliers.length > 0) {{
+                        const cur = suppliers.find(s => String(s.supplier_id) === String(currentSupplierId));
+                        if (cur && cur.today_price > 0) {{
+                            bestPrice = cur.today_price;
+                            bestSource = '当前供应商「' + cur.supplier_name + '」今日采集价';
+                        }} else if (cur && cur.last_base_unit_price > 0) {{
+                            bestPrice = cur.last_base_unit_price;
+                            bestSource = '当前供应商「' + cur.supplier_name + '」最近采购价';
+                        }} else {{
+                            let minPrice = Infinity;
+                            let minS = null;
+                            for (const s of suppliers) {{
+                                // 今日价优先于历史最近价
+                                const p = s.today_price > 0 ? s.today_price : s.last_base_unit_price;
+                                if (p > 0 && p < minPrice) {{ minPrice = p; minS = s; }}
+                            }}
+                            if (minS) {{
+                                bestPrice = minPrice;
+                                bestSource = minS.today_price > 0
+                                    ? '供应商「' + minS.supplier_name + '」今日采集价'
+                                    : '供应商「' + minS.supplier_name + '」最近最低采购价';
+                            }}
+                        }}
+                    }}
+
+                    // 更新当前行单价
+                    if (bestPrice > 0 && priceCompareIndex >= 0 && items[priceCompareIndex]) {{
+                        items[priceCompareIndex].unit_price = Math.round(bestPrice * 100) / 100;
+                        items[priceCompareIndex].base_price = items[priceCompareIndex].unit_price;
+                        items[priceCompareIndex].amount = (items[priceCompareIndex].quantity || 0) * items[priceCompareIndex].unit_price;
+                        renderItems();
+                    }}
+
+                    if (suppliers.length === 0 && contractPrice <= 0) return;
+
+                    const title = '采购比价 - ' + (data.product_name || productName) + (data.base_unit ? '（基础单位：' + data.base_unit + '）' : '');
+                    document.getElementById('priceCompareTitle').textContent = title;
+
+                    let html = '';
+                    // 命中约定价：顶部醒目提示条
+                    if (contractPrice > 0) {{
+                        html += '<div class="px-3 py-2" style="background:#d1fae5;border-bottom:1px solid #6ee7b7;font-size:13px;">'
+                            + '<span class="badge" style="background:#065f46">约定采购价</span> '
+                            + '<b>¥' + contractPrice.toFixed(2) + '</b> / ' + escapeHtml(data.base_unit || baseUnit || '')
+                            + '（' + bestSource + '）'
+                            + (bestSource.indexOf('约定') === 0 ? '' : '')
+                            + '</div>';
+                    }}
+                    if (suppliers.length > 0) {{
+                        html += '<table class="table table-bordered table-sm mb-0">';
+                        html += '<thead><tr><th>供应商</th><th>今日价</th><th>最近采购</th><th>最近单价</th><th>加权均价</th><th>价格区间</th><th>次数</th><th>操作</th></tr></thead><tbody>';
+                        suppliers.forEach(function(s, i) {{
+                            const isLowest = i === 0;
+                            const isCurrent = String(s.supplier_id) === String(currentSupplierId);
+                            let rowClass = '';
+                            if (isLowest && !isCurrent) rowClass = 'table-success';
+                            else if (isCurrent) rowClass = 'table-info';
+                            const safeName = (s.supplier_name || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                            html += '<tr class="' + rowClass + '">';
+                            html += '<td>' + (s.supplier_name || '') + (isCurrent ? ' <span class="badge bg-primary">当前</span>' : '') + (isLowest && !isCurrent ? ' <span class="badge bg-success">最低</span>' : '') + '</td>';
+                            html += '<td><b style="color:#2563eb;">' + (s.today_price > 0 ? '¥' + Number(s.today_price).toFixed(2) : '-') + '</b></td>';
+                            html += '<td>' + (s.last_date || '-') + '</td>';
+                            html += '<td>' + (s.last_unit_price > 0 ? '¥' + Number(s.last_unit_price).toFixed(2) + '/' + s.last_unit : '-') + '</td>';
+                            html += '<td>' + (s.avg_price > 0 ? '¥' + Number(s.avg_price).toFixed(2) : '-') + '</td>';
+                            html += '<td>' + (s.min_price > 0 ? '¥' + Number(s.min_price).toFixed(2) + '~¥' + Number(s.max_price).toFixed(2) : '-') + '</td>';
+                            html += '<td>' + s.order_count + '</td>';
+                            html += '<td><button class="btn btn-sm btn-outline-primary" onclick="selectSupplierFromCompare(' + s.supplier_id + ',\'' + safeName + '\')">选用</button></td>';
+                            html += '</tr>';
+                        }});
+                        html += '</tbody></table>';
+                    }}
+                    document.getElementById('priceCompareBody').innerHTML = html;
+                    document.getElementById('priceComparePanel').style.display = 'block';
+                }} catch(e) {{
+                    console.error('采购比价加载失败:', e);
+                }}
+            }}
+
+            function selectSupplierFromCompare(id, name) {{
+                // 仅采用该供应商的价格填入当前行，不改变订单供应商
+                // 优先今日采集价，其次历史最近采购价
+                if (priceCompareData && priceCompareIndex >= 0 && items[priceCompareIndex]) {{
+                    const s = (priceCompareData.suppliers || []).find(x => String(x.supplier_id) === String(id));
+                    if (s) {{
+                        const price = (s.today_price > 0) ? s.today_price : s.last_base_unit_price;
+                        if (price > 0) {{
+                            items[priceCompareIndex].unit_price = Math.round(price * 100) / 100;
+                            items[priceCompareIndex].base_price = items[priceCompareIndex].unit_price;
+                            items[priceCompareIndex].amount = (items[priceCompareIndex].quantity || 0) * items[priceCompareIndex].unit_price;
+                            renderItems();
+                        }}
+                    }}
+                }}
+            }}
 
             // 定点供应商选中后展示只读档案条（编号/证照/电话/地址，临期红色预警）
             function renderSupplierProfileById(id) {{
@@ -3097,6 +3242,9 @@ pub async fn page_purchase(headers: axum::http::HeaderMap) -> Html<String> {
                 input.value = items[index].product_name;
                 dropdown.innerHTML = '';
                 dropdown.style.display = 'none';
+
+                // 采购比价：按优先级自动填充单价 + 展示比价面板（await，确保价格先更新再做价格对比）
+                await showPriceCompare(items[index].product_id, items[index].product_name, items[index].base_unit, index);
 
                 // 采购单：本次采购价与最近采购价对比（同基础单位），等待价格提示弹窗关闭
                 await checkPriceAfterSelect(items[index].product_id, items[index].base_unit, items[index].unit_price, 'purchase', items[index].product_name);
@@ -6527,6 +6675,8 @@ pub async fn page_query_price_schedule(headers: axum::http::HeaderMap) -> Html<S
             .ps-tag-gov {{ background: #dbeafe; color: #1d4ed8; }}
             .ps-tag-sup {{ background: #fef3c7; color: #92400e; }}
             .ps-tag-ai {{ background: #ede9fe; color: #6d28d9; }}
+            .ps-tag-sc {{ background: #d1fae5; color: #065f46; }}
+            .ps-tag-pc {{ background: #fce7f3; color: #9d174d; }}
         </style>
         <div class="card p-4 mb-3">
             <h3 class="mb-3">价格策略管理 <small class="text-muted">政采价 / 超市比价 按生效日期段</small></h3>
@@ -6541,6 +6691,8 @@ pub async fn page_query_price_schedule(headers: axum::http::HeaderMap) -> Html<S
                         <option value="supermarket_2">超市2价</option>
                         <option value="supermarket_3">超市3价</option>
                         <option value="ai_realtime">AI实时价</option>
+                        <option value="supplier_contract">供应商约定采购价</option>
+                        <option value="purchaser_contract">采购单位约定售价</option>
                     </select>
                 </div>
                 <div class="col-md-3">
@@ -6590,6 +6742,7 @@ pub async fn page_query_price_schedule(headers: axum::http::HeaderMap) -> Html<S
                             <th>商品名称</th>
                             <th>规格</th>
                             <th>价格类型</th>
+                            <th>约定对象</th>
                             <th>生效日期</th>
                             <th>时段（含）</th>
                             <th>价格</th>
@@ -6598,7 +6751,7 @@ pub async fn page_query_price_schedule(headers: axum::http::HeaderMap) -> Html<S
                             <th>操作</th>
                         </tr>
                     </thead>
-                    <tbody id="listBody"><tr><td colspan="10" class="text-center text-muted">请先点击查询</td></tr></tbody>
+                    <tbody id="listBody"><tr><td colspan="11" class="text-center text-muted">请先点击查询</td></tr></tbody>
                 </table>
             </div>
             <nav><ul class="pagination pagination-sm" id="listPager"></ul></nav>
@@ -6629,6 +6782,8 @@ pub async fn page_query_price_schedule(headers: axum::http::HeaderMap) -> Html<S
             supermarket_2: '超市2价',
             supermarket_3: '超市3价',
             ai_realtime: 'AI实时价',
+            supplier_contract: '供应商约定采购价',
+            purchaser_contract: '采购单位约定售价',
         }};
         const PRICE_TYPE_TAG_CLASS = {{
             gov_procurement: 'ps-tag ps-tag-gov',
@@ -6636,11 +6791,46 @@ pub async fn page_query_price_schedule(headers: axum::http::HeaderMap) -> Html<S
             supermarket_2: 'ps-tag ps-tag-sup',
             supermarket_3: 'ps-tag ps-tag-sup',
             ai_realtime: 'ps-tag ps-tag-ai',
+            supplier_contract: 'ps-tag ps-tag-sc',
+            purchaser_contract: 'ps-tag ps-tag-pc',
         }};
 
         let currentPage = 1;
         let currentEditId = null;
         let currentEditProductId = null;
+        let psSuppliers = [];
+        let psPurchasers = [];
+        let psPartiesLoaded = false;
+
+        // 加载供应商和采购单位列表（编辑弹窗选择约定对象用）
+        async function loadParties() {{
+            if (psPartiesLoaded) return;
+            try {{
+                const [sRes, pRes] = await Promise.all([
+                    fetch('/api/supplier/list'),
+                    fetch('/api/purchaser/list')
+                ]);
+                psSuppliers = await sRes.json();
+                psPurchasers = await pRes.json();
+                if (!Array.isArray(psSuppliers)) psSuppliers = [];
+                if (!Array.isArray(psPurchasers)) psPurchasers = [];
+                const sSel = document.getElementById('editSupplierId');
+                const pSel = document.getElementById('editPurchaserId');
+                sSel.innerHTML = '<option value="">请选择供应商</option>' + psSuppliers.map(s => '<option value="'+s.id+'">'+escapeHtml(s.name)+'</option>').join('');
+                pSel.innerHTML = '<option value="">请选择采购单位</option>' + psPurchasers.map(p => '<option value="'+p.id+'">'+escapeHtml(p.name)+'</option>').join('');
+                psPartiesLoaded = true;
+            }} catch(e) {{ console.error('加载供应商/采购单位失败:', e); }}
+        }}
+
+        function onPriceTypeChange() {{
+            const pt = document.getElementById('editPriceType').value;
+            const sRow = document.getElementById('editSupplierRow');
+            const pRow = document.getElementById('editPurchaserRow');
+            sRow.style.display = pt === 'supplier_contract' ? '' : 'none';
+            pRow.style.display = pt === 'purchaser_contract' ? '' : 'none';
+            if (pt === 'supplier_contract' || pt === 'purchaser_contract') loadParties();
+            if (!currentEditId) applyPrefillFromCache();
+        }}
 
         function resetFilter() {{
             document.getElementById('filterPriceType').value = '';
@@ -6697,7 +6887,7 @@ pub async fn page_query_price_schedule(headers: axum::http::HeaderMap) -> Html<S
             const tbody = document.getElementById('listBody');
             tbody.innerHTML = '';
             if (!data.data || data.data.length === 0) {{
-                tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted">暂无数据</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted">暂无数据</td></tr>';
                 document.getElementById('listStat').textContent = '共 0 条';
                 document.getElementById('listPager').innerHTML = '';
                 return;
@@ -6715,11 +6905,15 @@ pub async fn page_query_price_schedule(headers: axum::http::HeaderMap) -> Html<S
                 }} else {{
                     rangeText = `<code>${{r.effective_date}}</code> ~ <span class="badge bg-success">至今</span>`;
                 }}
+                let partyName = '-';
+                if (r.supplier_name) partyName = '<span class="badge bg-success">供应商</span> ' + escapeHtml(r.supplier_name);
+                else if (r.purchaser_name) partyName = '<span class="badge" style="background:#9d174d">采购单位</span> ' + escapeHtml(r.purchaser_name);
                 tr.innerHTML = `
                     <td>${{r.product_id}}</td>
                     <td>${{escapeHtml(r.product_name || '')}}<br><small class="text-muted">${{escapeHtml(r.alias1 || '')}} ${{escapeHtml(r.alias2 || '')}}</small></td>
                     <td>${{escapeHtml(r.spec || '')}}<br><small>${{escapeHtml(r.unit || '')}}</small></td>
                     <td>${{priceTypeTag(r.price_type)}}</td>
+                    <td>${{partyName}}</td>
                     <td><code>${{r.effective_date}}</code></td>
                     <td>${{rangeText}}</td>
                     <td><b>¥${{r.price.toFixed(2)}}</b></td>
@@ -6795,6 +6989,10 @@ pub async fn page_query_price_schedule(headers: axum::http::HeaderMap) -> Html<S
             document.getElementById('editProductKeyword').disabled = false;
             document.getElementById('editPriceType').disabled = false;
             document.getElementById('editEffectiveDate').disabled = false;
+            document.getElementById('editSupplierId').value = '';
+            document.getElementById('editPurchaserId').value = '';
+            document.getElementById('editSupplierRow').style.display = 'none';
+            document.getElementById('editPurchaserRow').style.display = 'none';
             new bootstrap.Modal(document.getElementById('editModal')).show();
         }}
 
@@ -6861,6 +7059,15 @@ pub async fn page_query_price_schedule(headers: axum::http::HeaderMap) -> Html<S
             document.getElementById('editEffectiveDate').value = r.effective_date;
             document.getElementById('editRemark').value = r.remark || '';
             document.getElementById('editSource').value = r.source || '';
+            // 约定对象：加载列表后回填
+            const pt = r.price_type;
+            if (pt === 'supplier_contract' || pt === 'purchaser_contract') {{
+                await loadParties();
+            }}
+            document.getElementById('editSupplierId').value = r.supplier_id || '';
+            document.getElementById('editPurchaserId').value = r.purchaser_id || '';
+            document.getElementById('editSupplierRow').style.display = pt === 'supplier_contract' ? '' : 'none';
+            document.getElementById('editPurchaserRow').style.display = pt === 'purchaser_contract' ? '' : 'none';
             // 编辑模式下也允许调整价格类型 / 生效日期（变更后由后端按主键 id 覆盖更新；时段连续性由后端自动维护）
             document.getElementById('editProductKeyword').disabled = false;
             document.getElementById('editPriceType').disabled = false;
@@ -6871,10 +7078,20 @@ pub async fn page_query_price_schedule(headers: axum::http::HeaderMap) -> Html<S
         async function submitEdit() {{
             const pid = parseInt(document.getElementById('editProductId').value || '0');
             if (!pid) {{ alert('请先选择商品'); return; }}
+            const priceType = document.getElementById('editPriceType').value;
             const price = parseFloat(document.getElementById('editPrice').value || '0');
             if (price < 0) {{ alert('价格无效'); return; }}
             const effDate = document.getElementById('editEffectiveDate').value;
             if (!effDate) {{ alert('请选择生效日期'); return; }}
+            // 约定价校验
+            let supplierId = null, purchaserId = null;
+            if (priceType === 'supplier_contract') {{
+                supplierId = parseInt(document.getElementById('editSupplierId').value || '0');
+                if (!supplierId) {{ alert('请选择供应商'); return; }}
+            }} else if (priceType === 'purchaser_contract') {{
+                purchaserId = parseInt(document.getElementById('editPurchaserId').value || '0');
+                if (!purchaserId) {{ alert('请选择采购单位'); return; }}
+            }}
             // 编辑模式下，若商品 / 价格类型 / 生效日期发生变化，给出确认提示（避免误操作破坏时段连续性）
             if (currentEditId && currentEditProductId && pid !== currentEditProductId) {{
                 if (!confirm('已切换商品，原商品下该时段的策略将被移除，新商品下将新增。是否继续？')) return;
@@ -6882,12 +7099,14 @@ pub async fn page_query_price_schedule(headers: axum::http::HeaderMap) -> Html<S
             const payload = {{
                 id: currentEditId ? currentEditId : null,
                 product_id: pid,
-                price_type: document.getElementById('editPriceType').value,
+                price_type: priceType,
                 price: price,
                 effective_date: effDate,
                 end_date: null,
                 source: document.getElementById('editSource').value,
                 remark: document.getElementById('editRemark').value,
+                supplier_id: supplierId,
+                purchaser_id: purchaserId,
             }};
             const url = currentEditId ? '/api/price_schedule/update' : '/api/price_schedule/create';
             const res = await fetch(url, {{
@@ -7242,18 +7461,28 @@ pub async fn page_query_price_schedule(headers: axum::http::HeaderMap) -> Html<S
                         <div class="row">
                             <div class="col-md-6 mb-2">
                                 <label class="form-label">价格类型 *</label>
-                                <select id="editPriceType" class="form-select" onchange="applyPrefillFromCache()">
+                                <select id="editPriceType" class="form-select" onchange="onPriceTypeChange()">
                                     <option value="gov_procurement">政采价</option>
                                     <option value="supermarket_1">超市1价</option>
                                     <option value="supermarket_2">超市2价</option>
                                     <option value="supermarket_3">超市3价</option>
                                     <option value="ai_realtime">AI实时价</option>
+                                    <option value="supplier_contract">供应商约定采购价</option>
+                                    <option value="purchaser_contract">采购单位约定售价</option>
                                 </select>
                             </div>
                             <div class="col-md-6 mb-2">
                                 <label class="form-label">生效日期 *</label>
                                 <input type="date" id="editEffectiveDate" class="form-control">
                             </div>
+                        </div>
+                        <div class="mb-2" id="editSupplierRow" style="display:none">
+                            <label class="form-label">供应商 *</label>
+                            <select id="editSupplierId" class="form-select"><option value="">请选择供应商</option></select>
+                        </div>
+                        <div class="mb-2" id="editPurchaserRow" style="display:none">
+                            <label class="form-label">采购单位 *</label>
+                            <select id="editPurchaserId" class="form-select"><option value="">请选择采购单位</option></select>
                         </div>
                         <div class="row">
                             <div class="col-md-6 mb-2">
@@ -11432,12 +11661,13 @@ pub async fn page_mobile_today_price(headers: axum::http::HeaderMap) -> Html<Str
             alert(msg);
         }
 
-        function updatePriceInput(productId, value) {
+        function updatePriceInput(supplierId, productId, value) {
+            const key = supplierId + '_' + productId;
             const num = parseFloat(value);
             if (!isNaN(num) && num > 0) {
-                todayPrices[productId] = num;
+                todayPrices[key] = num;
             } else {
-                delete todayPrices[productId];
+                delete todayPrices[key];
             }
             updateStats();
         }
@@ -11488,8 +11718,12 @@ pub async fn page_mobile_today_price(headers: axum::http::HeaderMap) -> Html<Str
                 
                 filteredItems.forEach(item => {
                     const pid = item.product_id;
-                    const hasInput = todayPrices[pid] !== undefined;
-                    const inputValue = hasInput ? todayPrices[pid] : '';
+                    const sid = supplier.supplier_id;
+                    const key = sid + '_' + pid;
+                    const hasInput = todayPrices[key] !== undefined;
+                    const inputValue = hasInput ? todayPrices[key] : '';
+                    // 展示默认价：分供应商价优先，否则用全局 purchase_price
+                    const defaultPrice = (item.supplier_price && item.supplier_price > 0) ? item.supplier_price : (item.purchase_price || 0);
                     html += '<div class="price-card">';
                     html += '<div class="item-info">';
                     html += '<div class="item-name">' + item.product_name + (item.spec ? ' ' + item.spec : '') + '</div>';
@@ -11501,6 +11735,9 @@ pub async fn page_mobile_today_price(headers: axum::http::HeaderMap) -> Html<Str
                     html += '<span style="color:#16a34a;">最高 ' + formatPrice(item.max_purchase_price) + '</span>';
                     html += '<span style="color:#dc2626;">最低 ' + formatPrice(item.min_purchase_price) + '</span>';
                     html += '<span style="color:#d97706;">最近 ' + formatPrice(item.purchase_price) + '</span>';
+                    if (item.supplier_price && item.supplier_price > 0) {
+                        html += '<span style="color:#2563eb;">该商 ' + formatPrice(item.supplier_price) + '</span>';
+                    }
                     if (hasInput) {
                         html += '<span class="saved-tag">已录入</span>';
                     }
@@ -11508,7 +11745,7 @@ pub async fn page_mobile_today_price(headers: axum::http::HeaderMap) -> Html<Str
                     html += '</div>';
                     html += '<div class="price-badge">';
                     html += '<div class="price-label">今日价</div>';
-                    html += '<input type="number" min="0" step="any" class="price-input" placeholder="' + (item.purchase_price > 0 ? Number(item.purchase_price).toFixed(2) : '') + '" value="' + inputValue + '" oninput="updatePriceInput(' + pid + ', this.value)" onclick="event.stopPropagation()">';
+                    html += '<input type="number" min="0" step="any" class="price-input" placeholder="' + (defaultPrice > 0 ? Number(defaultPrice).toFixed(2) : '') + '" value="' + inputValue + '" oninput="updatePriceInput(' + sid + ', ' + pid + ', this.value)" onclick="event.stopPropagation()">';
                     html += '</div>';
                     html += '</div>';
                 });
@@ -11535,7 +11772,10 @@ pub async fn page_mobile_today_price(headers: axum::http::HeaderMap) -> Html<Str
                 alert('请先录入今日价');
                 return;
             }
-            const items = keys.map(pid => ({ product_id: parseInt(pid), price: todayPrices[pid] }));
+            const items = keys.map(key => {
+                const parts = key.split('_');
+                return { supplier_id: parseInt(parts[0]), product_id: parseInt(parts[1]), price: todayPrices[key] };
+            });
             try {
                 const res = await fetch('/api/product/today_price_save', {
                     method: 'POST',

@@ -1376,16 +1376,42 @@ pub async fn init_tables(pool: &SqlitePool) -> Result<(), anyhow::Error> {
             source TEXT,
             remark TEXT,
             create_at DATETIME DEFAULT (datetime('now','localtime')),
+            supplier_id INTEGER,
+            purchaser_id INTEGER,
             FOREIGN KEY(product_id) REFERENCES product(id),
-            UNIQUE(product_id, price_type, effective_date)
+            FOREIGN KEY(supplier_id) REFERENCES supplier(id),
+            FOREIGN KEY(purchaser_id) REFERENCES purchaser(id)
         )
         "#,
     )
     .execute(pool)
     .await?;
 
+    // 唯一约束用表达式索引：COALESCE 把 NULL 归一化为 0，保证通用价格类型（supplier_id/purchaser_id 均为 NULL）仍按 (product,type,date) 去重，
+    // 而 supplier_contract / purchaser_contract 可按不同供应商/采购单位在同一天各存一条
+    let _ = sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_pps_unique
+         ON product_price_schedule(product_id, price_type, effective_date, COALESCE(supplier_id,0), COALESCE(purchaser_id,0))"
+    ).execute(pool).await;
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_pps_product_type ON product_price_schedule(product_id, price_type, effective_date)").execute(pool).await;
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_pps_effective ON product_price_schedule(effective_date)").execute(pool).await;
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_pps_supplier ON product_price_schedule(supplier_id) WHERE supplier_id IS NOT NULL").execute(pool).await;
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_pps_purchaser ON product_price_schedule(purchaser_id) WHERE purchaser_id IS NOT NULL").execute(pool).await;
+
+    // 分供应商采购价表：同一商品不同供应商可有不同采购进价（今日进价采集的真实来源）
+    let _ = sqlx::query(
+        "CREATE TABLE IF NOT EXISTS product_supplier_price (
+            product_id INTEGER NOT NULL,
+            supplier_id INTEGER NOT NULL,
+            price REAL NOT NULL DEFAULT 0,
+            updated_at DATETIME DEFAULT (datetime('now','localtime')),
+            PRIMARY KEY (product_id, supplier_id),
+            FOREIGN KEY(product_id) REFERENCES product(id),
+            FOREIGN KEY(supplier_id) REFERENCES supplier(id)
+        )",
+    )
+    .execute(pool)
+    .await;
 
     // 价格策略表初始化为空表：不再从 product_price 自动迁移。
     // 由用户按实际情况在【价格策略】页面手动录入各商品各时段的价格。
@@ -1609,6 +1635,53 @@ pub async fn init_tables(pool: &SqlitePool) -> Result<(), anyhow::Error> {
         ).execute(pool).await;
         let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_sm_order_date ON stock_movement(product_id, order_date)").execute(pool).await;
         let _ = sqlx::query("PRAGMA user_version = 12").execute(pool).await;
+    }
+
+    // v13：product_price_schedule 增加 supplier_id / purchaser_id，支持供应商约定采购价和采购单位约定售价。
+    // 旧表有表级 UNIQUE(product_id, price_type, effective_date)，SQLite 无法直接 DROP CONSTRAINT，需重建表。
+    if version < 13 {
+        // 检查 supplier_id 列是否已存在（幂等保护）
+        let cols: Vec<(String,)> = sqlx::query_as("SELECT name FROM pragma_table_info('product_price_schedule')")
+            .fetch_all(pool).await.unwrap_or_default();
+        let has_supplier_col = cols.iter().any(|(n,)| n == "supplier_id");
+        if !has_supplier_col {
+            // 重建表
+            let _ = sqlx::query(
+                "CREATE TABLE product_price_schedule_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    product_id INTEGER NOT NULL,
+                    price_type TEXT NOT NULL,
+                    price REAL NOT NULL DEFAULT 0,
+                    effective_date TEXT NOT NULL,
+                    end_date TEXT,
+                    source TEXT,
+                    remark TEXT,
+                    create_at DATETIME DEFAULT (datetime('now','localtime')),
+                    supplier_id INTEGER,
+                    purchaser_id INTEGER,
+                    FOREIGN KEY(product_id) REFERENCES product(id),
+                    FOREIGN KEY(supplier_id) REFERENCES supplier(id),
+                    FOREIGN KEY(purchaser_id) REFERENCES purchaser(id)
+                )"
+            ).execute(pool).await;
+            let _ = sqlx::query(
+                "INSERT INTO product_price_schedule_new (id, product_id, price_type, price, effective_date, end_date, source, remark, create_at)
+                 SELECT id, product_id, price_type, price, effective_date, end_date, source, remark, create_at
+                 FROM product_price_schedule"
+            ).execute(pool).await;
+            let _ = sqlx::query("DROP TABLE product_price_schedule").execute(pool).await;
+            let _ = sqlx::query("ALTER TABLE product_price_schedule_new RENAME TO product_price_schedule").execute(pool).await;
+            // 创建新唯一索引（COALESCE NULL→0）和辅助索引
+            let _ = sqlx::query(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_pps_unique
+                 ON product_price_schedule(product_id, price_type, effective_date, COALESCE(supplier_id,0), COALESCE(purchaser_id,0))"
+            ).execute(pool).await;
+            let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_pps_product_type ON product_price_schedule(product_id, price_type, effective_date)").execute(pool).await;
+            let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_pps_effective ON product_price_schedule(effective_date)").execute(pool).await;
+            let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_pps_supplier ON product_price_schedule(supplier_id) WHERE supplier_id IS NOT NULL").execute(pool).await;
+            let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_pps_purchaser ON product_price_schedule(purchaser_id) WHERE purchaser_id IS NOT NULL").execute(pool).await;
+        }
+        let _ = sqlx::query("PRAGMA user_version = 13").execute(pool).await;
     }
 
     Ok(())

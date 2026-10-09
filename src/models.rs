@@ -107,6 +107,7 @@ pub struct PriceScheduleReq {
     pub id: Option<i64>,
     pub product_id: i64,
     /// gov_procurement / supermarket_1 / supermarket_2 / supermarket_3 / ai_realtime
+    /// / supplier_contract（供应商约定采购价）/ purchaser_contract（采购单位约定售价）
     pub price_type: String,
     pub price: f64,
     /// 生效日期 'YYYY-MM-DD'，含；该价格自此日期开始生效
@@ -116,6 +117,12 @@ pub struct PriceScheduleReq {
     pub end_date: Option<String>,
     pub source: Option<String>,
     pub remark: Option<String>,
+    /// supplier_contract 时必填：约定采购价的供应商
+    #[serde(default)]
+    pub supplier_id: Option<i64>,
+    /// purchaser_contract 时必填：约定售价的采购单位
+    #[serde(default)]
+    pub purchaser_id: Option<i64>,
 }
 
 /// 批量导入价格策略：用于 Excel 批量录入政采价/超市比价

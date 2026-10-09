@@ -7440,6 +7440,172 @@ pub async fn api_query_product_price_trend(
     })).unwrap()).into_response()
 }
 
+/// 采购比价：按供应商聚合历史采购价，返回加权均价/最近单价/区间/次数
+/// 同时读取 product_supplier_price（今日采集价），今日价优先于历史价作为"最近单价"
+pub async fn api_query_purchase_price_compare(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let product_id: i64 = match params.get("product_id").and_then(|s| s.parse().ok()) {
+        Some(v) => v,
+        None => return (StatusCode::BAD_REQUEST, r#"{"error":"missing product_id"}"#.to_string()).into_response(),
+    };
+
+    let product_row = sqlx::query("SELECT name, base_unit FROM product WHERE id = ?")
+        .bind(product_id)
+        .fetch_optional(crate::db::pool())
+        .await
+        .ok()
+        .flatten();
+    let (product_name, base_unit): (String, String) = match product_row {
+        Some(r) => (r.get("name"), r.get("base_unit")),
+        None => return (StatusCode::NOT_FOUND, r#"{"error":"product not found"}"#.to_string()).into_response(),
+    };
+
+    // 1) 历史采购订单明细
+    let sql = "SELECT po.order_date as date, poi.unit_price as price, poi.unit as unit,
+                     poi.base_quantity as bq, poi.quantity as qty, poi.amount as amount,
+                     s.id as supplier_id, s.name as supplier_name
+              FROM purchase_order_item poi
+              JOIN purchase_order po ON poi.order_id = po.id
+              JOIN supplier s ON po.supplier_id = s.id
+              WHERE poi.product_id = ?
+              ORDER BY po.order_date DESC";
+    let rows = sqlx::query(sql)
+        .bind(product_id)
+        .fetch_all(crate::db::pool())
+        .await
+        .unwrap_or_default();
+
+    // 2) 今日采集价（分供应商）
+    let today_rows = sqlx::query(
+        "SELECT psp.supplier_id, s.name as supplier_name, psp.price, psp.updated_at
+         FROM product_supplier_price psp
+         JOIN supplier s ON psp.supplier_id = s.id
+         WHERE psp.product_id = ?"
+    )
+    .bind(product_id)
+    .fetch_all(crate::db::pool())
+    .await
+    .unwrap_or_default();
+
+    // 按供应商聚合：首条=最近采购（DESC），加权均价=sum(base_unit_price*weight)/sum(weight)
+    // Vec<(supplier_name, date, unit_price, unit, base_unit_price, weight)>
+    let mut by_supplier: std::collections::HashMap<i64, Vec<(String, String, f64, String, f64, f64)>> = std::collections::HashMap::new();
+    for r in &rows {
+        let sid: i64 = r.get("supplier_id");
+        let sname: String = r.get("supplier_name");
+        let date: String = r.get("date");
+        let unit: String = r.get("unit");
+        let unit_price: f64 = r.get("price");
+        let bqv: Option<f64> = r.get("bq");
+        let qty: Option<f64> = r.get("qty");
+        let amount: Option<f64> = r.get("amount");
+        let bq_val = bqv.unwrap_or(0.0);
+        let qty_val = qty.unwrap_or(0.0);
+        let amt_val = amount.unwrap_or(0.0);
+        let base_unit_price = if unit == base_unit {
+            unit_price
+        } else if bq_val > 0.0 {
+            if amt_val > 0.0 { amt_val / bq_val } else { unit_price }
+        } else {
+            continue;
+        };
+        let weight = if bq_val > 0.0 { bq_val } else if unit == base_unit { qty_val } else { 0.0 };
+        by_supplier.entry(sid).or_default().push((sname, date, unit_price, unit, base_unit_price, weight));
+    }
+
+    // 今日采集价：supplier_id -> (supplier_name, price, updated_at)
+    let mut today_map: std::collections::HashMap<i64, (String, f64, String)> = std::collections::HashMap::new();
+    for r in &today_rows {
+        let sid: i64 = r.get("supplier_id");
+        let sname: String = r.get("supplier_name");
+        let price: f64 = r.get("price");
+        let updated_at: String = r.get("updated_at");
+        today_map.insert(sid, (sname, price, updated_at));
+    }
+
+    let mut suppliers: Vec<serde_json::Value> = Vec::new();
+    // 合并：有历史订单的供应商 + 仅有今日采集价的供应商
+    let mut all_sids: std::collections::HashSet<i64> = by_supplier.keys().cloned().collect();
+    for sid in today_map.keys() { all_sids.insert(*sid); }
+
+    for sid in all_sids {
+        let (sname, today_price, today_updated) = today_map.get(&sid)
+            .map(|(n, p, d)| (n.clone(), *p, d.clone()))
+            .unwrap_or_else(|| (String::new(), 0.0, String::new()));
+        let sname = if !sname.is_empty() { sname } else {
+            by_supplier.get(&sid).and_then(|v| v.first()).map(|e| e.0.clone()).unwrap_or_else(|| format!("供应商{}", sid))
+        };
+
+        if let Some(entries) = by_supplier.get(&sid) {
+            let first = &entries[0];
+            let mut sum_weighted = 0.0;
+            let mut sum_weight = 0.0;
+            let mut min_price = f64::MAX;
+            let mut max_price = f64::MIN;
+            for e in entries {
+                sum_weighted += e.4 * e.5;
+                sum_weight += e.5;
+                if e.4 < min_price { min_price = e.4; }
+                if e.4 > max_price { max_price = e.4; }
+            }
+            let avg = if sum_weight > 0.0 { sum_weighted / sum_weight } else { 0.0 };
+            suppliers.push(serde_json::json!({
+                "supplier_id": sid,
+                "supplier_name": sname,
+                "last_date": first.1,
+                "last_unit_price": first.2,
+                "last_unit": first.3,
+                "last_base_unit_price": first.4,
+                "avg_price": (avg * 100.0).round() / 100.0,
+                "min_price": if min_price == f64::MAX { 0.0 } else { min_price },
+                "max_price": if max_price == f64::MIN { 0.0 } else { max_price },
+                "order_count": entries.len(),
+                "today_price": today_price,
+                "today_updated": today_updated,
+            }));
+        } else {
+            // 仅有今日采集价，无历史订单
+            suppliers.push(serde_json::json!({
+                "supplier_id": sid,
+                "supplier_name": sname,
+                "last_date": "",
+                "last_unit_price": 0.0,
+                "last_unit": "",
+                "last_base_unit_price": 0.0,
+                "avg_price": 0.0,
+                "min_price": 0.0,
+                "max_price": 0.0,
+                "order_count": 0,
+                "today_price": today_price,
+                "today_updated": today_updated,
+            }));
+        }
+    }
+
+    // 排序：有今日价的优先按今日价升序，否则按加权均价升序
+    suppliers.sort_by(|a, b| {
+        let pa = if a["today_price"].as_f64().unwrap_or(0.0) > 0.0 {
+            a["today_price"].as_f64().unwrap()
+        } else {
+            a["avg_price"].as_f64().unwrap_or(0.0)
+        };
+        let pb = if b["today_price"].as_f64().unwrap_or(0.0) > 0.0 {
+            b["today_price"].as_f64().unwrap()
+        } else {
+            b["avg_price"].as_f64().unwrap_or(0.0)
+        };
+        pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    (StatusCode::OK, serde_json::to_string(&serde_json::json!({
+        "product_id": product_id,
+        "product_name": product_name,
+        "base_unit": base_unit,
+        "suppliers": suppliers,
+    })).unwrap()).into_response()
+}
+
 pub async fn api_query_sales_price(axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     let product_name = params.get("product_name").map(|s| s.as_str()).unwrap_or("");
     let product_id = params.get("product_id").map(|s| s.as_str()).unwrap_or("");
@@ -8262,8 +8428,12 @@ pub async fn api_sales_order_generate_purchase(
     // 取销售订单明细（含销售单位 unit、备注）
     // ORDER BY soi.product_name, soi.id 使采购订单明细顺序与供应商分拣导出一致（按品名排序）
     let item_rows = sqlx::query(
-        "SELECT soi.product_id, soi.product_name, soi.alias1, soi.alias2, soi.spec, soi.unit, soi.quantity, soi.pre_sale_quantity, soi.supplier_id, soi.supplier_name, soi.remark, p.purchase_price, p.base_unit, p.base_price
-         FROM sales_order_item soi LEFT JOIN product p ON soi.product_id = p.id
+        "SELECT soi.product_id, soi.product_name, soi.alias1, soi.alias2, soi.spec, soi.unit, soi.quantity, soi.pre_sale_quantity, soi.supplier_id, soi.supplier_name, soi.remark,
+                COALESCE(psp.price, p.purchase_price) as purchase_price,
+                p.base_unit, p.base_price
+         FROM sales_order_item soi
+         LEFT JOIN product p ON soi.product_id = p.id
+         LEFT JOIN product_supplier_price psp ON psp.product_id = soi.product_id AND psp.supplier_id = soi.supplier_id
          WHERE soi.order_id = ?
          ORDER BY soi.product_name, soi.id"
     )
@@ -13146,11 +13316,13 @@ pub async fn api_product_today_price_items(
                 MAX(p.purchase_price) as purchase_price,
                 MAX(p.max_purchase_price) as max_purchase_price,
                 MAX(p.min_purchase_price) as min_purchase_price,
+                MAX(psp.price) as supplier_price,
                 SUM(soi.quantity) as total_qty
          FROM sales_order_item soi
          LEFT JOIN sales_order so ON soi.order_id = so.id
          LEFT JOIN supplier s ON soi.supplier_id = s.id
          LEFT JOIN product p ON soi.product_id = p.id
+         LEFT JOIN product_supplier_price psp ON psp.product_id = soi.product_id AND psp.supplier_id = soi.supplier_id
          {} AND soi.product_id > 0
          GROUP BY soi.supplier_id, soi.product_id
          ORDER BY MAX(s.name), soi.supplier_id, MAX(soi.product_name), soi.product_id", where_sql
@@ -13178,6 +13350,7 @@ pub async fn api_product_today_price_items(
             "purchase_price": r.get::<Option<f64>, _>("purchase_price").unwrap_or(0.0),
             "max_purchase_price": r.get::<Option<f64>, _>("max_purchase_price").unwrap_or(0.0),
             "min_purchase_price": r.get::<Option<f64>, _>("min_purchase_price").unwrap_or(0.0),
+            "supplier_price": r.get::<Option<f64>, _>("supplier_price").unwrap_or(0.0),
         });
         let entry = supplier_map.entry(supplier_id).or_insert_with(|| (supplier_name.clone(), Vec::new()));
         entry.1.push(item);
@@ -13212,11 +13385,31 @@ pub async fn api_product_today_price_save(
     let mut updated = 0i64;
     for item in items {
         let product_id = item.get("product_id").and_then(|v| v.as_i64());
+        let supplier_id = item.get("supplier_id").and_then(|v| v.as_i64());
         let price = item.get("price").and_then(|v| v.as_f64());
-        if let (Some(pid), Some(price)) = (product_id, price) {
-            if pid <= 0 || price <= 0.0 {
+        if let (Some(pid), Some(sid), Some(price)) = (product_id, supplier_id, price) {
+            if pid <= 0 || sid <= 0 || price <= 0.0 {
                 continue;
             }
+            // 进价统一四舍五入保留两位小数
+            let price = (price * 100.0).round() / 100.0;
+
+            // 1) 写入分供应商价表（UPSERT，同一商品同一供应商唯一）
+            let psp_res = sqlx::query(
+                "INSERT INTO product_supplier_price(product_id, supplier_id, price, updated_at)
+                 VALUES (?, ?, ?, datetime('now','localtime'))
+                 ON CONFLICT(product_id, supplier_id) DO UPDATE SET price = excluded.price, updated_at = excluded.updated_at"
+            )
+            .bind(pid)
+            .bind(sid)
+            .bind(price)
+            .execute(crate::db::pool())
+            .await;
+            if psp_res.is_err() {
+                continue;
+            }
+
+            // 2) 同步更新 product.purchase_price（全局回退价）及 max/min 区间
             let row = sqlx::query(
                 "SELECT purchase_price, max_purchase_price, min_purchase_price FROM product WHERE id = ?"
             )
@@ -13228,8 +13421,6 @@ pub async fn api_product_today_price_save(
                 let old_purchase: f64 = r.get("purchase_price");
                 let old_max: f64 = r.get("max_purchase_price");
                 let old_min: f64 = r.get("min_purchase_price");
-                // 进价统一四舍五入保留两位小数
-                let price = (price * 100.0).round() / 100.0;
                 let new_max = ((if old_max > 0.0 { old_max.max(price) } else { price }) * 100.0).round() / 100.0;
                 let new_min = ((if old_min > 0.0 { old_min.min(price) } else { price }) * 100.0).round() / 100.0;
                 let res = sqlx::query(
@@ -13280,11 +13471,13 @@ pub async fn api_product_today_price_excel(
                 MAX(p.purchase_price) as purchase_price,
                 MAX(p.max_purchase_price) as max_purchase_price,
                 MAX(p.min_purchase_price) as min_purchase_price,
+                MAX(psp.price) as supplier_price,
                 SUM(soi.quantity) as total_qty
          FROM sales_order_item soi
          LEFT JOIN sales_order so ON soi.order_id = so.id
          LEFT JOIN supplier s ON soi.supplier_id = s.id
          LEFT JOIN product p ON soi.product_id = p.id
+         LEFT JOIN product_supplier_price psp ON psp.product_id = soi.product_id AND psp.supplier_id = soi.supplier_id
          {} AND soi.product_id > 0
          GROUP BY soi.supplier_id, soi.product_id
          ORDER BY MAX(s.name), soi.supplier_id, MAX(soi.product_name), soi.product_id", where_sql
@@ -13511,11 +13704,13 @@ pub async fn api_product_today_price_a4(
                 MAX(p.purchase_price) as purchase_price,
                 MAX(p.max_purchase_price) as max_purchase_price,
                 MAX(p.min_purchase_price) as min_purchase_price,
+                MAX(psp.price) as supplier_price,
                 SUM(soi.quantity) as total_qty
          FROM sales_order_item soi
          LEFT JOIN sales_order so ON soi.order_id = so.id
          LEFT JOIN supplier s ON soi.supplier_id = s.id
          LEFT JOIN product p ON soi.product_id = p.id
+         LEFT JOIN product_supplier_price psp ON psp.product_id = soi.product_id AND psp.supplier_id = soi.supplier_id
          {} AND soi.product_id > 0
          GROUP BY soi.supplier_id, soi.product_id
          ORDER BY MAX(s.name), soi.supplier_id, MAX(soi.product_name), soi.product_id", where_sql
@@ -15264,6 +15459,8 @@ const PRICE_SCHEDULE_TYPES: &[&str] = &[
     "supermarket_2",
     "supermarket_3",
     "ai_realtime",
+    "supplier_contract",
+    "purchaser_contract",
 ];
 
 fn is_valid_price_type(price_type: &str) -> bool {
@@ -15281,6 +15478,20 @@ fn validate_price_schedule_req(req: &PriceScheduleReq) -> Option<String> {
             req.price_type,
             PRICE_SCHEDULE_TYPES.join(", ")
         ));
+    }
+    // 约定价必须指定对应方
+    if req.price_type == "supplier_contract" && req.supplier_id.unwrap_or(0) <= 0 {
+        return Some("供应商约定采购价必须选择供应商".to_string());
+    }
+    if req.price_type == "purchaser_contract" && req.purchaser_id.unwrap_or(0) <= 0 {
+        return Some("采购单位约定售价必须选择采购单位".to_string());
+    }
+    // 通用价格类型不应带 supplier_id / purchaser_id
+    if req.price_type != "supplier_contract" && req.supplier_id.is_some() {
+        return Some("仅供应商约定采购价可指定 supplier_id".to_string());
+    }
+    if req.price_type != "purchaser_contract" && req.purchaser_id.is_some() {
+        return Some("仅采购单位约定售价可指定 purchaser_id".to_string());
     }
     if !crate::is_valid_date_str(&req.effective_date) {
         return Some(format!("effective_date 格式错误：{}", req.effective_date));
@@ -15316,8 +15527,8 @@ pub async fn api_price_schedule_create(
     // 价格统一四舍五入保留两位小数
     let price = (req.price * 100.0).round() / 100.0;
     let result = sqlx::query(
-        "INSERT INTO product_price_schedule(product_id, price_type, price, effective_date, end_date, source, remark)
-         VALUES (?, ?, ?, ?, NULL, ?, ?)"
+        "INSERT INTO product_price_schedule(product_id, price_type, price, effective_date, end_date, source, remark, supplier_id, purchaser_id)
+         VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)"
     )
     .bind(req.product_id)
     .bind(&req.price_type)
@@ -15325,6 +15536,8 @@ pub async fn api_price_schedule_create(
     .bind(&req.effective_date)
     .bind(&req.source)
     .bind(&req.remark)
+    .bind(req.supplier_id)
+    .bind(req.purchaser_id)
     .execute(crate::db::pool())
     .await;
     match result {
@@ -15414,7 +15627,7 @@ pub async fn api_price_schedule_update(
 
     let result = sqlx::query(
         "UPDATE product_price_schedule
-         SET price = ?, remark = ?, source = ?, price_type = ?, effective_date = ?
+         SET price = ?, remark = ?, source = ?, price_type = ?, effective_date = ?, supplier_id = ?, purchaser_id = ?
          WHERE id = ?"
     )
     .bind(req.price)
@@ -15422,6 +15635,8 @@ pub async fn api_price_schedule_update(
     .bind(&req.source)
     .bind(&req.price_type)
     .bind(&req.effective_date)
+    .bind(req.supplier_id)
+    .bind(req.purchaser_id)
     .bind(id)
     .execute(crate::db::pool())
     .await;
@@ -15575,11 +15790,16 @@ pub async fn api_price_schedule_list(
     }
     let total: i64 = count_q.fetch_one(crate::db::pool()).await.unwrap_or(0);
 
-    // 列表：与 product JOIN 一次性带回商品名（前端展示需要）
+    // 列表：与 product / supplier / purchaser JOIN 一次性带回名称（前端展示需要）
     let mut list_sql = format!(
         "SELECT pps.id, pps.product_id, p.name as product_name, p.spec, p.unit, p.alias1, p.alias2,
-                pps.price_type, pps.price, pps.effective_date, pps.end_date, pps.source, pps.remark, pps.create_at
-         FROM product_price_schedule pps LEFT JOIN product p ON pps.product_id = p.id{}",
+                pps.price_type, pps.price, pps.effective_date, pps.end_date, pps.source, pps.remark, pps.create_at,
+                pps.supplier_id, pps.purchaser_id,
+                s.name as supplier_name, pu.name as purchaser_name
+         FROM product_price_schedule pps
+         LEFT JOIN product p ON pps.product_id = p.id
+         LEFT JOIN supplier s ON pps.supplier_id = s.id
+         LEFT JOIN purchaser pu ON pps.purchaser_id = pu.id{}",
         where_sql
     );
     list_sql.push_str(" ORDER BY pps.effective_date DESC, pps.id DESC LIMIT ? OFFSET ?");
@@ -15606,6 +15826,10 @@ pub async fn api_price_schedule_list(
             "source": r.get::<Option<String>, _>("source"),
             "remark": r.get::<Option<String>, _>("remark"),
             "create_at": r.get::<Option<String>, _>("create_at"),
+            "supplier_id": r.get::<Option<i64>, _>("supplier_id"),
+            "purchaser_id": r.get::<Option<i64>, _>("purchaser_id"),
+            "supplier_name": r.get::<Option<String>, _>("supplier_name").unwrap_or_default(),
+            "purchaser_name": r.get::<Option<String>, _>("purchaser_name").unwrap_or_default(),
         })
     }).collect();
 
@@ -15655,20 +15879,36 @@ pub async fn api_price_schedule_batch_import(
         // 价格统一四舍五入保留两位小数
         let price = (it.price * 100.0).round() / 100.0;
         if policy == "upsert" {
-            let result = sqlx::query(
-                "INSERT INTO product_price_schedule(product_id, price_type, price, effective_date, end_date, source, remark)
-                 VALUES (?, ?, ?, ?, NULL, ?, ?)
-                 ON CONFLICT(product_id, price_type, effective_date) DO UPDATE SET
-                   price = excluded.price, source = excluded.source, remark = excluded.remark"
+            // 手动 upsert：先查同维度记录是否存在（批量导入仅处理通用价格类型，supplier_id/purchaser_id 均为 NULL）
+            let existing_id: Option<i64> = sqlx::query_scalar(
+                "SELECT id FROM product_price_schedule
+                 WHERE product_id = ? AND price_type = ? AND effective_date = ?
+                   AND supplier_id IS NULL AND purchaser_id IS NULL"
             )
             .bind(it.product_id)
             .bind(&it.price_type)
-            .bind(price)
             .bind(&it.effective_date)
-            .bind(&it.source)
-            .bind(&it.remark)
-            .execute(crate::db::pool())
-            .await;
+            .fetch_optional(crate::db::pool())
+            .await
+            .ok()
+            .flatten();
+            let result = if let Some(eid) = existing_id {
+                sqlx::query("UPDATE product_price_schedule SET price = ?, source = ?, remark = ? WHERE id = ?")
+                    .bind(price).bind(&it.source).bind(&it.remark).bind(eid)
+                    .execute(crate::db::pool()).await
+            } else {
+                sqlx::query(
+                    "INSERT INTO product_price_schedule(product_id, price_type, price, effective_date, end_date, source, remark, supplier_id, purchaser_id)
+                     VALUES (?, ?, ?, ?, NULL, ?, ?, NULL, NULL)"
+                )
+                .bind(it.product_id)
+                .bind(&it.price_type)
+                .bind(price)
+                .bind(&it.effective_date)
+                .bind(&it.source)
+                .bind(&it.remark)
+                .execute(crate::db::pool()).await
+            };
             match result {
                 Ok(_) => {
                     inserted += 1;
@@ -15681,7 +15921,8 @@ pub async fn api_price_schedule_batch_import(
         } else {
             // ignore 策略：先查存在
             let exists: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM product_price_schedule WHERE product_id = ? AND price_type = ? AND effective_date = ?"
+                "SELECT COUNT(*) FROM product_price_schedule WHERE product_id = ? AND price_type = ? AND effective_date = ?
+                 AND supplier_id IS NULL AND purchaser_id IS NULL"
             )
             .bind(it.product_id)
             .bind(&it.price_type)
@@ -15694,8 +15935,8 @@ pub async fn api_price_schedule_batch_import(
                 continue;
             }
             let result = sqlx::query(
-                "INSERT INTO product_price_schedule(product_id, price_type, price, effective_date, end_date, source, remark)
-                 VALUES (?, ?, ?, ?, NULL, ?, ?)"
+                "INSERT INTO product_price_schedule(product_id, price_type, price, effective_date, end_date, source, remark, supplier_id, purchaser_id)
+                 VALUES (?, ?, ?, ?, NULL, ?, ?, NULL, NULL)"
             )
             .bind(it.product_id)
             .bind(&it.price_type)
@@ -15814,8 +16055,13 @@ pub async fn api_price_schedule_get(
     }
     let row_opt = sqlx::query(
         "SELECT pps.id, pps.product_id, p.name as product_name, p.spec, p.unit, p.alias1, p.alias2,
-                pps.price_type, pps.price, pps.effective_date, pps.end_date, pps.source, pps.remark, pps.create_at
-         FROM product_price_schedule pps LEFT JOIN product p ON pps.product_id = p.id
+                pps.price_type, pps.price, pps.effective_date, pps.end_date, pps.source, pps.remark, pps.create_at,
+                pps.supplier_id, pps.purchaser_id,
+                s.name as supplier_name, pu.name as purchaser_name
+         FROM product_price_schedule pps
+         LEFT JOIN product p ON pps.product_id = p.id
+         LEFT JOIN supplier s ON pps.supplier_id = s.id
+         LEFT JOIN purchaser pu ON pps.purchaser_id = pu.id
          WHERE pps.id = ?"
     )
     .bind(id)
@@ -15840,6 +16086,10 @@ pub async fn api_price_schedule_get(
                 "source": r.get::<Option<String>, _>("source"),
                 "remark": r.get::<Option<String>, _>("remark"),
                 "create_at": r.get::<Option<String>, _>("create_at"),
+                "supplier_id": r.get::<Option<i64>, _>("supplier_id"),
+                "purchaser_id": r.get::<Option<i64>, _>("purchaser_id"),
+                "supplier_name": r.get::<Option<String>, _>("supplier_name").unwrap_or_default(),
+                "purchaser_name": r.get::<Option<String>, _>("purchaser_name").unwrap_or_default(),
             });
             (StatusCode::OK, serde_json::json!({"success": true, "data": item}).to_string()).into_response()
         }
@@ -15869,7 +16119,7 @@ pub async fn api_price_schedule_diagnose(
         .flatten()
         .unwrap_or_default();
     let rows = sqlx::query(
-        "SELECT id, price_type, price, effective_date, end_date, source, remark
+        "SELECT id, price_type, price, effective_date, end_date, source, remark, supplier_id, purchaser_id
          FROM product_price_schedule
          WHERE product_id = ?
          ORDER BY price_type ASC, effective_date ASC, id ASC"
@@ -15888,6 +16138,8 @@ pub async fn api_price_schedule_diagnose(
             "end_date": r.get::<Option<String>, _>("end_date"),
             "source": r.get::<Option<String>, _>("source"),
             "remark": r.get::<Option<String>, _>("remark"),
+            "supplier_id": r.get::<Option<i64>, _>("supplier_id"),
+            "purchaser_id": r.get::<Option<i64>, _>("purchaser_id"),
         });
         types
             .entry(pt)
@@ -15959,6 +16211,7 @@ pub async fn api_price_schedule_lookup_batch(
 }
 
 /// 按指定日期查询商品在某 price_type 下的生效价（用于销售单录入页"按日期加载价"）
+/// 约定价类型需额外传 supplier_id 或 purchaser_id
 pub async fn api_price_schedule_lookup(
     headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -15976,7 +16229,26 @@ pub async fn api_price_schedule_lookup(
             "matched": false, "price": 0.0, "effective_date": null
         })).unwrap()).into_response();
     }
-    match crate::lookup_effective_price(product_id, &price_type, &query_date).await {
+
+    // 约定价走独立查询函数
+    let found = if price_type == "supplier_contract" || price_type == "purchaser_contract" {
+        let party_id: i64 = if price_type == "supplier_contract" {
+            params.get("supplier_id").and_then(|s| s.parse().ok()).unwrap_or(0)
+        } else {
+            params.get("purchaser_id").and_then(|s| s.parse().ok()).unwrap_or(0)
+        };
+        if party_id <= 0 {
+            return (StatusCode::OK, serde_json::to_string(&serde_json::json!({
+                "matched": false, "price": 0.0, "effective_date": null,
+                "message": if price_type == "supplier_contract" { "缺少 supplier_id" } else { "缺少 purchaser_id" }
+            })).unwrap()).into_response();
+        }
+        crate::lookup_contract_price(product_id, &price_type, party_id, &query_date).await
+    } else {
+        crate::lookup_effective_price(product_id, &price_type, &query_date).await
+    };
+
+    match found {
         Some((price, schedule_id, eff_date)) => {
             let result = serde_json::json!({
                 "matched": price > 0.0,
@@ -16498,6 +16770,8 @@ pub async fn api_price_schedule_batch_import_excel(
             end_date: None,
             source: Some("excel_import".to_string()),
             remark: if remark.is_empty() { None } else { Some(remark) },
+            supplier_id: None,
+            purchaser_id: None,
         });
         // 抑制未用 unit 警告：单位列仅用于辅助展示，不写入 schedule
         let _ = unit;

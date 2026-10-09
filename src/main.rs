@@ -287,9 +287,9 @@ pub(crate) async fn rebuild_price_schedule_end_dates(
     product_id: i64,
     price_type: &str,
 ) -> Result<(), String> {
-    // 拉取该 (product, price_type) 下所有时段
+    // 拉取该 (product, price_type) 下所有时段，含 supplier_id / purchaser_id 用于分组
     let rows = sqlx::query(
-        "SELECT id, effective_date FROM product_price_schedule
+        "SELECT id, effective_date, supplier_id, purchaser_id FROM product_price_schedule
          WHERE product_id = ? AND price_type = ?
          ORDER BY effective_date ASC, id ASC"
     )
@@ -299,28 +299,30 @@ pub(crate) async fn rebuild_price_schedule_end_dates(
     .await
     .map_err(|e| format!("查询时段失败: {}", e))?;
 
-    let dates: Vec<(i64, String)> = rows
-        .into_iter()
-        .map(|r| (r.get::<i64, _>("id"), r.get::<String, _>("effective_date")))
-        .collect();
+    // 按 (supplier_id, purchaser_id) 分组，每组独立维护时段连续性
+    let mut groups: std::collections::HashMap<(Option<i64>, Option<i64>), Vec<(i64, String)>> = std::collections::HashMap::new();
+    for r in rows {
+        let sid: Option<i64> = r.get("supplier_id");
+        let pid: Option<i64> = r.get("purchaser_id");
+        let id: i64 = r.get("id");
+        let date: String = r.get("effective_date");
+        groups.entry((sid, pid)).or_default().push((id, date));
+    }
 
     // 逐条重写 end_date
-    for (i, (id, _)) in dates.iter().enumerate() {
-        let next_date: Option<String> = if i + 1 < dates.len() {
-            Some(dates[i + 1].1.clone())
-        } else {
-            None
-        };
-        // 计算当前记录应填的 end_date：= 下一条 effective_date
-        // 注意：end_date 在 SQL 语义上为"不含"，但本系统对用户输入时表示"含"
-        // （详见 PriceScheduleReq.end_date 文档）。这里我们存的是"下一条 effective_date"，
-        // 匹配时使用 "effective_date <= query_date AND (end_date IS NULL OR query_date < end_date)"
-        // 这样 end_date 是"开区间上界"——避免相邻时段重叠。
-        let _ = sqlx::query("UPDATE product_price_schedule SET end_date = ? WHERE id = ?")
-            .bind(&next_date)
-            .bind(id)
-            .execute(crate::db::pool())
-            .await;
+    for (_key, dates) in &groups {
+        for (i, (id, _)) in dates.iter().enumerate() {
+            let next_date: Option<String> = if i + 1 < dates.len() {
+                Some(dates[i + 1].1.clone())
+            } else {
+                None
+            };
+            let _ = sqlx::query("UPDATE product_price_schedule SET end_date = ? WHERE id = ?")
+                .bind(&next_date)
+                .bind(id)
+                .execute(crate::db::pool())
+                .await;
+        }
     }
     Ok(())
 }
@@ -407,6 +409,42 @@ pub(crate) async fn batch_lookup_effective_prices(
         }
     }
     map
+}
+
+/// 查询供应商约定采购价或采购单位约定售价。
+/// price_type = "supplier_contract" 时 party_id 为 supplier_id；
+/// price_type = "purchaser_contract" 时 party_id 为 purchaser_id。
+pub(crate) async fn lookup_contract_price(
+    product_id: i64,
+    price_type: &str,
+    party_id: i64,
+    query_date: &str,
+) -> Option<(f64, i64, String)> {
+    let party_col = if price_type == "supplier_contract" { "supplier_id" } else { "purchaser_id" };
+    let sql = format!(
+        "SELECT id, price, effective_date FROM product_price_schedule
+         WHERE product_id = ? AND price_type = ? AND {col} = ?
+           AND effective_date <= ?
+           AND (end_date IS NULL OR end_date > ?)
+         ORDER BY effective_date DESC, id DESC
+         LIMIT 1",
+        col = party_col
+    );
+    let row = sqlx::query(AssertSqlSafe(sql.as_str()))
+        .bind(product_id)
+        .bind(price_type)
+        .bind(party_id)
+        .bind(query_date)
+        .bind(query_date)
+        .fetch_optional(crate::db::pool())
+        .await
+        .ok()
+        .flatten()?;
+    Some((
+        row.get::<f64, _>("price"),
+        row.get::<i64, _>("id"),
+        row.get::<String, _>("effective_date"),
+    ))
 }
 
 // 记录价格变更日志（price_type: purchase_price / base_price）
@@ -2253,6 +2291,7 @@ fn build_router() -> Router {
         .route("/api/query/sales_price", get(api_query_sales_price))
         .route("/api/query/sales_price/export", get(api_query_sales_price_export))
         .route("/api/query/product_price_trend", get(api_query_product_price_trend))
+        .route("/api/query/purchase_price_compare", get(api_query_purchase_price_compare))
         .route("/api/query/sales_summary", get(api_query_sales_summary))
         .route("/api/query/sales_summary/export", get(api_query_sales_summary_export))
         .route("/api/query/purchaser_balance", get(api_query_purchaser_balance))
