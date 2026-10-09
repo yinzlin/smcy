@@ -7251,11 +7251,14 @@ pub async fn api_query_product_price_trend(
 
     // 构造 IN 列表
     let placeholders = same_base_products.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-    // 备注：早期版本曾尝试在 SQL 内做单位换算匹配，因实现复杂改为在应用层按 base_unit 过滤
+    // 3) 采购明细：JOIN supplier 取供应商名称，按日聚合加权均价
     let purchase_sql = format!(
-        "SELECT po.order_date as date, poi.unit_price as price, poi.unit as unit, poi.base_quantity as bq, poi.quantity as qty, poi.amount as amount
+        "SELECT po.order_date as date, poi.unit_price as price, poi.unit as unit,
+                poi.base_quantity as bq, poi.quantity as qty, poi.amount as amount,
+                s.name as supplier_name
          FROM purchase_order_item poi
          JOIN purchase_order po ON poi.order_id = po.id
+         JOIN supplier s ON po.supplier_id = s.id
          WHERE poi.product_id IN ({})
          {} {}
          ORDER BY po.order_date ASC",
@@ -7269,35 +7272,84 @@ pub async fn api_query_product_price_trend(
     }
     let purchase_rows = purchase_q.fetch_all(crate::db::pool()).await.unwrap_or_default();
 
-    // 换算为基础单位单价：基础单位单价 = amount / base_quantity（若 base_quantity>0）；否则 unit_price（仅在 unit == base_unit 时）
-    let mut purchase_points: Vec<serde_json::Value> = Vec::new();
+    // 按日期聚合：加权均价 = sum(base_unit_price * weight) / sum(weight)
+    // weight = base_quantity（>0 时），否则 unit==base_unit 时用 quantity
+    let mut purchase_by_date: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
     for r in &purchase_rows {
         let date: String = r.get("date");
         let unit: String = r.get("unit");
         let unit_price: f64 = r.get("price");
-        let bq: Option<f64> = r.get("bq");
+        let bqv: Option<f64> = r.get("bq");
         let qty: Option<f64> = r.get("qty");
         let amount: Option<f64> = r.get("amount");
+        let supplier_name: String = r.get("supplier_name");
+        let bq_val = bqv.unwrap_or(0.0);
+        let qty_val = qty.unwrap_or(0.0);
+        let amt_val = amount.unwrap_or(0.0);
         let base_unit_price = if unit == base_unit {
             unit_price
-        } else if let (Some(bqv), Some(_qv), Some(av)) = (bq, qty, amount) {
-            if bqv > 0.0 { av / bqv } else { unit_price }
+        } else if bq_val > 0.0 {
+            if amt_val > 0.0 { amt_val / bq_val } else { unit_price }
         } else {
-            // 没有 base_quantity 字段时跳过（避免与不同单位数据混淆）
             continue;
         };
-        purchase_points.push(serde_json::json!({
-            "date": date,
-            "price": base_unit_price,
+        purchase_by_date.entry(date).or_default().push(serde_json::json!({
+            "supplier_name": supplier_name,
+            "unit": unit,
+            "unit_price": unit_price,
+            "base_unit_price": base_unit_price,
+            "quantity": qty_val,
+            "base_quantity": bq_val,
         }));
     }
 
-    // 3) 售价点：来自销售订单明细的实际成交价（sales_order_item），与查询列表数据源一致
-    //    换算为基础单位单价，与进价同口径比较
+    let mut purchase_points: Vec<serde_json::Value> = Vec::new();
+    let mut purchase_dates: Vec<String> = purchase_by_date.keys().cloned().collect();
+    purchase_dates.sort();
+    for date in &purchase_dates {
+        let details = purchase_by_date.get(date).unwrap();
+        let count = details.len();
+        let mut sum_weighted = 0.0;
+        let mut sum_weight = 0.0;
+        let mut min_price = f64::MAX;
+        let mut max_price = f64::MIN;
+        for d in details {
+            let bp = d["base_unit_price"].as_f64().unwrap_or(0.0);
+            let bq = d["base_quantity"].as_f64().unwrap_or(0.0);
+            let qty = d["quantity"].as_f64().unwrap_or(0.0);
+            let u = d["unit"].as_str().unwrap_or("");
+            let weight = if bq > 0.0 { bq } else if u == base_unit { qty } else { 0.0 };
+            sum_weighted += bp * weight;
+            sum_weight += weight;
+            if bp < min_price { min_price = bp; }
+            if bp > max_price { max_price = bp; }
+        }
+        let avg_price = if sum_weight > 0.0 { sum_weighted / sum_weight } else { 0.0 };
+        let details_json: Vec<serde_json::Value> = details.iter().map(|d| serde_json::json!({
+            "supplier_name": d["supplier_name"],
+            "unit": d["unit"],
+            "unit_price": d["unit_price"],
+            "base_unit_price": d["base_unit_price"],
+            "quantity": d["quantity"],
+        })).collect();
+        purchase_points.push(serde_json::json!({
+            "date": date,
+            "avg_price": (avg_price * 100.0).round() / 100.0,
+            "min_price": min_price,
+            "max_price": max_price,
+            "count": count,
+            "details": details_json,
+        }));
+    }
+
+    // 4) 售价明细：JOIN purchaser 取采购单位名称，按日聚合加权均价
     let selling_sql = format!(
-        "SELECT so.order_date as date, soi.unit_price as price, soi.unit as unit, soi.base_quantity as bq, soi.quantity as qty, soi.amount as amount
+        "SELECT so.order_date as date, soi.unit_price as price, soi.unit as unit,
+                soi.base_quantity as bq, soi.quantity as qty, soi.amount as amount,
+                p.name as purchaser_name
          FROM sales_order_item soi
          JOIN sales_order so ON soi.order_id = so.id
+         JOIN purchaser p ON so.purchaser_id = p.id
          WHERE soi.product_id IN ({})
          {} {}
          ORDER BY so.order_date ASC",
@@ -7310,25 +7362,72 @@ pub async fn api_query_product_price_trend(
         selling_q = selling_q.bind(pid);
     }
     let selling_rows = selling_q.fetch_all(crate::db::pool()).await.unwrap_or_default();
-    // 换算为基础单位单价：同进价口径
-    let mut selling_points: Vec<serde_json::Value> = Vec::new();
+
+    let mut selling_by_date: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
     for r in &selling_rows {
         let date: String = r.get("date");
         let unit: String = r.get("unit");
         let unit_price: f64 = r.get("price");
-        let bq: Option<f64> = r.get("bq");
+        let bqv: Option<f64> = r.get("bq");
         let qty: Option<f64> = r.get("qty");
         let amount: Option<f64> = r.get("amount");
+        let purchaser_name: String = r.get("purchaser_name");
+        let bq_val = bqv.unwrap_or(0.0);
+        let qty_val = qty.unwrap_or(0.0);
+        let amt_val = amount.unwrap_or(0.0);
         let base_unit_price = if unit == base_unit {
             unit_price
-        } else if let (Some(bqv), Some(_qv), Some(av)) = (bq, qty, amount) {
-            if bqv > 0.0 { av / bqv } else { unit_price }
+        } else if bq_val > 0.0 {
+            if amt_val > 0.0 { amt_val / bq_val } else { unit_price }
         } else {
             continue;
         };
+        selling_by_date.entry(date).or_default().push(serde_json::json!({
+            "purchaser_name": purchaser_name,
+            "unit": unit,
+            "unit_price": unit_price,
+            "base_unit_price": base_unit_price,
+            "quantity": qty_val,
+            "base_quantity": bq_val,
+        }));
+    }
+
+    let mut selling_points: Vec<serde_json::Value> = Vec::new();
+    let mut selling_dates: Vec<String> = selling_by_date.keys().cloned().collect();
+    selling_dates.sort();
+    for date in &selling_dates {
+        let details = selling_by_date.get(date).unwrap();
+        let count = details.len();
+        let mut sum_weighted = 0.0;
+        let mut sum_weight = 0.0;
+        let mut min_price = f64::MAX;
+        let mut max_price = f64::MIN;
+        for d in details {
+            let bp = d["base_unit_price"].as_f64().unwrap_or(0.0);
+            let bq = d["base_quantity"].as_f64().unwrap_or(0.0);
+            let qty = d["quantity"].as_f64().unwrap_or(0.0);
+            let u = d["unit"].as_str().unwrap_or("");
+            let weight = if bq > 0.0 { bq } else if u == base_unit { qty } else { 0.0 };
+            sum_weighted += bp * weight;
+            sum_weight += weight;
+            if bp < min_price { min_price = bp; }
+            if bp > max_price { max_price = bp; }
+        }
+        let avg_price = if sum_weight > 0.0 { sum_weighted / sum_weight } else { 0.0 };
+        let details_json: Vec<serde_json::Value> = details.iter().map(|d| serde_json::json!({
+            "purchaser_name": d["purchaser_name"],
+            "unit": d["unit"],
+            "unit_price": d["unit_price"],
+            "base_unit_price": d["base_unit_price"],
+            "quantity": d["quantity"],
+        })).collect();
         selling_points.push(serde_json::json!({
             "date": date,
-            "price": base_unit_price,
+            "avg_price": (avg_price * 100.0).round() / 100.0,
+            "min_price": min_price,
+            "max_price": max_price,
+            "count": count,
+            "details": details_json,
         }));
     }
 

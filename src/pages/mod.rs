@@ -6386,23 +6386,24 @@ pub async fn page_query_sales_price(headers: axum::http::HeaderMap) -> Html<Stri
                 const purchasePoints = data.purchase_points || [];
                 const sellingPoints = data.selling_points || [];
 
-                // 合并进价与售价的所有日期作为统一时间轴（去重 + 排序）
+                // Build detail maps for tooltip
+                const purchaseDetailMap = new Map();
+                purchasePoints.forEach(p => purchaseDetailMap.set(p.date, p));
+                const sellingDetailMap = new Map();
+                sellingPoints.forEach(p => sellingDetailMap.set(p.date, p));
+
+                // Merge dates for unified X-axis
                 const dateSet = new Set();
-                purchasePoints.forEach(p => dateSet.add(p.date.substring(0, 10)));
-                sellingPoints.forEach(p => {
-                    const d = (p.date || '').substring(0, 10);
-                    if (d) dateSet.add(d);
-                });
+                purchasePoints.forEach(p => dateSet.add(p.date));
+                sellingPoints.forEach(p => dateSet.add(p.date));
                 const labels = Array.from(dateSet).sort();
-                const purchaseMap = new Map();
-                purchasePoints.forEach(p => purchaseMap.set(p.date.substring(0, 10), p.price));
-                const sellingMap = new Map();
-                sellingPoints.forEach(p => {
-                    const d = (p.date || '').substring(0, 10);
-                    if (d) sellingMap.set(d, p.price);
-                });
-                const purchaseData = labels.map(l => purchaseMap.has(l) ? purchaseMap.get(l) : null);
-                const sellingData = labels.map(l => sellingMap.has(l) ? sellingMap.get(l) : null);
+
+                const purchaseAvg = labels.map(l => { const p = purchaseDetailMap.get(l); return p ? p.avg_price : null; });
+                const purchaseMin = labels.map(l => { const p = purchaseDetailMap.get(l); return p ? p.min_price : null; });
+                const purchaseMax = labels.map(l => { const p = purchaseDetailMap.get(l); return p ? p.max_price : null; });
+                const sellingAvg = labels.map(l => { const p = sellingDetailMap.get(l); return p ? p.avg_price : null; });
+                const sellingMin = labels.map(l => { const p = sellingDetailMap.get(l); return p ? p.min_price : null; });
+                const sellingMax = labels.map(l => { const p = sellingDetailMap.get(l); return p ? p.max_price : null; });
 
                 const ctx = document.getElementById('trendChart').getContext('2d');
                 if (trendChartObj) trendChartObj.destroy();
@@ -6411,34 +6412,64 @@ pub async fn page_query_sales_price(headers: axum::http::HeaderMap) -> Html<Stri
                     data: {
                         labels: labels,
                         datasets: [
-                            {
-                                label: '进价（基础单位）',
-                                data: purchaseData,
-                                borderColor: '#dc3545',
-                                backgroundColor: 'rgba(220, 53, 69, 0.1)',
-                                tension: 0.2,
-                                pointRadius: 3,
-                                spanGaps: true,
-                                fill: false
-                            },
-                            {
-                                label: '售价',
-                                data: sellingData,
-                                borderColor: '#0d6efd',
-                                backgroundColor: 'rgba(13, 110, 253, 0.1)',
-                                tension: 0.2,
-                                pointRadius: 3,
-                                spanGaps: true,
-                                fill: false
-                            }
+                            { label: '_pmax', data: purchaseMax, borderColor: 'rgba(0,0,0,0)', pointRadius: 0, tension: 0.2, spanGaps: true, fill: false },
+                            { label: '_pmin', data: purchaseMin, borderColor: 'rgba(0,0,0,0)', backgroundColor: 'rgba(220,53,69,0.12)', pointRadius: 0, tension: 0.2, spanGaps: true, fill: '-1' },
+                            { label: '进价（加权均价）', data: purchaseAvg, borderColor: '#dc3545', backgroundColor: 'rgba(220,53,69,0.1)', tension: 0.2, spanGaps: true, fill: false,
+                              pointRadius: (c) => { const p = purchaseDetailMap.get(labels[c.dataIndex]); return (p && p.count > 1) ? 5 : 3; } },
+                            { label: '_smax', data: sellingMax, borderColor: 'rgba(0,0,0,0)', pointRadius: 0, tension: 0.2, spanGaps: true, fill: false },
+                            { label: '_smin', data: sellingMin, borderColor: 'rgba(0,0,0,0)', backgroundColor: 'rgba(13,110,253,0.12)', pointRadius: 0, tension: 0.2, spanGaps: true, fill: '-1' },
+                            { label: '售价（加权均价）', data: sellingAvg, borderColor: '#0d6efd', backgroundColor: 'rgba(13,110,253,0.1)', tension: 0.2, spanGaps: true, fill: false,
+                              pointRadius: (c) => { const p = sellingDetailMap.get(labels[c.dataIndex]); return (p && p.count > 1) ? 5 : 3; } }
                         ]
                     },
                     options: {
                         responsive: true,
                         maintainAspectRatio: false,
                         plugins: {
-                            legend: { position: 'top' },
-                            tooltip: { mode: 'index', intersect: false }
+                            legend: { position: 'top', labels: { filter: (item) => !item.text.startsWith('_') } },
+                            tooltip: {
+                                mode: 'index', intersect: false,
+                                filter: function(item) { return item.datasetIndex === 2 || item.datasetIndex === 5; },
+                                callbacks: {
+                                    title: function(items) { return items.length > 0 ? items[0].label : ''; },
+                                    label: function(item) {
+                                        const date = labels[item.dataIndex];
+                                        const isPurchase = item.datasetIndex === 2;
+                                        const map = isPurchase ? purchaseDetailMap : sellingDetailMap;
+                                        const p = map.get(date);
+                                        if (!p) return item.dataset.label + ': -';
+                                        let label = item.dataset.label + ': ¥' + p.avg_price.toFixed(2);
+                                        if (p.count > 1) {
+                                            label += '（' + p.count + '笔加权 | ¥' + p.min_price.toFixed(2) + '~¥' + p.max_price.toFixed(2) + '）';
+                                        }
+                                        return label;
+                                    },
+                                    afterBody: function(items) {
+                                        if (items.length === 0) return [];
+                                        const date = labels[items[0].dataIndex];
+                                        const lines = [];
+                                        const pp = purchaseDetailMap.get(date);
+                                        if (pp && pp.details && pp.details.length > 0) {
+                                            lines.push('');
+                                            lines.push('── 采购明细（' + pp.details.length + '笔）──');
+                                            pp.details.forEach(d => {
+                                                lines.push('  ' + d.supplier_name + ' | ' + d.unit + ' ¥' + d.unit_price.toFixed(2) + ' ×' + d.quantity
+                                                    + ' → 基础单价¥' + d.base_unit_price.toFixed(2));
+                                            });
+                                        }
+                                        const sp = sellingDetailMap.get(date);
+                                        if (sp && sp.details && sp.details.length > 0) {
+                                            lines.push('');
+                                            lines.push('── 销售明细（' + sp.details.length + '笔）──');
+                                            sp.details.forEach(d => {
+                                                lines.push('  ' + d.purchaser_name + ' | ' + d.unit + ' ¥' + d.unit_price.toFixed(2) + ' ×' + d.quantity
+                                                    + ' → 基础单价¥' + d.base_unit_price.toFixed(2));
+                                            });
+                                        }
+                                        return lines;
+                                    }
+                                }
+                            }
                         },
                         scales: {
                             x: { title: { display: true, text: '日期' } },
