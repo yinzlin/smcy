@@ -1538,7 +1538,7 @@ pub(crate) async fn build_accept_excel(headers: &axum::http::HeaderMap, id: i64,
 
     let item_rows = sqlx::query(
         "SELECT soi.id, soi.product_id, soi.product_name, soi.alias1, soi.alias2, soi.spec, p.spec as product_spec, soi.unit, p.unit as product_unit, p.base_unit as product_base_unit, soi.unit_price, soi.quantity, soi.amount, soi.remark,
-                soi.production_date, soi.batch_no, p.shelf_life,
+                soi.production_date, soi.batch_no, p.shelf_life, p.gov_status,
                 p.category_id, pc.name as category_name, pc.parent_id, pc2.name as parent_name
          FROM sales_order_item soi LEFT JOIN product p ON soi.product_id = p.id
          LEFT JOIN category pc ON p.category_id = pc.id
@@ -1576,7 +1576,7 @@ pub(crate) async fn build_accept_excel(headers: &axum::http::HeaderMap, id: i64,
     let supplement_rows = if reimburse {
         sqlx::query(
             "SELECT soi.id, soi.target_order_id, soi.source_order_id, soi.source_remark, soi.product_id, soi.product_name, soi.alias1, soi.alias2, soi.spec, p.spec as product_spec, soi.unit, p.unit as product_unit, p.base_unit as product_base_unit, soi.unit_price, soi.quantity, soi.amount, soi.allocate_date, soi.operation_type, soi.target_order_item_id,
-                    p.shelf_life,
+                    p.shelf_life, p.gov_status,
                     pc.name as category_name, pc2.name as parent_name
              FROM order_supplement_item soi
              LEFT JOIN product p ON soi.product_id = p.id
@@ -1638,6 +1638,12 @@ pub(crate) async fn build_accept_excel(headers: &axum::http::HeaderMap, id: i64,
         let prod_date: Option<String> = r.try_get("production_date").ok().flatten();
         let batch_no: Option<String> = r.try_get("batch_no").ok().flatten();
         let shelf_life: Option<String> = r.try_get("shelf_life").ok().flatten();
+        // 政采商品在品名规格前置标记：★=有指导价 ☆=无指导价
+        let food_name = match r.try_get::<i64, _>("gov_status").unwrap_or(0) {
+            1 => format!("★{}", food_name),
+            2 => format!("☆{}", food_name),
+            _ => food_name,
+        };
         item_map.insert(rid, (sort_key, food_name, unit_for_spec, r.get::<f64, _>("unit_price"), r.get::<f64, _>("quantity"), r.get::<f64, _>("amount"), remark, prod_date, batch_no, shelf_life));
     }
 
@@ -1726,6 +1732,12 @@ pub(crate) async fn build_accept_excel(headers: &axum::http::HeaderMap, id: i64,
             // 规格列（C列）填单位（打印模板的"规格"列实际是单位列）
             // 增项无 FIFO 批次快照，生产日期/批号留空；保质期取商品属性（如有）
             let supp_shelf: Option<String> = r.try_get("shelf_life").ok().flatten();
+            // 政采商品在品名规格前置标记：★=有指导价 ☆=无指导价
+            let food_name = match r.try_get::<i64, _>("gov_status").unwrap_or(0) {
+                1 => format!("★{}", food_name),
+                2 => format!("☆{}", food_name),
+                _ => food_name,
+            };
             item_map.insert(-r.get::<i64, _>("id"), (sort_key, food_name, unit, r.get::<f64, _>("unit_price"), qty, amt, remark, None, None, supp_shelf));
         }
     }
@@ -1821,7 +1833,7 @@ pub(crate) async fn build_accept_excel(headers: &axum::http::HeaderMap, id: i64,
             .set_align(FormatAlign::Left)
             .set_align(FormatAlign::VerticalCenter);
 
-        let col_widths = [4.0, 20.0, 4.0, 6.0, 8.0, 10.0, 10.0, 6.0, 10.0, 10.0, 10.0, 15.0, 10.0];
+        let col_widths = [4.0, 20.0, 4.0, 6.0, 8.0, 10.0, 10.0, 6.0, 10.0, 10.0, 10.0, 15.0, 10.0, 3.5];
         for (i, w) in col_widths.iter().enumerate() {
             worksheet.set_column_width(i as u16, *w)?;
         }
@@ -2029,6 +2041,22 @@ pub(crate) async fn build_accept_excel(headers: &axum::http::HeaderMap, id: i64,
                 .set_align(FormatAlign::Bottom);
             worksheet.merge_range(current_row, 0, current_row, 12, &page_info, &footer_format)?;
             current_row += 1;
+
+            // 页右侧竖排小字：各联功能（空白复写纸用，三联同印，按颜色对号入座）
+            // set_rotation(255) = Excel「竖排文字」（字符直立自上而下堆叠）
+            let copy_note_format = Format::new()
+                .set_font_size(8)
+                .set_rotation(255)
+                .set_align(FormatAlign::Center)
+                .set_align(FormatAlign::VerticalCenter);
+            worksheet.merge_range(
+                page_title_row,
+                13,
+                current_row - 1,
+                13,
+                "第一联(白)存根联　　第二联(红)客户联　　第三联(黄)财务联",
+                &copy_note_format,
+            )?;
 
             if page < total_pages - 1 {
                 let _ = worksheet.set_page_breaks(&[current_row]);
