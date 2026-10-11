@@ -78,6 +78,8 @@ pub struct ProductReq {
     pub category_id: Option<i64>,
     /// 保质期（商品自身属性，如 "7天"、"180天"）
     pub shelf_life: Option<String>,
+    /// 政采平台状态：0=非政采商品 1=政采商品（有指导价） 2=政采商品（无指导价）
+    pub gov_status: Option<i64>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -295,6 +297,8 @@ pub struct ProductUpdateReq {
     pub auto_update_price: Option<i64>,
     /// 保质期（商品自身属性，如 "7天"、"180天"）
     pub shelf_life: Option<String>,
+    /// 政采平台状态：0=非政采商品 1=政采商品（有指导价） 2=政采商品（无指导价）
+    pub gov_status: Option<i64>,
 }
 
 #[derive(Deserialize)]

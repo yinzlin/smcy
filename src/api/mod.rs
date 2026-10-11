@@ -1818,7 +1818,7 @@ pub async fn api_product_list(headers: axum::http::HeaderMap, axum::extract::Que
         id_bind: Option<i64>,
     }
 
-    let query_parts = if let Some(pid) = product_id {
+    let mut query_parts = if let Some(pid) = product_id {
         // 按 id 精确查询(用于前端按需加载单条商品图片)
         QueryParts {
             where_sql: "WHERE p.id = ?".to_string(),
@@ -1833,7 +1833,7 @@ pub async fn api_product_list(headers: axum::http::HeaderMap, axum::extract::Que
                     WITH RECURSIVE cat_tree(id) AS (
                         SELECT id FROM category WHERE id = ?
                         UNION ALL
-                        SELECT c.id FROM category c 
+                        SELECT c.id FROM category c
                         JOIN cat_tree ct ON c.parent_id = ct.id
                     )
                     SELECT id FROM cat_tree
@@ -1846,12 +1846,20 @@ pub async fn api_product_list(headers: axum::http::HeaderMap, axum::extract::Que
         }
     } else {
         QueryParts {
-            where_sql: "WHERE p.name LIKE ? OR p.alias1 LIKE ? OR p.alias2 LIKE ?".to_string(),
+            where_sql: "WHERE (p.name LIKE ? OR p.alias1 LIKE ? OR p.alias2 LIKE ?)".to_string(),
             binds: vec![keyword_pattern.clone(), keyword_pattern.clone(), keyword_pattern.clone()],
             category_bind: None,
             id_bind: None,
         }
     };
+
+    // 政采状态筛选：0=非政采 1=政采有指导价 2=政采无指导价
+    if let Some(gs) = params.get("gov_status").and_then(|v| v.parse::<i64>().ok()) {
+        if (0..=2).contains(&gs) {
+            query_parts.where_sql.push_str(" AND p.gov_status = ?");
+            query_parts.binds.push(gs.to_string());
+        }
+    }
 
     // 总数查询
     let count_sql = format!(
@@ -1873,10 +1881,10 @@ pub async fn api_product_list(headers: axum::http::HeaderMap, axum::extract::Que
 
     // 分页数据查询
     let select_cols = if include_thumbs {
-        "p.id, p.name, p.spec, p.alias1, p.alias2, p.unit, p.base_unit, p.base_price, p.purchase_price, p.max_purchase_price, p.min_purchase_price, p.markup_rate, p.auto_update_price, p.image_url, p.category_id, p.status, p.audit_status, p.shelf_life, c.name as category_name"
+        "p.id, p.name, p.spec, p.alias1, p.alias2, p.unit, p.base_unit, p.base_price, p.purchase_price, p.max_purchase_price, p.min_purchase_price, p.markup_rate, p.auto_update_price, p.image_url, p.category_id, p.status, p.audit_status, p.shelf_life, p.gov_status, c.name as category_name"
     } else {
         // thumbs=0 模式: 省 image_url 列,流量更小;前端按需单独请求 ?thumbs=1
-        "p.id, p.name, p.spec, p.alias1, p.alias2, p.unit, p.base_unit, p.base_price, p.purchase_price, p.max_purchase_price, p.min_purchase_price, p.markup_rate, p.auto_update_price, p.category_id, p.status, p.audit_status, p.shelf_life, c.name as category_name"
+        "p.id, p.name, p.spec, p.alias1, p.alias2, p.unit, p.base_unit, p.base_price, p.purchase_price, p.max_purchase_price, p.min_purchase_price, p.markup_rate, p.auto_update_price, p.category_id, p.status, p.audit_status, p.shelf_life, p.gov_status, c.name as category_name"
     };
     let data_sql = format!(
         "SELECT {} 
@@ -1987,6 +1995,7 @@ pub async fn api_product_list(headers: axum::http::HeaderMap, axum::extract::Que
             "status": row.get::<i64, _>("status"),
             "audit_status": row.get::<Option<String>, _>("audit_status"),
             "shelf_life": row.get::<Option<String>, _>("shelf_life"),
+            "gov_status": row.try_get::<i64, _>("gov_status").unwrap_or(0),
             "category_name": row.get::<Option<String>, _>("category_name"),
             "units": units,
             "prices": prices,
@@ -2017,7 +2026,7 @@ pub async fn api_product_create(headers: axum::http::HeaderMap, Json(req): Json<
     let purchase_price = if role == "super_admin" { ((req.purchase_price.unwrap_or(0.0)) * 100.0).round() / 100.0 } else { 0.0 };
     
     let result = sqlx::query(
-        "INSERT INTO product(name, spec, alias1, alias2, unit, base_unit, base_price, purchase_price, category_id, shelf_life) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO product(name, spec, alias1, alias2, unit, base_unit, base_price, purchase_price, category_id, shelf_life, gov_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(&req.name)
     .bind(&req.spec)
@@ -2029,6 +2038,7 @@ pub async fn api_product_create(headers: axum::http::HeaderMap, Json(req): Json<
     .bind(purchase_price)
     .bind(&req.category_id)
     .bind(&req.shelf_life)
+    .bind(req.gov_status.unwrap_or(0))
     .execute(crate::db::pool())
     .await;
 
@@ -2204,7 +2214,7 @@ pub async fn api_product_update(headers: axum::http::HeaderMap, Json(mut req): J
     }
 
     let result = sqlx::query(
-        "UPDATE product SET name = ?, spec = ?, alias1 = ?, alias2 = ?, unit = ?, base_unit = ?, base_price = ?, purchase_price = ?, image_url = ?, category_id = ?, markup_rate = ?, auto_update_price = ?, shelf_life = ?, audit_status='pending' WHERE id = ?"
+        "UPDATE product SET name = ?, spec = ?, alias1 = ?, alias2 = ?, unit = ?, base_unit = ?, base_price = ?, purchase_price = ?, image_url = ?, category_id = ?, markup_rate = ?, auto_update_price = ?, shelf_life = ?, gov_status = ?, audit_status='pending' WHERE id = ?"
     )
     .bind(&req.name)
     .bind(&req.spec)
@@ -2219,6 +2229,7 @@ pub async fn api_product_update(headers: axum::http::HeaderMap, Json(mut req): J
     .bind(&req.markup_rate)
     .bind(&req.auto_update_price)
     .bind(&req.shelf_life)
+    .bind(req.gov_status.unwrap_or(0))
     .bind(req.id)
     .execute(crate::db::pool())
     .await;
@@ -3431,6 +3442,10 @@ pub async fn api_product_import(content: Bytes) -> impl IntoResponse {
                         .await;
                         // 维护时段连续性
                         let _ = crate::rebuild_price_schedule_end_dates(pid, pt).await;
+                        // 政采平台价有数值时自动标记政采状态
+                        if pt == "gov_procurement" {
+                            auto_mark_gov_status(pid).await;
+                        }
                     }
                 }
             }
@@ -3576,6 +3591,11 @@ pub async fn api_product_price_upsert(Json(req): Json<ProductPriceReq>) -> impl 
     .execute(crate::db::pool())
     .await;
 
+    // 政采平台价有数值时，政采平台状态自动标记为「政采商品（有指导价）」
+    if result.is_ok() {
+        auto_mark_gov_status(req.product_id).await;
+    }
+
     match result {
         Ok(_) => StatusCode::OK.into_response(),
         Err(e) => {
@@ -3643,6 +3663,38 @@ pub async fn api_product_price_delete_by_product(Json(req): Json<std::collection
     StatusCode::OK.into_response()
 }
 
+/// 政采平台状态自动联动（双向）：
+/// - 快照中 gov_procurement 有数值 → 自动标记「政采商品（有指导价）」(1)
+/// - 快照中无 gov_procurement 或价格为零/空 → 自动回退「非政采商品」(0)，仅回退自动标记的 1，
+///   手动选择的「政采商品（无指导价）」(2) 不受影响。
+/// 依据 product_price 快照判断，价格录入/变更/清空后调用。
+pub(crate) async fn auto_mark_gov_status(product_id: i64) {
+    // 有价 → 1
+    let _ = sqlx::query(
+        "UPDATE product SET gov_status = 1
+         WHERE id = ? AND gov_status != 1
+         AND EXISTS (
+             SELECT 1 FROM product_price
+             WHERE product_id = product.id AND price_type = 'gov_procurement' AND price > 0
+         )",
+    )
+    .bind(product_id)
+    .execute(crate::db::pool())
+    .await;
+    // 无价/零 → 仅回退自动标记的 1 到 0（2 为手动选择，保留）
+    let _ = sqlx::query(
+        "UPDATE product SET gov_status = 0
+         WHERE id = ? AND gov_status = 1
+         AND NOT EXISTS (
+             SELECT 1 FROM product_price
+             WHERE product_id = product.id AND price_type = 'gov_procurement' AND price > 0
+         )",
+    )
+    .bind(product_id)
+    .execute(crate::db::pool())
+    .await;
+}
+
 /// 按价格策略快照（product_price）同步商品基础单价：
 /// 政采价优先，否则商超1/2/3/AI 非零平均；应用尾数规则后写回 product.base_price。
 /// 价格策略导入/编辑后调用，保证商品列表售价与编辑页计算售价一致。
@@ -3654,6 +3706,9 @@ pub(crate) async fn sync_product_base_price(product_id: i64) {
         .ok()
         .flatten();
     let gov_price: Option<f64> = gov_row.map(|r| r.get("price"));
+
+    // 政采平台状态联动（有价→1，零/空→回退0；手动选的2保留）
+    auto_mark_gov_status(product_id).await;
 
     let avg_row = || async {
         sqlx::query("SELECT COALESCE(AVG(price), 0.0) as avg_price FROM product_price WHERE product_id = ? AND price_type IN ('supermarket_1','supermarket_2','supermarket_3','ai_realtime') AND price > 0")
@@ -15558,6 +15613,8 @@ pub async fn api_price_schedule_create(
             .bind(&req.price_type)
             .execute(crate::db::pool())
             .await;
+            // 政采平台价有数值时自动标记政采状态
+            auto_mark_gov_status(req.product_id).await;
 
             // 记录操作审计日志
             let ctx = crate::auth::get_user_ctx(&headers).await;
@@ -15667,6 +15724,8 @@ pub async fn api_price_schedule_update(
                 .bind(pt)
                 .execute(crate::db::pool())
                 .await;
+                // 政采平台价有数值时自动标记政采状态
+                auto_mark_gov_status(*pid).await;
             }
 
             let ctx = crate::auth::get_user_ctx(&headers).await;
@@ -15725,6 +15784,8 @@ pub async fn api_price_schedule_delete(
                 .bind(&pt)
                 .execute(crate::db::pool())
                 .await;
+                // 政采平台价有数值时自动标记政采状态
+                auto_mark_gov_status(pid).await;
             }
             let ctx = crate::auth::get_user_ctx(&headers).await;
             crate::auth::log_operation(&ctx, "删除价格策略", "price_schedule", &req.id.to_string(), "").await;
@@ -15974,6 +16035,8 @@ pub async fn api_price_schedule_batch_import(
         .bind(pt)
         .execute(crate::db::pool())
         .await;
+        // 政采平台价有数值时自动标记政采状态
+        auto_mark_gov_status(*pid).await;
     }
 
     // 同步受影响商品的基础单价（售价），保证商品列表售价 = 编辑页计算售价（政采价优先）
@@ -16873,6 +16936,8 @@ pub async fn api_price_schedule_batch_import_excel(
         )
         .bind(pid).bind(pt)
         .execute(crate::db::pool()).await;
+        // 政采平台价有数值时自动标记政采状态
+        auto_mark_gov_status(*pid).await;
     }
 
     // 同步受影响商品的基础单价（售价），保证商品列表售价 = 编辑页计算售价（政采价优先）

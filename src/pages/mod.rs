@@ -848,6 +848,12 @@ pub async fn page_product(headers: axum::http::HeaderMap) -> Html<String> {
                 <h5 id="productListTitle" style="margin:0;">全部商品</h5>
                 <div class="d-flex gap-2 align-items-center">
                     <input type="text" id="searchKeyword" placeholder="搜索商品名称" class="form-control form-control-sm" style="width:200px" onkeydown="if(event.key==='Enter')searchProducts()">
+                    <select id="govStatusFilter" class="form-select form-select-sm" style="width:170px" onchange="searchProducts()">
+                        <option value="">政采状态：全部</option>
+                        <option value="0">非政采商品</option>
+                        <option value="1">政采（有指导价）</option>
+                        <option value="2">政采（无指导价）</option>
+                    </select>
                     <button class="btn btn-sm btn-outline-primary" onclick="searchProducts()">搜索</button>
                     <button class="btn btn-sm btn-outline-secondary" onclick="resetSearch()">显示全部</button>
                     <button class="btn btn-sm btn-info" onclick="window.location.href='/query/price_schedule'">价格策略（按日期段）</button>
@@ -955,6 +961,16 @@ pub async fn page_product(headers: axum::http::HeaderMap) -> Html<String> {
                                 </div>
                                 <div class="alert alert-info py-2 mt-2 mb-2 small">
                                     售价计算规则：若有政采平台价则以政采平台价为售价；否则取商超1/商超2/商超3/AI实时采集价的非零平均价（四舍五入保留2位）；若无任何价格则使用基础单价。
+                                </div>
+                                <div class="row mt-2">
+                                    <div class="col-md-4">
+                                        <label class="form-label">政采平台状态</label>
+                                        <select name="gov_status" class="form-control">
+                                            <option value="0">非政采商品</option>
+                                            <option value="1">政采商品（有指导价）</option>
+                                            <option value="2">政采商品（无指导价）</option>
+                                        </select>
+                                    </div>
                                 </div>
                                 <div class="row mt-2">
                                     <div class="col-md-3">
@@ -1163,6 +1179,9 @@ pub async fn page_product(headers: axum::http::HeaderMap) -> Html<String> {
                 let params = [];
                 if (currentCategoryId) {{ params.push('category_id=' + currentCategoryId); }}
                 if (currentKeyword) {{ params.push('keyword=' + encodeURIComponent(currentKeyword)); }}
+                // 政采状态筛选：空=全部，0/1/2
+                const govFilter = document.getElementById('govStatusFilter');
+                if (govFilter && govFilter.value !== '') {{ params.push('gov_status=' + govFilter.value); }}
                 params.push('page=' + currentPage);
                 params.push('page_size=' + pageSize);
                 // P4: 默认 thumbs=0 精简请求;分类切换、关键词搜索保持此行为
@@ -1259,6 +1278,13 @@ pub async fn page_product(headers: axum::http::HeaderMap) -> Html<String> {
                     let autoBtnClass = (p.auto_update_price === 1) ? 'btn-outline-secondary' : 'btn-outline-info';
                     let autoBtnText = (p.auto_update_price === 1) ? '关闭自动' : '开启自动';
                     let auditBadge = (p.audit_status === 'confirmed') ? '<span class="badge bg-success">已审核</span>' : '<span class="badge bg-warning text-dark">待审核</span>';
+                    // 政采平台状态标记：0=非政采 1=政采有指导价 2=政采无指导价
+                    let govBadge = '';
+                    if (p.gov_status === 1) {{
+                        govBadge = '<span class="badge bg-primary" title="政采商品（有指导价）">政采价</span>';
+                    }} else if (p.gov_status === 2) {{
+                        govBadge = '<span class="badge bg-primary bg-opacity-50" title="政采商品（无指导价）">政采无价</span>';
+                    }}
                     let auditBtns = '';
                     if (isSuperAdmin) {{
                         if (p.audit_status === 'confirmed') {{
@@ -1274,7 +1300,7 @@ pub async fn page_product(headers: axum::http::HeaderMap) -> Html<String> {
                     if (basePrice > 0) {{
                         priceCell = '¥' + basePrice.toFixed(2);
                     }}
-                    html += '<tr><td>' + p.id + '</td><td>' + imageHtml + '</td><td>' + nameDisplay + '</td><td>' + escapeHtml(p.spec || '') + '</td><td>' + escapeHtml(p.unit || '') + '</td><td>' + escapeHtml(p.base_unit || '') + '</td><td>' + escapeHtml(p.shelf_life || '') + '</td><td>' + priceCell + '</td>' + (isSuperAdmin ? '<td>' + (p.purchase_price || 0) + '</td>' : '') + '<td>' + escapeHtml(unitsText) + '</td><td>' + escapeHtml(p.category_name || '无分类') + '</td><td>' + statusBadge + ' ' + autoBadge + '</td>';
+                    html += '<tr><td>' + p.id + '</td><td>' + imageHtml + '</td><td>' + nameDisplay + '</td><td>' + escapeHtml(p.spec || '') + '</td><td>' + escapeHtml(p.unit || '') + '</td><td>' + escapeHtml(p.base_unit || '') + '</td><td>' + escapeHtml(p.shelf_life || '') + '</td><td>' + priceCell + '</td>' + (isSuperAdmin ? '<td>' + (p.purchase_price || 0) + '</td>' : '') + '<td>' + escapeHtml(unitsText) + '</td><td>' + escapeHtml(p.category_name || '无分类') + '</td><td>' + statusBadge + ' ' + autoBadge + ' ' + govBadge + '</td>';
                     // 最新政采/比价列：gov 优先，否则显示最大超市价
                     let policyCell = '<span class="text-muted">-</span>';
                     if (pp) {{
@@ -1310,6 +1336,8 @@ pub async fn page_product(headers: axum::http::HeaderMap) -> Html<String> {
 
             function resetSearch() {{
                 document.getElementById('searchKeyword').value = '';
+                const govFilter = document.getElementById('govStatusFilter');
+                if (govFilter) govFilter.value = '';
                 currentKeyword = '';
                 currentCategoryId = null;
                 currentPage = 1;
@@ -1329,6 +1357,14 @@ pub async fn page_product(headers: axum::http::HeaderMap) -> Html<String> {
                 const sm2 = parseFloat(form.supermarket_2.value) || 0;
                 const sm3 = parseFloat(form.supermarket_3.value) || 0;
                 const ai = parseFloat(form.ai_realtime.value) || 0;
+                // 政采平台价联动：有数值→「政采商品（有指导价）」；清空/为零→回退「非政采商品」（手动选的2保留）
+                if (form.gov_status) {{
+                    if (govPrice > 0) {{
+                        form.gov_status.value = '1';
+                    }} else if (form.gov_status.value === '1') {{
+                        form.gov_status.value = '0';
+                    }}
+                }}
                 let sellingPrice = 0;
                 if (govPrice > 0) {{
                     sellingPrice = govPrice;
@@ -1521,6 +1557,7 @@ pub async fn page_product(headers: axum::http::HeaderMap) -> Html<String> {
                 form.markup_rate.value = (p.markup_rate !== undefined && p.markup_rate !== null) ? p.markup_rate : 0.5;
                 form.auto_update_price.value = (p.auto_update_price !== undefined && p.auto_update_price !== null) ? p.auto_update_price : 0;
                 form.shelf_life.value = p.shelf_life || '';
+                form.gov_status.value = String(p.gov_status || 0);
 
                 form.gov_price.value = '';
                 form.supermarket_1.value = '';
@@ -1690,7 +1727,8 @@ pub async fn page_product(headers: axum::http::HeaderMap) -> Html<String> {
                     category_id: form.category_id.value ? parseInt(form.category_id.value) : null,
                     markup_rate: parseFloat(form.markup_rate.value) || 0.5,
                     auto_update_price: parseInt(form.auto_update_price.value),
-                    shelf_life: form.shelf_life.value || null
+                    shelf_life: form.shelf_life.value || null,
+                    gov_status: parseInt(form.gov_status.value) || 0
                 }};
                 const res = await fetch('/api/product/update', {{
                     method: 'POST',
@@ -1847,7 +1885,8 @@ pub async fn page_product(headers: axum::http::HeaderMap) -> Html<String> {
                     base_price: parseFloat(form.base_price.value) || null,
                     purchase_price: parseFloat(form.purchase_price.value) || null,
                     category_id: form.category_id.value ? parseInt(form.category_id.value) : null,
-                    shelf_life: form.shelf_life.value || null
+                    shelf_life: form.shelf_life.value || null,
+                    gov_status: parseInt(form.gov_status.value) || 0
                 }};
                 
                 const checkRes = await fetch('/api/product/check_name?name=' + encodeURIComponent(data.name));

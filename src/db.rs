@@ -437,6 +437,11 @@ pub async fn init_tables(pool: &SqlitePool) -> Result<(), anyhow::Error> {
         .execute(pool)
         .await;
 
+    // 政采平台状态标记：0=非政采商品 1=政采商品（有指导价） 2=政采商品（无指导价）
+    let _ = sqlx::query("ALTER TABLE product ADD COLUMN gov_status INTEGER NOT NULL DEFAULT 0")
+        .execute(pool)
+        .await;
+
     let _ = sqlx::query("ALTER TABLE supplier ADD COLUMN business_scope TEXT")
         .execute(pool)
         .await;
