@@ -2057,7 +2057,7 @@ pub(crate) async fn build_accept_excel(headers: &axum::http::HeaderMap, id: i64,
                 13,
                 current_row - 1,
                 13,
-                "第一联(白)存根联　　第二联(红)客户联　　第三联(黄)财务联",
+                "第一联·存根联　　第二联·客户联　　第三联·财务联",
                 &copy_note_format,
             )?;
 
