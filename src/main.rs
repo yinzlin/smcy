@@ -1833,10 +1833,13 @@ pub(crate) async fn build_accept_excel(headers: &axum::http::HeaderMap, id: i64,
             .set_align(FormatAlign::Left)
             .set_align(FormatAlign::VerticalCenter);
 
-        let col_widths = [4.0, 20.0, 4.0, 6.0, 8.0, 10.0, 10.0, 6.0, 10.0, 10.0, 10.0, 15.0, 10.0, 3.5];
+        let col_widths = [4.0, 20.0, 4.0, 6.0, 8.0, 10.0, 10.0, 6.0, 10.0, 10.0, 10.0, 15.0, 10.0];
         for (i, w) in col_widths.iter().enumerate() {
             worksheet.set_column_width(i as u16, *w)?;
         }
+        // 右侧联次说明列（竖排文字）：以自动适配宽度模式写入（bestFit），
+        // 宽度按竖排单个全角字符 8pt 字身+内边距取 18px
+        worksheet.set_column_autofit_width(13, 18)?;
 
         let headers = [
             "序号".to_string(), "品名规格".to_string(), "单位".to_string(), "数量".to_string(), "单价".to_string(), "总价".to_string(),
@@ -2043,10 +2046,10 @@ pub(crate) async fn build_accept_excel(headers: &axum::http::HeaderMap, id: i64,
             current_row += 1;
 
             // 页右侧竖排小字：各联功能（空白复写纸用，三联同印，按颜色对号入座）
-            // set_rotation(255) = Excel「竖排文字」（字符直立自上而下堆叠）
+            // rust_xlsxwriter 0.81 中 set_rotation(270) 内部映射为 xlsx 的 255，即 Excel「文字竖排」
             let copy_note_format = Format::new()
                 .set_font_size(8)
-                .set_rotation(255)
+                .set_rotation(270)
                 .set_align(FormatAlign::Center)
                 .set_align(FormatAlign::VerticalCenter);
             worksheet.merge_range(
