@@ -11769,6 +11769,9 @@ pub async fn page_mobile_today_price(headers: axum::http::HeaderMap) -> Html<Str
                     html += '<div class="item-detail">';
                     html += '<span>基本单位: ' + item.base_unit + '</span>';
                     html += '<span>合计: ' + item.total_qty + ' ' + item.base_unit + '</span>';
+                    if (item.qty_detail) {
+                        html += '<span>明细: ' + item.qty_detail + '</span>';
+                    }
                     html += '</div>';
                     html += '<div class="item-detail" style="margin-top:4px;">';
                     html += '<span style="color:#16a34a;">最高 ' + formatPrice(item.max_purchase_price) + '</span>';

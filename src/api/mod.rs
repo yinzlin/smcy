@@ -8520,7 +8520,22 @@ pub async fn api_sales_order_generate_purchase(
         let base_price = r.get::<f64, _>("base_price");
         let remark = r.get::<Option<String>, _>("remark").unwrap_or_default();
 
-        let unit_price = ((if purchase_price > 0.0 { purchase_price } else { base_price }) * 100.0).round() / 100.0;
+        // 基础单位采购价：分供应商今日价 > 商品进价 > 商品基础单价
+        let base_unit_price = if purchase_price > 0.0 { purchase_price } else { base_price };
+        // 销售单位为大单位（箱/件等）时的换算，与手工开采购单 updateUnit 同口径：
+        // 该单位有专属采购价则用之，否则 基础单位价 × 换算比例
+        let (unit_ratio, unit_purchase_price): (f64, f64) = sqlx::query(
+            "SELECT ratio, COALESCE(purchase_price, 0) as pp FROM product_unit WHERE product_id = ? AND unit_name = ?"
+        )
+        .bind(product_id)
+        .bind(&unit)
+        .fetch_optional(crate::db::pool())
+        .await
+        .ok()
+        .flatten()
+        .map(|ur| (ur.get::<f64, _>("ratio"), ur.get::<f64, _>("pp")))
+        .unwrap_or((1.0, 0.0));
+        let unit_price = ((if unit_purchase_price > 0.0 { unit_purchase_price } else { base_unit_price * unit_ratio }) * 100.0).round() / 100.0;
 
         supplier_items.entry(supplier_id).or_insert_with(Vec::new).push(
             (product_id, product_name, alias1, alias2, spec, unit, quantity, ordered_quantity, unit_price, base_unit, base_price, remark)
@@ -13364,6 +13379,9 @@ pub async fn api_product_today_price_items(
     } else {
         "WHERE so.status IN ('pending', 'sorting')"
     };
+    // 按 (供应商, 商品, 销售单位) 分组取数：
+    // - total_qty 用 base_quantity 换算为基础单位合计（历史 base_quantity=0 的明细回退原始数量）
+    // - qty_detail 保留各销售单位原始数量明细（如 "2箱 + 5斤"），全部为基础单位时不输出
     let sql = format!(
         "SELECT soi.product_id, MAX(soi.product_name) as product_name, MAX(COALESCE(soi.spec,'')) as spec,
                 MAX(soi.supplier_id) as supplier_id, MAX(s.name) as supplier_name,
@@ -13372,15 +13390,17 @@ pub async fn api_product_today_price_items(
                 MAX(p.max_purchase_price) as max_purchase_price,
                 MAX(p.min_purchase_price) as min_purchase_price,
                 MAX(psp.price) as supplier_price,
-                SUM(soi.quantity) as total_qty
+                COALESCE(NULLIF(TRIM(COALESCE(soi.unit, '')), ''), '') as sale_unit,
+                SUM(soi.quantity) as unit_qty,
+                SUM(CASE WHEN soi.base_quantity > 0 THEN soi.base_quantity ELSE soi.quantity END) as base_qty
          FROM sales_order_item soi
          LEFT JOIN sales_order so ON soi.order_id = so.id
          LEFT JOIN supplier s ON soi.supplier_id = s.id
          LEFT JOIN product p ON soi.product_id = p.id
          LEFT JOIN product_supplier_price psp ON psp.product_id = soi.product_id AND psp.supplier_id = soi.supplier_id
          {} AND soi.product_id > 0
-         GROUP BY soi.supplier_id, soi.product_id
-         ORDER BY MAX(s.name), soi.supplier_id, MAX(soi.product_name), soi.product_id", where_sql
+         GROUP BY soi.supplier_id, soi.product_id, sale_unit
+         ORDER BY MAX(s.name), soi.supplier_id, MAX(soi.product_name), soi.product_id, sale_unit", where_sql
     );
     let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
     if has_date {
@@ -13388,27 +13408,67 @@ pub async fn api_product_today_price_items(
     }
     let rows = q.fetch_all(crate::db::pool()).await.unwrap_or_default();
 
-    // 供应商 → 商品去重结果
+    // 数字格式化：去尾零（2.00→"2"，2.50→"2.5"）
+    fn fmt_qty(v: f64) -> String {
+        let s = format!("{:.2}", v);
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+
+    // 供应商 → 商品聚合；product_index 记录 (supplier, product) 在 items vec 中的位置
     let mut supplier_map: std::collections::HashMap<i64, (String, Vec<serde_json::Value>)> = std::collections::HashMap::new();
+    let mut product_index: std::collections::HashMap<(i64, i64), usize> = std::collections::HashMap::new();
+    // (supplier, product) → (total_base_qty, 单位明细 "数量+单位", 是否存在非基础单位)
+    let mut qty_acc: std::collections::HashMap<(i64, i64), (f64, Vec<String>, bool)> = std::collections::HashMap::new();
+
     for r in &rows {
         let supplier_id = r.get::<i64, _>("supplier_id");
         let supplier_name = r.get::<Option<String>, _>("supplier_name").unwrap_or_else(|| {
             if supplier_id == 0 { "未分配供应商".to_string() } else { format!("供应商{}", supplier_id) }
         });
-        let total_qty: f64 = r.get::<Option<f64>, _>("total_qty").unwrap_or(0.0);
-        let item = serde_json::json!({
-            "product_id": r.get::<i64, _>("product_id"),
-            "product_name": r.get::<Option<String>, _>("product_name").unwrap_or_default(),
-            "spec": r.get::<Option<String>, _>("spec").unwrap_or_default(),
-            "base_unit": r.get::<Option<String>, _>("base_unit").unwrap_or_default(),
-            "total_qty": total_qty,
-            "purchase_price": r.get::<Option<f64>, _>("purchase_price").unwrap_or(0.0),
-            "max_purchase_price": r.get::<Option<f64>, _>("max_purchase_price").unwrap_or(0.0),
-            "min_purchase_price": r.get::<Option<f64>, _>("min_purchase_price").unwrap_or(0.0),
-            "supplier_price": r.get::<Option<f64>, _>("supplier_price").unwrap_or(0.0),
-        });
+        let product_id = r.get::<i64, _>("product_id");
+        let base_unit = r.get::<Option<String>, _>("base_unit").unwrap_or_default();
+        let unit = r.get::<String, _>("sale_unit");
+        let unit_qty: f64 = r.get::<Option<f64>, _>("unit_qty").unwrap_or(0.0);
+        let base_qty: f64 = r.get::<Option<f64>, _>("base_qty").unwrap_or(0.0);
+
         let entry = supplier_map.entry(supplier_id).or_insert_with(|| (supplier_name.clone(), Vec::new()));
-        entry.1.push(item);
+        if !product_index.contains_key(&(supplier_id, product_id)) {
+            product_index.insert((supplier_id, product_id), entry.1.len());
+            entry.1.push(serde_json::json!({
+                "product_id": product_id,
+                "product_name": r.get::<Option<String>, _>("product_name").unwrap_or_default(),
+                "spec": r.get::<Option<String>, _>("spec").unwrap_or_default(),
+                "base_unit": base_unit,
+                "total_qty": 0.0,
+                "purchase_price": r.get::<Option<f64>, _>("purchase_price").unwrap_or(0.0),
+                "max_purchase_price": r.get::<Option<f64>, _>("max_purchase_price").unwrap_or(0.0),
+                "min_purchase_price": r.get::<Option<f64>, _>("min_purchase_price").unwrap_or(0.0),
+                "supplier_price": r.get::<Option<f64>, _>("supplier_price").unwrap_or(0.0),
+            }));
+        }
+
+        // 单位为空视为基础单位
+        let display_unit = if unit.is_empty() { base_unit.clone() } else { unit.clone() };
+        let acc = qty_acc.entry((supplier_id, product_id)).or_insert_with(|| (0.0, Vec::new(), false));
+        acc.0 += base_qty;
+        acc.1.push(format!("{}{}", fmt_qty(unit_qty), display_unit));
+        if !unit.is_empty() && unit != base_unit {
+            acc.2 = true;
+        }
+    }
+
+    // 回填 total_qty（基础单位换算合计）与 qty_detail（多单位明细）
+    for ((supplier_id, product_id), (total, details, has_non_base)) in &qty_acc {
+        if let Some((_, items)) = supplier_map.get_mut(supplier_id) {
+            if let Some(&idx) = product_index.get(&(*supplier_id, *product_id)) {
+                if let Some(item) = items.get_mut(idx) {
+                    item["total_qty"] = serde_json::json!(((*total) * 100.0).round() / 100.0);
+                    if *has_non_base || details.len() > 1 {
+                        item["qty_detail"] = serde_json::json!(details.join(" + "));
+                    }
+                }
+            }
+        }
     }
 
     let mut result: Vec<serde_json::Value> = Vec::new();
@@ -13527,7 +13587,7 @@ pub async fn api_product_today_price_excel(
                 MAX(p.max_purchase_price) as max_purchase_price,
                 MAX(p.min_purchase_price) as min_purchase_price,
                 MAX(psp.price) as supplier_price,
-                SUM(soi.quantity) as total_qty
+                SUM(CASE WHEN soi.base_quantity > 0 THEN soi.base_quantity ELSE soi.quantity END) as total_qty
          FROM sales_order_item soi
          LEFT JOIN sales_order so ON soi.order_id = so.id
          LEFT JOIN supplier s ON soi.supplier_id = s.id
@@ -13760,7 +13820,7 @@ pub async fn api_product_today_price_a4(
                 MAX(p.max_purchase_price) as max_purchase_price,
                 MAX(p.min_purchase_price) as min_purchase_price,
                 MAX(psp.price) as supplier_price,
-                SUM(soi.quantity) as total_qty
+                SUM(CASE WHEN soi.base_quantity > 0 THEN soi.base_quantity ELSE soi.quantity END) as total_qty
          FROM sales_order_item soi
          LEFT JOIN sales_order so ON soi.order_id = so.id
          LEFT JOIN supplier s ON soi.supplier_id = s.id
@@ -14064,7 +14124,7 @@ pub async fn api_product_today_price_excel_by_category(
                 MAX(p.purchase_price) as purchase_price,
                 MAX(p.max_purchase_price) as max_purchase_price,
                 MAX(p.min_purchase_price) as min_purchase_price,
-                SUM(soi.quantity) as total_qty,
+                SUM(CASE WHEN soi.base_quantity > 0 THEN soi.base_quantity ELSE soi.quantity END) as total_qty,
                 MAX(c.name) as category_name,
                 MAX(c2.name) as parent_name
          FROM sales_order_item soi
