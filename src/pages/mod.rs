@@ -1886,9 +1886,9 @@ pub async fn page_product(headers: axum::http::HeaderMap) -> Html<String> {
                     purchase_price: parseFloat(form.purchase_price.value) || null,
                     category_id: form.category_id.value ? parseInt(form.category_id.value) : null,
                     shelf_life: form.shelf_life.value || null,
-                    gov_status: parseInt(form.gov_status.value) || 0
+                    gov_status: form.gov_status ? (parseInt(form.gov_status.value) || 0) : 0
                 }};
-                
+
                 const checkRes = await fetch('/api/product/check_name?name=' + encodeURIComponent(data.name));
                 const duplicates = await checkRes.json();
                 
