@@ -1,5 +1,5 @@
 import { Button, Dropdown, Layout, Menu, Space } from 'antd'
-import { HomeOutlined, LogoutOutlined, SwapOutlined, UserOutlined } from '@ant-design/icons'
+import { AppstoreOutlined, HomeOutlined, LogoutOutlined, SwapOutlined, UserOutlined } from '@ant-design/icons'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../stores/auth'
 
@@ -25,7 +25,10 @@ export default function MainLayout() {
         <Menu
           mode="inline"
           selectedKeys={[location.pathname]}
-          items={[{ key: '/', icon: <HomeOutlined />, label: '首页' }]}
+          items={[
+            { key: '/', icon: <HomeOutlined />, label: '首页' },
+            { key: '/product', icon: <AppstoreOutlined />, label: '商品管理' },
+          ]}
           onClick={({ key }) => navigate(key)}
         />
       </Sider>

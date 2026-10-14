@@ -1,7 +1,7 @@
 [package]
 name = "database"
 version = "3.7.0"
-edition = "2021"
+edition = "2024"
 description = "数据访问层：连接池初始化与 SQLite 迁移（postgres/redis 为同构占位）"
 
 [dependencies]

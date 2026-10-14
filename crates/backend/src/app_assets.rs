@@ -38,6 +38,11 @@ pub async fn redirect_app_login() -> impl IntoResponse {
     Redirect::temporary("/app/login")
 }
 
+/// /product 302 到 React 商品页（老商品页保留在 /legacy/product 回退）
+pub async fn redirect_app_product() -> impl IntoResponse {
+    Redirect::temporary("/app/product")
+}
+
 fn serve_embedded(path: &str) -> axum::response::Response {
     match AppAssets::get(path) {
         Some(content) => {

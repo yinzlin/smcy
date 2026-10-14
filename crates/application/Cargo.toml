@@ -1,7 +1,7 @@
 [package]
 name = "application"
 version = "3.7.0"
-edition = "2021"
+edition = "2024"
 description = "应用服务层：价格策略、库存汇总、采购/验收导出等业务编排逻辑"
 
 [dependencies]
