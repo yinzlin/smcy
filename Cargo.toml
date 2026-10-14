@@ -1,13 +1,23 @@
-[package]
-name = "food_accept_single"
-version = "3.7.0"
-edition = "2021"
+[workspace]
+resolver = "2"
+members = [
+    "crates/common",
+    "crates/domain",
+    "crates/database",
+    "crates/application",
+    "crates/backend",
+]
+# crates/frontend 为 React 前端工程（npm 构建），不参与 cargo workspace
+exclude = ["crates/frontend"]
 
-[[bin]]
-name = "food_accept_single"
-path = "src/main.rs"
+[workspace.dependencies]
+# ---- 内部 crate ----
+common = { path = "crates/common" }
+domain = { path = "crates/domain" }
+database = { path = "crates/database" }
+application = { path = "crates/application" }
 
-[dependencies]
+# ---- 外部依赖（版本与 features 与原单 crate 保持一致） ----
 axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process"] }
 sqlx = { version = "0.9", features = ["sqlite", "runtime-tokio", "macros"] }
@@ -24,3 +34,5 @@ tray-icon = "0.24.1"
 tao = "0.35.3"
 mime = "0.3"
 bcrypt = "0.15"
+rust-embed = "8"
+mime_guess = "2"

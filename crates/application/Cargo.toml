@@ -1,0 +1,18 @@
+[package]
+name = "application"
+version = "3.7.0"
+edition = "2021"
+description = "应用服务层：价格策略、库存汇总、采购/验收导出等业务编排逻辑"
+
+[dependencies]
+common = { workspace = true }
+domain = { workspace = true }
+database = { workspace = true }
+sqlx = { workspace = true }
+rust_xlsxwriter = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }

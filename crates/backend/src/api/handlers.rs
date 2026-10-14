@@ -5,7 +5,8 @@ use bytes::Bytes;
 use calamine::{open_workbook_auto_from_rs, Data, Reader};
 use chrono::Local;
 use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder, Workbook, XlsxError};
-use crate::utils::{xlsx_response, xlsx_header_format, parse_keyword_pattern, parse_csv, sanitize_filename_prefix, image_url_to_path, operation_action_label, build_category_tree_json, generate_order_no, round2};
+use crate::utils::{xlsx_response, xlsx_header_format, parse_keyword_pattern, parse_csv, sanitize_filename_prefix, image_url_to_path, operation_action_label, build_category_tree_json, sanitize_xlsx_string, round2};
+use crate::generate_order_no;
 use crate::models::*;
 use crate::update_product_purchase_prices;
 use crate::log_price_change;
@@ -21,27 +22,6 @@ use crate::check_sales_order_access;
 use crate::build_accept_excel;
 use serde_json;
 use sqlx::{AssertSqlSafe, Row};
-
-/// 清理写入 Excel 的字符串：去除 NUL/控制字符（rust_xlsxwriter 内部以 C 字符串写入，
-/// 含 NUL 或异常控制字符会导致进程级 panic）。同时将超长名称截断到合理长度。
-pub fn sanitize_xlsx_string(s: String) -> String {
-    const MAX_LEN: usize = 200;
-    let cleaned: String = s
-        .chars()
-        .filter(|c| {
-            let code = *c as u32;
-            // 保留可打印 ASCII、常见中文/Unicode 范围；过滤 NUL 与其他控制字符
-            code >= 0x20 || code == 0x09 // 允许 tab
-        })
-        .collect();
-    if cleaned.chars().count() > MAX_LEN {
-        let mut out: String = cleaned.chars().take(MAX_LEN).collect();
-        out.push('…');
-        out
-    } else {
-        cleaned
-    }
-}
 
 pub async fn api_system_config(Json(data): Json<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     for (key, value) in data {
@@ -12260,7 +12240,7 @@ pub async fn api_sales_order_accept_excel(
         Err(e) => return e.into_response(),
         Ok(_) => {}
     }
-    build_accept_excel(&headers, id, true, force).await.into_response()
+    build_accept_excel(&crate::auth::get_user_ctx(&headers).await, id, true, force).await.into_response()
 }
 
 pub async fn api_sales_order_real_excel(
@@ -12273,7 +12253,7 @@ pub async fn api_sales_order_real_excel(
         Err(e) => return e.into_response(),
         Ok(_) => {}
     }
-    build_accept_excel(&headers, id, false, force).await.into_response()
+    build_accept_excel(&crate::auth::get_user_ctx(&headers).await, id, false, force).await.into_response()
 }
 
 pub async fn api_sales_order_sort_items(axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {

@@ -1,0 +1,3 @@
+[toolchain]
+# 必须使用 nightly：.cargo/config.toml 启用了 build-std（x86_64-win7-windows-msvc 为 Tier 3 目标，需从源码编译标准库）
+channel = "nightly"

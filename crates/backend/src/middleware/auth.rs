@@ -347,6 +347,23 @@ pub async fn check_page_permission(headers: &HeaderMap, path: &str) -> Result<St
             return Err(Html(layout_html("无权限", path, content)));
         }
     }
-    
+
     Ok(role)
+}
+
+/// 校验用户是否有权查看/导出指定销售单（行级数据权限）
+pub async fn check_sales_order_access(
+    headers: &axum::http::HeaderMap,
+    id: i64,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    let ctx = get_user_ctx(headers).await;
+    let order_purchaser_id: i64 = sqlx::query_scalar("SELECT purchaser_id FROM sales_order WHERE id = ?")
+        .bind(id)
+        .fetch_one(crate::db::pool())
+        .await
+        .unwrap_or(-1);
+    if !can_access_sales_order(&ctx, order_purchaser_id) {
+        return Err((axum::http::StatusCode::FORBIDDEN, "您没有权限查看此订单".to_string()));
+    }
+    Ok(())
 }

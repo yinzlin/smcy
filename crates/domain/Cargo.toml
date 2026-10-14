@@ -1,0 +1,8 @@
+[package]
+name = "domain"
+version = "3.7.0"
+edition = "2021"
+description = "领域模型层：业务实体与 API 请求/响应结构体，零外部框架依赖"
+
+[dependencies]
+serde = { workspace = true }

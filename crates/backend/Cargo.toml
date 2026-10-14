@@ -1,0 +1,33 @@
+[package]
+name = "backend"
+version = "3.7.0"
+edition = "2021"
+description = "接口与入口层：HTTP API、页面渲染、静态资源、系统托盘与程序入口"
+
+[[bin]]
+name = "food_accept_single"
+path = "src/main.rs"
+
+[dependencies]
+common = { workspace = true }
+domain = { workspace = true }
+database = { workspace = true }
+application = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+sqlx = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+rand = { workspace = true }
+bytes = { workspace = true }
+rust_xlsxwriter = { workspace = true }
+calamine = { workspace = true }
+tray-icon = { workspace = true }
+tao = { workspace = true }
+mime = { workspace = true }
+bcrypt = { workspace = true }
+rust-embed = { workspace = true }
+mime_guess = { workspace = true }

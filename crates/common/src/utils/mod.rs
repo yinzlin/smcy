@@ -7,7 +7,6 @@ use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder};
 use sqlx::sqlite::SqliteRow;
 use sqlx::Row;
 use std::collections::HashMap;
-use tray_icon::Icon;
 
 // ===== 导出通用辅助 =====
 pub fn xlsx_header_format(color: u32) -> Format {
@@ -1400,63 +1399,35 @@ pub fn build_category_tree_json(
     result
 }
 
-pub async fn generate_order_no(order_type: &str, order_date: &str) -> String {
-    let prefix = if order_type == "sales" { "SO" } else { "PO" };
-
-    let date_str: Vec<&str> = order_date.split('-').collect();
-    let date_part = format!("{}{}{}", date_str[0], date_str[1], date_str[2]);
-
-    let max_seq: i64 = if order_type == "sales" {
-        sqlx::query_scalar(
-            "SELECT COALESCE(MAX(CAST(SUBSTR(order_no, 11, 3) AS INTEGER)), 0) FROM sales_order WHERE order_date = ?",
-        )
-        .bind(order_date)
-        .fetch_one(crate::db::pool())
-        .await
-        .unwrap_or(0)
-    } else {
-        sqlx::query_scalar(
-            "SELECT COALESCE(MAX(CAST(SUBSTR(order_no, 11, 3) AS INTEGER)), 0) FROM purchase_order WHERE order_date = ?",
-        )
-        .bind(order_date)
-        .fetch_one(crate::db::pool())
-        .await
-        .unwrap_or(0)
-    };
-
-    format!("{}{}{:03}", prefix, date_part, max_seq + 1)
-}
-
-pub fn make_app_icon() -> Icon {
-    let size = 64u32;
-    let mut rgba = vec![0u8; (size * size * 4) as usize];
-    let cx = 32.0f32;
-    let cy = 32.0f32;
-    for y in 0..size {
-        for x in 0..size {
-            let dx = x as f32 - cx;
-            let dy = y as f32 - cy;
-            let dist = (dx * dx + dy * dy).sqrt();
-            let idx = ((y * size + x) * 4) as usize;
-            if dist <= 30.0 {
-                rgba[idx] = 67;
-                rgba[idx + 1] = 160;
-                rgba[idx + 2] = 71;
-                rgba[idx + 3] = 255;
-                if dist <= 22.0 {
-                    rgba[idx] = 255;
-                    rgba[idx + 1] = 255;
-                    rgba[idx + 2] = 255;
-                    rgba[idx + 3] = 255;
-                }
-            }
-        }
+/// 校验日期字符串是否为合法 'YYYY-MM-DD'
+pub fn is_valid_date_str(s: &str) -> bool {
+    if s.len() != 10 {
+        return false;
     }
-    Icon::from_rgba(rgba, size, size).expect("生成图标失败")
+    let bytes = s.as_bytes();
+    bytes[4] == b'-' && bytes[7] == b'-'
+        && bytes[..4].iter().all(|c| c.is_ascii_digit())
+        && bytes[5..7].iter().all(|c| c.is_ascii_digit())
+        && bytes[8..10].iter().all(|c| c.is_ascii_digit())
 }
 
-pub fn open_browser() {
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "start", "", "http://127.0.0.1/"])
-        .spawn();
+/// 清理写入 Excel 的字符串：去除 NUL/控制字符（rust_xlsxwriter 内部以 C 字符串写入，
+/// 含 NUL 或异常控制字符会导致进程级 panic）。同时将超长名称截断到合理长度。
+pub fn sanitize_xlsx_string(s: String) -> String {
+    const MAX_LEN: usize = 200;
+    let cleaned: String = s
+        .chars()
+        .filter(|c| {
+            let code = *c as u32;
+            // 保留可打印 ASCII、常见中文/Unicode 范围；过滤 NUL 与其他控制字符
+            code >= 0x20 || code == 0x09 // 允许 tab
+        })
+        .collect();
+    if cleaned.chars().count() > MAX_LEN {
+        let mut out: String = cleaned.chars().take(MAX_LEN).collect();
+        out.push('…');
+        out
+    } else {
+        cleaned
+    }
 }

@@ -18,3 +18,7 @@ debug-*.log
 debug-*.md
 build.log
 
+# React 前端依赖与构建产物（产物由 backend 编译期内嵌进 exe）
+crates/frontend/node_modules/
+crates/frontend/dist/
+

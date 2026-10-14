@@ -158,7 +158,7 @@ pub async fn repair_db_corruption(pool: &SqlitePool) {
     }
 }
 
-pub async fn init_pool() {
+pub async fn init_pool() -> Option<Vec<(i64, String)>> {
     let pool = SqlitePoolOptions::new()
         .max_connections(16)
         .min_connections(4)
@@ -241,6 +241,7 @@ pub async fn init_pool() {
         .fetch_one(&pool)
         .await
         .unwrap_or(0);
+    let mut pending_rebuild: Option<Vec<(i64, String)>> = None;
     if needs_rebuild == 5 {
         let affected: Vec<(i64, String)> = sqlx::query_as(
             "SELECT DISTINCT product_id, price_type FROM product_price_schedule"
@@ -248,11 +249,9 @@ pub async fn init_pool() {
         .fetch_all(&pool)
         .await
         .unwrap_or_default();
-        for (pid, pt) in affected {
-            let _ = crate::rebuild_price_schedule_end_dates(pid, &pt).await;
-        }
-        // 重建完成后升到 6，下次启动不再跑
-        let _ = sqlx::query("PRAGMA user_version = 6").execute(&pool).await;
+        // 时段重建依赖 application 层服务，数据库层不能直接调用：
+        // 此处仅返回待重建清单，由调用方（backend di）重建完成后调 finalize_schedule_rebuild 升级版本号
+        pending_rebuild = Some(affected);
     }
 
     // 一次性修复：重算所有耗材分摊方案的 allocated_amount 与 remaining_balance
@@ -282,6 +281,12 @@ pub async fn init_pool() {
     let _ = sqlx::query("VACUUM").execute(&pool).await;
 
     // 连接池在 init_db 顶部已注册，此处不再重复 set。
+    pending_rebuild
+}
+
+/// 启动期 price_schedule 时段重建完成后调用：升级 user_version，避免下次启动重复重建
+pub async fn finalize_schedule_rebuild() {
+    let _ = sqlx::query("PRAGMA user_version = 6").execute(pool()).await;
 }
 
 pub fn pool() -> &'static SqlitePool {
