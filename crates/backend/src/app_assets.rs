@@ -1,36 +1,41 @@
 //! React 前端资源内嵌：crates/frontend/dist 编译进二进制，挂 /app，SPA 路由回退 index.html
 
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::io::Write;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::{
     extract::Path,
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Redirect},
 };
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
 #[folder = "../frontend/dist"]
 struct AppAssets;
 
-pub async fn serve_app_index() -> impl IntoResponse {
-    serve_embedded("index.html")
+pub async fn serve_app_index(headers: HeaderMap) -> impl IntoResponse {
+    serve_embedded("index.html", &headers)
 }
 
-pub async fn serve_app(Path(path): Path<String>) -> impl IntoResponse {
+pub async fn serve_app(Path(path): Path<String>, headers: HeaderMap) -> impl IntoResponse {
     let path = path.trim_start_matches('/');
     if path.is_empty() {
-        return serve_embedded("index.html");
+        return serve_embedded("index.html", &headers);
     }
     if AppAssets::get(path).is_some() {
-        return serve_embedded(path);
+        return serve_embedded(path, &headers);
     }
     // SPA 回退：仅对无扩展名的页面路径回 index.html，带扩展名的静态资源缺失直接 404
     let looks_like_asset = path.rsplit('/').next().is_some_and(|s| s.contains('.'));
     if looks_like_asset {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
-    serve_embedded("index.html")
+    serve_embedded("index.html", &headers)
 }
 
 /// /login 302 到 React 登录页（老登录页保留在 /legacy/login 回退）
@@ -123,26 +128,73 @@ redirect_app!(redirect_app_mobile_sort_by_category, "/app/mobile/sort-by-categor
 redirect_app!(redirect_app_mobile_sort_by_supplier, "/app/mobile/sort-by-supplier");
 redirect_app!(redirect_app_mobile_sort_comprehensive, "/app/mobile/sort-comprehensive");
 
-fn serve_embedded(path: &str) -> axum::response::Response {
+/// gzip 压缩结果缓存（按资源路径），内嵌资源内容不可变，可安全长期缓存
+fn gzip_cache() -> &'static Mutex<HashMap<String, Arc<Vec<u8>>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Vec<u8>>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn accepts_gzip(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("gzip"))
+}
+
+/// 仅对文本类资源压缩（图片/字体等已压缩格式再压缩无收益且会增大体积）
+fn is_compressible(mime: &str) -> bool {
+    mime.starts_with("text/")
+        || mime.contains("javascript")
+        || mime.contains("json")
+        || mime.contains("xml")
+        || mime.contains("svg")
+        || mime.contains("css")
+}
+
+fn gzip_bytes(path: &str, data: &[u8]) -> Arc<Vec<u8>> {
+    let cache = gzip_cache();
+    let mut map = cache.lock().unwrap();
+    if let Some(hit) = map.get(path) {
+        return hit.clone();
+    }
+    let mut enc = GzEncoder::new(Vec::new(), Compression::best());
+    let _ = enc.write_all(data);
+    let out = Arc::new(enc.finish().unwrap_or_default());
+    map.insert(path.to_string(), out.clone());
+    out
+}
+
+fn serve_embedded(path: &str, headers: &HeaderMap) -> axum::response::Response {
     match AppAssets::get(path) {
         Some(content) => {
             let mime = mime_guess::from_path(path).first_or_octet_stream();
+            let mime_str = mime.as_ref();
             // index.html 不缓存保证发版即生效；Vite 产物文件名带 hash，可长缓存
             let cache = if path == "index.html" {
                 "no-cache"
             } else {
                 "public, max-age=31536000, immutable"
             };
-            let body = match content.data {
-                Cow::Borrowed(b) => axum::body::Body::from(b),
-                Cow::Owned(v) => axum::body::Body::from(v),
+            let use_gzip = accepts_gzip(headers) && is_compressible(mime_str);
+            let body = if use_gzip {
+                let gz = gzip_bytes(path, content.data.as_ref());
+                axum::body::Body::from(gz.as_ref().clone())
+            } else {
+                match content.data {
+                    Cow::Borrowed(b) => axum::body::Body::from(b),
+                    Cow::Owned(v) => axum::body::Body::from(v),
+                }
             };
-            axum::response::Response::builder()
+            let mut builder = axum::response::Response::builder()
                 .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, mime.as_ref())
-                .header(header::CACHE_CONTROL, cache)
-                .body(body)
-                .unwrap()
+                .header(header::CONTENT_TYPE, mime_str)
+                .header(header::CACHE_CONTROL, cache);
+            if use_gzip {
+                builder = builder
+                    .header(header::CONTENT_ENCODING, "gzip")
+                    .header(header::VARY, "Accept-Encoding");
+            }
+            builder.body(body).unwrap()
         }
         None => (StatusCode::SERVICE_UNAVAILABLE, "frontend not built").into_response(),
     }

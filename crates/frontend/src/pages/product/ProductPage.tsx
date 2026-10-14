@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { App, Button, Card, Image, Input, Select, Space, Table, Tag, Upload } from 'antd'
 import type { TableProps } from 'antd'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -41,6 +41,12 @@ export default function ProductPage() {
   const [categoryId, setCategoryId] = useState<number | null>(
     searchParams.get('category_id') ? Number(searchParams.get('category_id')) : null,
   )
+
+  // 分类筛选由全局侧边栏导航驱动（/product?category_id=N），URL 变化时同步
+  useEffect(() => {
+    const cid = searchParams.get('category_id')
+    setCategoryId(cid ? Number(cid) : null)
+  }, [searchParams])
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
   const [editing, setEditing] = useState<Product | null>(null)

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { Key, ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import {
   App,
   Button,
@@ -7,7 +7,6 @@ import {
   Checkbox,
   Col,
   DatePicker,
-  Dropdown,
   Form,
   Input,
   Modal,
@@ -16,11 +15,10 @@ import {
   Space,
   Table,
   Tag,
-  Tree,
   Typography,
   Upload,
 } from 'antd'
-import type { MenuProps, TableProps, TreeDataNode } from 'antd'
+import type { TableProps } from 'antd'
 import type { Dayjs } from 'dayjs'
 import dayjs from 'dayjs'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -28,14 +26,11 @@ import { useSearchParams } from 'react-router-dom'
 import {
   SUPPLIER_EXPORT_URL,
   approveSupplier,
-  createCategory,
   createSupplier,
-  deleteCategory,
   deleteSupplier,
   importSupplier,
   listCategoryTree,
   listSuppliers,
-  renameCategory,
   unapproveSupplier,
   updateSupplier,
   type CategoryTreeNode,
@@ -74,10 +69,6 @@ interface EditFormValues {
   remark?: string
 }
 
-type CatModalMode = 'root' | 'sub' | 'sibling' | 'rename'
-
-const ROOT_KEY = 'all'
-
 /** 证照/合同到期状态：已过期红色，30天内黄色，否则绿色；未填显示 — */
 function expireBadge(label: string, dateStr: string): ReactNode {
   const today = dayjs().startOf('day')
@@ -109,14 +100,6 @@ function truncateText(text: string | null, maxLen: number): string {
   return text.length > maxLen ? text.slice(0, maxLen) + '...' : text
 }
 
-const CAT_MENU_ITEMS: MenuProps['items'] = [
-  { key: 'sub', label: '新增子分类' },
-  { key: 'sibling', label: '新增同级分类' },
-  { type: 'divider' },
-  { key: 'rename', label: '重命名' },
-  { key: 'delete', label: '删除', danger: true },
-]
-
 export default function SupplierPage() {
   const { message, modal } = App.useApp()
   const { user } = useAuth()
@@ -124,19 +107,13 @@ export default function SupplierPage() {
   const queryClient = useQueryClient()
   const [searchParams] = useSearchParams()
 
-  const initialCatId = searchParams.get('category_id')
-
-  const [categoryId, setCategoryId] = useState<number | null>(
-    initialCatId ? Number(initialCatId) : null,
-  )
-  const [categoryName, setCategoryName] = useState(initialCatId ? '分类供应商' : '')
+  const [categoryId, setCategoryId] = useState<number | null>(() => {
+    const cid = searchParams.get('category_id')
+    return cid ? Number(cid) : null
+  })
   const [keywordInput, setKeywordInput] = useState('')
   const [keyword, setKeyword] = useState('')
   const [editing, setEditing] = useState<Supplier | null>(null)
-
-  const [catModal, setCatModal] = useState<{ mode: CatModalMode; target: CategoryTreeNode | null } | null>(null)
-  const [catName, setCatName] = useState('')
-  const [expanded, setExpanded] = useState<Key[]>([])
 
   const [createForm] = Form.useForm<CreateFormValues>()
   const [editForm] = Form.useForm<EditFormValues>()
@@ -154,127 +131,23 @@ export default function SupplierPage() {
   const categoryOptions = useMemo(() => collectOptions(catTree), [catTree])
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['suppliers'] })
-  const invalidateTree = () => queryClient.invalidateQueries({ queryKey: ['categoryTree', 'supplier'] })
 
-  const selectCategory = (id: number | null, name: string) => {
-    setCategoryId(id)
-    setCategoryName(name)
-  }
+  // 分类筛选由全局侧边栏导航驱动（/supplier?category_id=N），URL 变化时同步
+  useEffect(() => {
+    const cid = searchParams.get('category_id')
+    setCategoryId(cid ? Number(cid) : null)
+  }, [searchParams])
+
+  // 当前筛选分类的名称（用于列表标题展示），从分类树推导
+  const categoryName = useMemo(() => {
+    if (!categoryId) return ''
+    return findNode(catTree, categoryId)?.name ?? ''
+  }, [catTree, categoryId])
 
   // 点击分类后，新增表单的分类默认跟随当前筛选分类（照老页面 setFormCategory）
   useEffect(() => {
     createForm.setFieldsValue({ category_id: categoryId ?? undefined })
   }, [categoryId, createForm])
-
-  const findNode = (nodes: CategoryTreeNode[], id: number): CategoryTreeNode | null => {
-    for (const n of nodes) {
-      if (n.id === id) return n
-      const hit = findNode(n.children ?? [], id)
-      if (hit) return hit
-    }
-    return null
-  }
-
-  const collectKeys = (nodes: CategoryTreeNode[]): Key[] =>
-    nodes.flatMap((n) => [n.id as Key, ...collectKeys(n.children ?? [])])
-
-  const allTreeKeys = useMemo(() => collectKeys(catTree), [catTree])
-
-  useEffect(() => {
-    setExpanded(allTreeKeys)
-  }, [allTreeKeys])
-
-  const renderNodeTitle = (node: CategoryTreeNode): ReactNode => (
-    <Dropdown
-      trigger={['contextMenu']}
-      menu={{
-        items: CAT_MENU_ITEMS,
-        onClick: ({ key, domEvent }) => {
-          domEvent.stopPropagation()
-          if (key === 'sub') openCatModal('sub', node)
-          else if (key === 'sibling') openCatModal('sibling', node)
-          else if (key === 'rename') openCatModal('rename', node)
-          else if (key === 'delete') handleDeleteCategory(node)
-        },
-      }}
-    >
-      <span style={{ userSelect: 'none' }}>📂 {node.name}</span>
-    </Dropdown>
-  )
-
-  const toTreeData = (nodes: CategoryTreeNode[]): TreeDataNode[] =>
-    nodes.map((n) => ({
-      key: n.id,
-      title: renderNodeTitle(n),
-      children: toTreeData(n.children ?? []),
-    }))
-
-  const treeData: TreeDataNode[] = [{ key: ROOT_KEY, title: '全部供应商' }, ...toTreeData(catTree)]
-
-  const openCatModal = (mode: CatModalMode, target: CategoryTreeNode | null = null) => {
-    setCatName(mode === 'rename' && target ? target.name : '')
-    setCatModal({ mode, target })
-  }
-
-  const catModalTitle =
-    catModal?.mode === 'root'
-      ? '请输入新的顶级分类名称'
-      : catModal?.mode === 'sub'
-        ? '请输入新的子分类名称'
-        : catModal?.mode === 'sibling'
-          ? '请输入新的同级分类名称'
-          : '请输入新的分类名称'
-
-  const submitCatModal = async () => {
-    if (!catModal) return
-    const name = catName.trim()
-    if (!name) return
-    const { mode, target } = catModal
-    if (mode === 'rename') {
-      if (!target || name === target.name) {
-        setCatModal(null)
-        return
-      }
-      const res = await renameCategory(target.id, name)
-      if (res.ok) {
-        message.success(res.message || '重命名成功')
-        setCatModal(null)
-        invalidateTree()
-      } else {
-        message.error(res.message || '重命名失败')
-      }
-      return
-    }
-    const parent_id =
-      mode === 'root' ? null : mode === 'sub' ? (target?.id ?? null) : (target?.parent_id ?? null)
-    const res = await createCategory({ name, parent_id, entity_type: 'supplier', sort_order: 0 })
-    if (res.ok) {
-      message.success(res.message || '创建成功')
-      setCatModal(null)
-      invalidateTree()
-    } else {
-      message.error(res.message || '创建失败')
-    }
-  }
-
-  const handleDeleteCategory = (node: CategoryTreeNode) => {
-    modal.confirm({
-      title: `确定要删除分类"${node.name}"吗？`,
-      content: '注意：有子分类或已被引用的分类无法删除。',
-      okText: '确定',
-      cancelText: '取消',
-      onOk: async () => {
-        const res = await deleteCategory(node.id)
-        if (res.ok) {
-          message.success(res.message || '删除成功')
-          if (categoryId === node.id) selectCategory(null, '')
-          invalidateTree()
-        } else {
-          message.error(res.message || '删除失败')
-        }
-      },
-    })
-  }
 
   const runAction = async (
     action: () => Promise<{ ok: boolean; message: string }>,
@@ -396,7 +269,7 @@ export default function SupplierPage() {
   const resetSearch = () => {
     setKeywordInput('')
     setKeyword('')
-    selectCategory(null, '')
+    setCategoryId(null)
   }
 
   const columns: TableProps<Supplier>['columns'] = [
@@ -502,42 +375,8 @@ export default function SupplierPage() {
   ]
 
   return (
-    <Row gutter={16}>
-      <Col flex="240px" style={{ minWidth: 200 }}>
-        <Card
-          size="small"
-          title="供应商分类"
-          extra={
-            <Space size={4}>
-              <Button size="small" type="link" style={{ padding: 0 }} onClick={() => openCatModal('root')}>
-                新增顶级分类
-              </Button>
-              <Button size="small" type="link" style={{ padding: 0 }} onClick={invalidateTree}>
-                刷新分类树
-              </Button>
-            </Space>
-          }
-        >
-          <Tree
-            blockNode
-            treeData={treeData}
-            selectedKeys={categoryId ? [categoryId] : [ROOT_KEY]}
-            expandedKeys={expanded}
-            onExpand={(keys) => setExpanded(keys)}
-            onSelect={(keys) => {
-              const key = keys[0]
-              if (key === undefined || key === ROOT_KEY) {
-                selectCategory(null, '')
-                return
-              }
-              const node = findNode(catTree, Number(key))
-              if (node) selectCategory(node.id, node.name)
-            }}
-          />
-        </Card>
-      </Col>
-      <Col flex="auto">
-        <Space direction="vertical" size="middle" style={{ display: 'flex' }}>
+    <>
+      <Space direction="vertical" size="middle" style={{ display: 'flex' }}>
           <Card size="small" title="新增供应商">
             <Form form={createForm} onFinish={handleCreate} layout="vertical">
               <Row gutter={8}>
@@ -664,7 +503,6 @@ export default function SupplierPage() {
             locale={{ emptyText: '暂无供应商数据' }}
           />
         </Space>
-      </Col>
 
       <Modal
         open={!!editing}
@@ -764,24 +602,18 @@ export default function SupplierPage() {
           </Row>
         </Form>
       </Modal>
-
-      <Modal
-        open={!!catModal}
-        title={catModalTitle}
-        okText="确定"
-        cancelText="取消"
-        onOk={submitCatModal}
-        onCancel={() => setCatModal(null)}
-      >
-        <Input
-          value={catName}
-          placeholder="分类名称"
-          onChange={(e) => setCatName(e.target.value)}
-          onPressEnter={submitCatModal}
-        />
-      </Modal>
-    </Row>
+    </>
   )
+}
+
+/** 在分类树中按 id 查找节点（用于筛选分类名称展示） */
+function findNode(nodes: CategoryTreeNode[], id: number): CategoryTreeNode | null {
+  for (const n of nodes) {
+    if (n.id === id) return n
+    const hit = findNode(n.children ?? [], id)
+    if (hit) return hit
+  }
+  return null
 }
 
 /** 拍平分类树供 Select 使用（新增/编辑表单的分类下拉） */

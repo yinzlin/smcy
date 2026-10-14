@@ -11,6 +11,15 @@ export default defineConfig({
     target: 'chrome87',
     outDir: 'dist',
     chunkSizeWarningLimit: 1500,
+    rollupOptions: {
+      output: {
+        // 依赖拆分为独立 vendor 分包：体积最大的 react / antd 与业务代码分离，利于浏览器缓存与并行加载
+        manualChunks: {
+          react: ['react', 'react-dom', 'react-router-dom'],
+          antd: ['antd', '@ant-design/icons'],
+        },
+      },
+    },
   },
   server: {
     port: 5173,
