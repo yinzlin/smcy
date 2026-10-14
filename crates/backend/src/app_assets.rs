@@ -48,6 +48,11 @@ pub async fn redirect_app_purchase() -> impl IntoResponse {
     Redirect::temporary("/app/purchase")
 }
 
+/// /sales 302 到 React 销售订单页（老销售页保留在 /legacy/sales 回退）
+pub async fn redirect_app_sales() -> impl IntoResponse {
+    Redirect::temporary("/app/sales")
+}
+
 fn serve_embedded(path: &str) -> axum::response::Response {
     match AppAssets::get(path) {
         Some(content) => {

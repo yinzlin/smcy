@@ -5,6 +5,7 @@ import HomePage from './pages/HomePage'
 import LoginPage from './pages/LoginPage'
 import ProductPage from './pages/product/ProductPage'
 import PurchasePage from './pages/purchase/PurchasePage'
+import SalesPage from './pages/sales/SalesPage'
 
 export default function App() {
   return (
@@ -22,6 +23,7 @@ export default function App() {
           <Route index element={<HomePage />} />
           <Route path="product" element={<ProductPage />} />
           <Route path="purchase" element={<PurchasePage />} />
+          <Route path="sales" element={<SalesPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
