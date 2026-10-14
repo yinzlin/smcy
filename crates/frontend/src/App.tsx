@@ -6,6 +6,7 @@ import LoginPage from './pages/LoginPage'
 import ProductPage from './pages/product/ProductPage'
 import PurchasePage from './pages/purchase/PurchasePage'
 import SalesPage from './pages/sales/SalesPage'
+import TodayPricePage from './pages/todayprice/TodayPricePage'
 
 export default function App() {
   return (
@@ -24,6 +25,7 @@ export default function App() {
           <Route path="product" element={<ProductPage />} />
           <Route path="purchase" element={<PurchasePage />} />
           <Route path="sales" element={<SalesPage />} />
+          <Route path="today-price" element={<TodayPricePage />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

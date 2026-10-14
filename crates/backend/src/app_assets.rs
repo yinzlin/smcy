@@ -53,6 +53,11 @@ pub async fn redirect_app_sales() -> impl IntoResponse {
     Redirect::temporary("/app/sales")
 }
 
+/// /mobile/today_price 302 到 React 今日进价采集页（老页保留在 /legacy/today_price 回退）
+pub async fn redirect_app_today_price() -> impl IntoResponse {
+    Redirect::temporary("/app/today-price")
+}
+
 fn serve_embedded(path: &str) -> axum::response::Response {
     match AppAssets::get(path) {
         Some(content) => {
