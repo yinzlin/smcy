@@ -18,6 +18,17 @@ use database::sqlite::repo::purchaser::SqlitePurchaserRepo;
 use database::sqlite::repo::supplier::SqliteSupplierRepo;
 use database::sqlite::repo::user::SqliteUserRepo;
 use database::sqlite::repo::warehouse::SqliteWarehouseRepo;
+use domain::port::product::RemoteImageStore;
+
+/// 远程图片转存基础设施适配器：导入商品时下载网络图片到本地 uploads（复用旧实现）
+#[derive(Clone, Copy)]
+pub struct BackendImageStore;
+
+impl RemoteImageStore for BackendImageStore {
+    async fn save_remote(&self, url: &str, name_prefix: &str) -> Result<String, String> {
+        crate::api::handlers::save_remote_image_to_local(url, name_prefix).await
+    }
+}
 
 /// 应用容器：按业务域聚合全部用例服务（axum State 要求 Clone，池为 Arc 克隆零成本）
 #[derive(Clone)]
@@ -28,7 +39,7 @@ pub struct App {
     pub audit: BasicAuditService<SqliteBasicAuditRepo, SqliteOperationLogRepo>,
     pub supplier: SupplierService<SqliteSupplierRepo>,
     pub purchaser: PurchaserService<SqlitePurchaserRepo>,
-    pub product: ProductService<SqliteProductRepo>,
+    pub product: ProductService<SqliteProductRepo, BackendImageStore>,
 }
 
 /// 初始化数据库；如有待重建的 price_schedule 时段则补跑重建，完成后升级 user_version
@@ -47,6 +58,9 @@ pub async fn bootstrap() -> App {
         audit: BasicAuditService::new(SqliteBasicAuditRepo::new(database::pool().clone()), oplog),
         supplier: SupplierService::new(SqliteSupplierRepo::new(database::pool().clone())),
         purchaser: PurchaserService::new(SqlitePurchaserRepo::new(database::pool().clone())),
-        product: ProductService::new(SqliteProductRepo::new(database::pool().clone())),
+        product: ProductService::new(
+            SqliteProductRepo::new(database::pool().clone()),
+            BackendImageStore,
+        ),
     }
 }

@@ -421,3 +421,163 @@ pub async fn recalc_product_purchase_prices_from_history(product_id: i64) {
         );
     }
 }
+
+/// 政采平台状态自动联动（双向）——自 backend handlers.rs 平移，SQL 逐字一致：
+/// - 快照中 gov_procurement 有数值 → 自动标记「政采商品（有指导价）」(1)
+/// - 快照中无 gov_procurement 或价格为零/空 → 自动回退「非政采商品」(0)，仅回退自动标记的 1，
+///   手动选择的「政采商品（无指导价）」(2) 不受影响。
+/// 依据 product_price 快照判断，价格录入/变更/清空后调用。
+pub async fn auto_mark_gov_status(product_id: i64) {
+    // 有价 → 1
+    let _ = sqlx::query(
+        "UPDATE product SET gov_status = 1
+         WHERE id = ? AND gov_status != 1
+         AND EXISTS (
+             SELECT 1 FROM product_price
+             WHERE product_id = product.id AND price_type = 'gov_procurement' AND price > 0
+         )",
+    )
+    .bind(product_id)
+    .execute(pool())
+    .await;
+    // 无价/零 → 仅回退自动标记的 1 到 0（2 为手动选择，保留）
+    let _ = sqlx::query(
+        "UPDATE product SET gov_status = 0
+         WHERE id = ? AND gov_status = 1
+         AND NOT EXISTS (
+             SELECT 1 FROM product_price
+             WHERE product_id = product.id AND price_type = 'gov_procurement' AND price > 0
+         )",
+    )
+    .bind(product_id)
+    .execute(pool())
+    .await;
+}
+
+/// 按价格策略快照（product_price）同步商品基础单价：
+/// 政采价优先，否则商超1/2/3/AI 非零平均；应用尾数规则后写回 product.base_price。
+/// 价格策略导入/编辑后调用，保证商品列表售价与编辑页计算售价一致。
+pub async fn sync_product_base_price(product_id: i64) {
+    let gov_row = sqlx::query("SELECT price FROM product_price WHERE product_id = ? AND price_type = 'gov_procurement'")
+        .bind(product_id)
+        .fetch_optional(pool())
+        .await
+        .ok()
+        .flatten();
+    let gov_price: Option<f64> = gov_row.map(|r| r.get("price"));
+
+    // 政采平台状态联动（有价→1，零/空→回退0；手动选的2保留）
+    auto_mark_gov_status(product_id).await;
+
+    let avg_row = || async {
+        sqlx::query("SELECT COALESCE(AVG(price), 0.0) as avg_price FROM product_price WHERE product_id = ? AND price_type IN ('supermarket_1','supermarket_2','supermarket_3','ai_realtime') AND price > 0")
+            .bind(product_id)
+            .fetch_optional(pool())
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.get::<f64, _>("avg_price"))
+            .unwrap_or(0.0)
+    };
+
+    let selling_price: f64 = match gov_price {
+        Some(gp) if gp > 0.0 => gp,
+        _ => avg_row().await,
+    };
+
+    if selling_price > 0.0 {
+        // 读取旧值用于日志
+        let old_row = sqlx::query("SELECT base_price FROM product WHERE id = ?")
+            .bind(product_id)
+            .fetch_optional(pool())
+            .await
+            .ok()
+            .flatten();
+        let old_base_price: f64 = old_row.as_ref().map(|r| r.get::<f64, _>("base_price")).unwrap_or(0.0);
+
+        // 售价保留两位小数（四舍五入）后同步，不做末位数字限制
+        let normalized = round2(selling_price);
+        eprintln!(
+            "[售价同步] 商品ID={} 同步售价={:.4} 旧售价={:.4}",
+            product_id, normalized, old_base_price
+        );
+
+        let _ = sqlx::query("UPDATE product SET base_price = ? WHERE id = ?")
+            .bind(normalized)
+            .bind(product_id)
+            .execute(pool())
+            .await;
+
+        // 若开启了自动售价更新，则该同步值会立即被加成率重算覆盖，这里仅记录日志
+        log_price_change(
+            product_id,
+            "base_price",
+            old_base_price,
+            normalized,
+            "sync_base_price",
+            None,
+            Some("按政府指导价/超市价同步"),
+        ).await;
+
+        // 若开启自动更新售价，则按加成率重算 base_price
+        recalc_base_price_by_markup(product_id, "sync_base_price", None).await;
+    }
+}
+
+// 单个商品开启/关闭自动更新售价，并立即按加成率重算 base_price
+pub async fn set_auto_update_price(product_id: i64, auto: i64) {
+    let _ = sqlx::query("UPDATE product SET auto_update_price = ? WHERE id = ?")
+        .bind(auto)
+        .bind(product_id)
+        .execute(pool())
+        .await;
+
+    recalc_base_price_by_markup(product_id, "set_auto_update_price", None).await;
+}
+
+// 批量：对所有商品开启/关闭自动更新售价，并对开启的商品立即按加成率重算 base_price
+pub async fn batch_set_auto_update_price(auto: i64) {
+    let _ = sqlx::query("UPDATE product SET auto_update_price = ?")
+        .bind(auto)
+        .execute(pool())
+        .await;
+
+    if auto == 1 {
+        eprintln!("[批量售价自动更新] 开始处理所有商品（auto=开启）");
+        // 开启时，对所有进价>0 的商品按加成率重算售价
+        let rows = sqlx::query("SELECT id, purchase_price, base_price, markup_rate FROM product WHERE purchase_price > 0")
+            .fetch_all(pool())
+            .await
+            .unwrap_or_default();
+        eprintln!("[批量售价自动更新] 共 {} 个商品需要重算", rows.len());
+        for r in rows {
+            let pid: i64 = r.get("id");
+            let old_base: f64 = r.get("base_price");
+            let purchase: f64 = r.get("purchase_price");
+            let markup: f64 = r.get("markup_rate");
+            let raw = purchase * (1.0 + markup);
+            // 保留两位小数（四舍五入），不做末位数字限制
+            let new_base = round2(raw);
+            eprintln!(
+                "[批量售价自动更新] 商品ID={} 进价={:.4} 加成率={:.4} 计算售价={:.6} 旧售价={:.4}",
+                pid, purchase, markup, new_base, old_base
+            );
+            if (old_base - new_base).abs() >= 0.001 {
+                let _ = sqlx::query("UPDATE product SET base_price = ? WHERE id = ?")
+                    .bind(new_base)
+                    .bind(pid)
+                    .execute(pool())
+                    .await;
+                log_price_change(
+                    pid,
+                    "base_price",
+                    old_base,
+                    new_base,
+                    "batch_set_auto_update_price",
+                    None,
+                    Some("批量开启自动更新售价"),
+                ).await;
+            }
+        }
+    }
+}

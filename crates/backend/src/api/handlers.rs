@@ -17,12 +17,14 @@ use domain::port::audit::BasicTable;
 use domain::port::purchaser::UpsertPurchaser;
 use domain::port::supplier::UpsertSupplier;
 use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder, Workbook, XlsxError};
-use crate::utils::{xlsx_response, xlsx_header_format, parse_keyword_pattern, parse_csv, sanitize_filename_prefix, image_url_to_path, operation_action_label, sanitize_xlsx_string, round2};
+use crate::utils::{xlsx_response, xlsx_header_format, parse_keyword_pattern, parse_csv, sanitize_filename_prefix, image_url_to_path, operation_action_label, sanitize_xlsx_string};
 use crate::generate_order_no;
 use crate::models::*;
 use crate::update_product_purchase_prices;
 use crate::log_price_change;
 use crate::recalc_base_price_by_markup;
+use crate::auto_mark_gov_status;
+use crate::sync_product_base_price;
 use crate::build_purchase_order_export_workbook;
 use crate::get_purchase_order_with_items;
 use crate::PurchaseOrderPrintItem;
@@ -1888,105 +1890,8 @@ pub async fn api_get_uploaded_image(
     }
 }
 
-pub async fn api_product_export() -> impl IntoResponse {
-    let rows = sqlx::query(
-        "SELECT p.id, p.name, p.alias1, p.alias2, p.spec, p.unit, p.base_unit, p.base_price, p.purchase_price, c.name as category_name,
-                COALESCE(gp.price, 0.0) as gov_price,
-                COALESCE(sp1.price, 0.0) as sm1_price,
-                COALESCE(sp2.price, 0.0) as sm2_price,
-                COALESCE(sp3.price, 0.0) as sm3_price,
-                COALESCE(ai.price, 0.0) as ai_price
-         FROM product p
-         LEFT JOIN category c ON p.category_id = c.id
-         LEFT JOIN product_price gp ON gp.product_id = p.id AND gp.price_type = 'gov_procurement'
-         LEFT JOIN product_price sp1 ON sp1.product_id = p.id AND sp1.price_type = 'supermarket_1'
-         LEFT JOIN product_price sp2 ON sp2.product_id = p.id AND sp2.price_type = 'supermarket_2'
-         LEFT JOIN product_price sp3 ON sp3.product_id = p.id AND sp3.price_type = 'supermarket_3'
-         LEFT JOIN product_price ai ON ai.product_id = p.id AND ai.price_type = 'ai_realtime'
-         ORDER BY p.id"
-    )
-    .fetch_all(crate::db::pool())
-    .await
-    .unwrap_or_default();
-    
-    let result: Result<Vec<u8>, XlsxError> = (|| {
-        let mut workbook = Workbook::new();
-        let worksheet = workbook.add_worksheet();
-        
-        let header_format = Format::new()
-            .set_bold()
-            .set_align(FormatAlign::Center)
-            .set_align(FormatAlign::VerticalCenter);
-        
-        let headers = ["ID", "名称", "下订名称(别称1)", "配单名称(别称2)", "规格", "显示单位", "基础单位", "基准单价", "进价", "分类", "政采价", "商超1", "商超2", "商超3", "AI实时采集价", "计算售价"];
-        for (i, &header) in headers.iter().enumerate() {
-            worksheet.write_with_format(0, i as u16, header, &header_format)?;
-        }
-        
-        let mut row_idx = 1;
-        for row in rows {
-            let gov = row.get::<f64, _>("gov_price");
-            let sm1 = row.get::<f64, _>("sm1_price");
-            let sm2 = row.get::<f64, _>("sm2_price");
-            let sm3 = row.get::<f64, _>("sm3_price");
-            let ai = row.get::<f64, _>("ai_price");
-            let base_price = row.get::<f64, _>("base_price");
-            let purchase_price = row.get::<f64, _>("purchase_price");
-            // 计算售价：政采价优先；否则商超1/2/3/AI 中非零价的平均（不做取整，计算原值）
-            let selling = if gov > 0.0 {
-                gov
-            } else {
-                let vals = [sm1, sm2, sm3, ai];
-                let (sum, cnt) = vals.iter().fold((0.0f64, 0usize), |(s, c), &v| if v > 0.0 { (s + v, c + 1) } else { (s, c) });
-                if cnt == 0 { 0.0 } else { round2(sum / cnt as f64) }
-            };
-            // 基础单价：非零计算售价则同步为计算售价，否则取基础单价原值
-            let base_out = if selling > 0.0 { selling } else { base_price };
-            // 基础单位按实际导出
-            let base_unit = row.get::<Option<String>, _>("base_unit").unwrap_or_default();
-            
-            worksheet.write(row_idx, 0, row.get::<i64, _>("id"))?;
-            worksheet.write(row_idx, 1, row.get::<String, _>("name"))?;
-            worksheet.write(row_idx, 2, row.get::<Option<String>, _>("alias1").unwrap_or_default())?;
-            worksheet.write(row_idx, 3, row.get::<Option<String>, _>("alias2").unwrap_or_default())?;
-            worksheet.write(row_idx, 4, row.get::<Option<String>, _>("spec").unwrap_or_default())?;
-            worksheet.write(row_idx, 5, row.get::<String, _>("unit"))?;
-            worksheet.write(row_idx, 6, &base_unit)?;
-            // 价格类值 <=0 时单元格留白
-            if base_out > 0.0 { worksheet.write(row_idx, 7, base_out)?; } else { worksheet.write(row_idx, 7, "")?; }
-            if purchase_price > 0.0 { worksheet.write(row_idx, 8, purchase_price)?; } else { worksheet.write(row_idx, 8, "")?; }
-            worksheet.write(row_idx, 9, row.get::<Option<String>, _>("category_name").unwrap_or_default())?;
-            for (col, v) in [(10u16, gov), (11u16, sm1), (12u16, sm2), (13u16, sm3), (14u16, ai), (15u16, selling)] {
-                if v > 0.0 {
-                    worksheet.write(row_idx, col, v)?;
-                } else {
-                    worksheet.write(row_idx, col, "")?;
-                }
-            }
-            row_idx += 1;
-        }
-        
-        worksheet.set_column_width(0, 8)?;
-        worksheet.set_column_width(1, 20)?;
-        worksheet.set_column_width(2, 18)?;
-        worksheet.set_column_width(3, 18)?;
-        worksheet.set_column_width(4, 12)?;
-        worksheet.set_column_width(5, 8)?;
-        worksheet.set_column_width(6, 10)?;
-        worksheet.set_column_width(7, 12)?;
-        worksheet.set_column_width(8, 10)?;
-        worksheet.set_column_width(9, 12)?;
-        worksheet.set_column_width(10, 10)?;
-        worksheet.set_column_width(11, 10)?;
-        worksheet.set_column_width(12, 10)?;
-        worksheet.set_column_width(13, 10)?;
-        worksheet.set_column_width(14, 14)?;
-        worksheet.set_column_width(15, 12)?;
-        
-        workbook.save_to_buffer()
-    })();
-    
-    match result {
+pub async fn api_product_export(State(app): State<App>) -> impl IntoResponse {
+    match app.product.export().await {
         Ok(data) => (
             StatusCode::OK,
             [
@@ -1995,13 +1900,14 @@ pub async fn api_product_export() -> impl IntoResponse {
             ],
             data,
         ).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("导出失败: {}", e)).into_response(),
+        Err(e) => text_error_response(e).into_response(),
     }
 }
 
-pub async fn api_product_import(content: Bytes) -> impl IntoResponse {
+pub async fn api_product_import(State(app): State<App>, content: Bytes) -> impl IntoResponse {
+    // Excel/CSV 解析为行列文本（传输格式适配保留在 HTTP 层），行级业务写入在用例层
     let rows: Vec<Vec<String>>;
-    
+
     if content.starts_with(&[0x50, 0x4B, 0x03, 0x04]) {
         let content_vec = content.to_vec();
         match open_workbook_auto_from_rs(std::io::Cursor::new(content_vec)) {
@@ -2010,12 +1916,12 @@ pub async fn api_product_import(content: Bytes) -> impl IntoResponse {
                 if sheets.is_empty() {
                     return (StatusCode::BAD_REQUEST, "Excel文件中没有工作表".to_string()).into_response();
                 }
-                
+
                 let range = match workbook.worksheet_range(&sheets[0]) {
                     Ok(r) => r,
                     Err(e) => return (StatusCode::BAD_REQUEST, format!("无法读取Excel文件内容: {}", e)).into_response(),
                 };
-                
+
                 rows = range.rows()
                     .map(|row| {
                         row.iter()
@@ -2039,622 +1945,97 @@ pub async fn api_product_import(content: Bytes) -> impl IntoResponse {
         let content_str = String::from_utf8_lossy(&content).to_string();
         rows = parse_csv(&content_str);
     }
-    
+
     if rows.len() < 2 {
         return (StatusCode::BAD_REQUEST, "文件至少需要包含标题行和一行数据".to_string()).into_response();
     }
-    
-    let mut success = 0;
-    let mut updated = 0;
-    let mut failed = 0;
-    // 失败明细：行号 + 商品名 + 原因（用于导入结果反馈）
-    let mut failures: Vec<String> = Vec::new();
 
-    for (_i, row) in rows.iter().enumerate().skip(1) {
-        // Excel 行号（含表头行，_i 从 1 开始计第一条数据行）
-        let excel_row = _i + 1;
-        let row_no = format!("第{}行", excel_row);
-        if row.len() < 2 {
-            failed += 1;
-            failures.push(format!("{}：行数据不足2列，无法解析", row_no));
-            continue;
-        }
+    let summary = app.product.import(rows).await;
+    (StatusCode::OK, summary).into_response()
+}
 
-        let name = row[1].trim();
-        if name.is_empty() {
-            failed += 1;
-            failures.push(format!("{}：商品名称为空", row_no));
-            continue;
-        }
-        // 明细中的商品名展示（截断避免弹窗过长）
-        let name_disp: String = if name.chars().count() > 20 {
-            let s: String = name.chars().take(20).collect();
-            format!("{}…", s)
-        } else {
-            name.to_string()
-        };
-        
-        let category_name = if row.len() > 9 { row[9].trim() } else { "" };
-        let category_id = if !category_name.is_empty() {
-            let cid: Option<i64> = sqlx::query("SELECT id FROM category WHERE name = ? AND entity_type = 'product'")
-                .bind(category_name)
-                .fetch_optional(crate::db::pool())
-                .await
-                .ok()
-                .flatten()
-                .map(|r| r.get::<i64, _>("id"));
-            cid
-        } else {
-            None
-        };
-        
-        let spec = if row.len() > 4 { row[4].trim() } else { "" };
-        // 价格统一四舍五入保留两位小数
-        let raw_base: f64 = if row.len() > 7 { row[7].trim().parse().unwrap_or(0.0) } else { 0.0 };
-        let raw_purchase: f64 = if row.len() > 8 { row[8].trim().parse().unwrap_or(0.0) } else { 0.0 };
-        let base_price: f64 = (raw_base * 100.0).round() / 100.0;
-        let purchase_price: f64 = (raw_purchase * 100.0).round() / 100.0;
-        let alias1 = if row.len() > 2 { row[2].trim() } else { "" };
-        let alias2 = if row.len() > 3 { row[3].trim() } else { "" };
-        let unit = if row.len() > 5 { row[5].trim() } else { "" };
-        let base_unit = if row.len() > 6 { row[6].trim() } else { "斤" };
-        
-        // 商品写入成功后回填的目标商品 ID（用于后续价格列写入）
-        let mut target_pid: Option<i64> = None;
-
-        // 第一列为商品 ID：ID 存在则更新对应商品；无 ID 或 ID 不存在则追加
-        // ID 解析容错：剔除零宽字符；兼容 "86.0" 式浮点文本；空串=无ID
-        let parse_pid = |s: &str| -> Option<i64> {
-            let cleaned: String = s.chars()
-                .filter(|c| !matches!(*c, '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}'))
-                .collect::<String>().trim().to_string();
-            if cleaned.is_empty() { return None; }
-            if let Ok(v) = cleaned.parse::<i64>() { return if v > 0 { Some(v) } else { None }; }
-            if let Ok(f) = cleaned.parse::<f64>() {
-                if f.fract() == 0.0 && f > 0.0 && f <= i64::MAX as f64 { return Some(f as i64); }
-            }
-            None
-        };
-        let id_str = row[0].trim();
-        let parsed_id = parse_pid(id_str);
-        if !id_str.is_empty() && parsed_id.is_none() {
-            // 填了 ID 但无法识别为数字：明确报失败，避免静默落成"无ID新增"
-            failed += 1;
-            failures.push(format!("{} [{}]：ID列「{}」无法识别为有效数字ID（请填写纯数字ID，或留空由系统分配）", row_no, name_disp, id_str));
-            continue;
-        }
-        if let Some(pid) = parsed_id {
-            let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM product WHERE id = ?")
-                        .bind(pid)
-                        .fetch_one(crate::db::pool())
-                        .await
-                        .unwrap_or(0);
-                    if exists > 0 {
-                        // 同 ID：更新对应商品（修改后置为待审核）
-                        let upd = sqlx::query(
-                            "UPDATE product SET name = ?, alias1 = ?, alias2 = ?, spec = ?, unit = ?, base_unit = ?, base_price = ?, purchase_price = ?, category_id = ?, audit_status = 'pending' WHERE id = ?"
-                        )
-                        .bind(name)
-                        .bind(alias1)
-                        .bind(alias2)
-                        .bind(spec)
-                        .bind(unit)
-                        .bind(base_unit)
-                        .bind(base_price)
-                        .bind(purchase_price)
-                        .bind(category_id)
-                        .bind(pid)
-                        .execute(crate::db::pool())
-                        .await;
-                        match upd {
-                            Ok(r) if r.rows_affected() > 0 => { updated += 1; target_pid = Some(pid); }
-                            Ok(_) => { failed += 1; failures.push(format!("{} [{}]：更新失败（0 行受影响）", row_no, name_disp)); }
-                            Err(e) => {
-                                failed += 1;
-                                let es = e.to_string();
-                                if es.contains("UNIQUE constraint failed") {
-                                    // 名称+规格唯一约束冲突：定位占用该键的已有商品，便于合并/改名
-                                    let cpid: Option<i64> = sqlx::query("SELECT id FROM product WHERE name = ? AND spec = ? LIMIT 1")
-                                        .bind(name).bind(spec)
-                                        .fetch_optional(crate::db::pool()).await.ok().flatten().map(|r| r.get::<i64, _>("id"));
-                                    match cpid {
-                                        Some(c) => failures.push(format!("{} [{}]：更新失败，名称+规格与已有商品 ID {} 冲突（同名同规格唯一），请合并档案或修改名称/规格区分", row_no, name_disp, c)),
-                                        None => failures.push(format!("{} [{}]：更新失败，名称+规格与已有商品冲突（同名同规格唯一）", row_no, name_disp)),
-                                    }
-                                } else {
-                                    failures.push(format!("{} [{}]：更新失败：{}", row_no, name_disp, e));
-                                }
-                            }
-                        }
-                    }
-                    // exists == 0：该 ID 不存在 → 落到下方追加
-        }
-
-        if target_pid.is_none() {
-            // 无 ID 或 ID 不存在：追加（按 name+spec 唯一约束去重）
-            // 文件带有效 ID 且库中不存在时，显式使用该 ID 创建，保持 ID 一致
-            let imported_pid: Option<i64> = parsed_id;
-            let result = sqlx::query(
-                "INSERT OR IGNORE INTO product(id, name, alias1, alias2, spec, unit, base_unit, base_price, purchase_price, category_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-            )
-            .bind(imported_pid)
-            .bind(name)
-            .bind(alias1)
-            .bind(alias2)
-            .bind(spec)
-            .bind(unit)
-            .bind(base_unit)
-            .bind(base_price)
-            .bind(purchase_price)
-            .bind(category_id)
-            .execute(crate::db::pool())
-            .await;
-            
-            match result {
-                Ok(res) => {
-                    if res.rows_affected() > 0 {
-                        success += 1;
-                        target_pid = Some(res.last_insert_rowid());
-                    } else {
-                        failed += 1;
-                        // INSERT OR IGNORE 被忽略：名称+规格唯一约束冲突
-                        // ID 为唯一辨识：如需更新已有商品，请在 ID 列填写其商品ID；如为新商品，请修改名称/规格区分
-                        failures.push(format!("{} [{}]：未提供有效ID，且同名同规格商品已存在（请在ID列填写已有商品ID进行更新，或修改名称/规格区分）", row_no, name_disp));
-                    }
-                }
-                Err(e) => {
-                    failed += 1;
-                    let es = e.to_string();
-                    if es.contains("UNIQUE constraint failed") {
-                        failures.push(format!("{} [{}]：新增失败，名称+规格与已有商品冲突（同名同规格唯一），如需更新请填写该商品ID", row_no, name_disp));
-                    } else {
-                        failures.push(format!("{} [{}]：新增失败：{}", row_no, name_disp, e));
-                    }
-                }
-            }
-        }
-        
-        // 图片URL列（第16列，可选）：下载网络图片转存到本地并回填 image_url
-        // 转存失败不阻断该行商品写入，仅记入失败明细
-        if let Some(pid) = target_pid {
-            let img_url_raw = if row.len() > 15 { row[15].trim() } else { "" };
-            if !img_url_raw.is_empty() {
-                match save_remote_image_to_local(img_url_raw, &sanitize_filename_prefix(name)).await {
-                    Ok(local_url) => {
-                        let _ = sqlx::query("UPDATE product SET image_url = ? WHERE id = ?")
-                            .bind(&local_url)
-                            .bind(pid)
-                            .execute(crate::db::pool())
-                            .await;
-                    }
-                    Err(e) => {
-                        failures.push(format!("{} [{}]：图片转存失败：{}", row_no, name_disp, e));
-                    }
-                }
-            }
-        }
-
-        // 价格列写入（仅当商品写入成功）：政采价/商超1/商超2/商超3/AI实时采集价
-        // 写入 product_price_schedule（effective_date=今天，当天已有记录则覆盖）+ product_price 快照
-        if let Some(pid) = target_pid {
-            let today = Local::now().format("%Y-%m-%d").to_string();
-            let price_specs = [
-                ("gov_procurement", 10usize),
-                ("supermarket_1", 11usize),
-                ("supermarket_2", 12usize),
-                ("supermarket_3", 13usize),
-                ("ai_realtime", 14usize),
-            ];
-            for (pt, idx) in price_specs {
-                let raw = if row.len() > idx { row[idx].trim() } else { "" };
-                if raw.is_empty() { continue; }
-                if let Ok(pv) = raw.parse::<f64>() {
-                    let pv = (pv * 100.0).round() / 100.0;
-                    if pv > 0.0 {
-                        // 时段价：今天生效（同一天重复导入则覆盖价格）
-                        let _ = sqlx::query(
-                            "INSERT INTO product_price_schedule(product_id, price_type, price, effective_date, end_date, source, remark)
-                             VALUES (?, ?, ?, ?, NULL, ?, NULL)
-                             ON CONFLICT(product_id, price_type, effective_date) DO UPDATE SET price = excluded.price"
-                        )
-                        .bind(pid)
-                        .bind(pt)
-                        .bind(pv)
-                        .bind(&today)
-                        .bind("商品导入")
-                        .execute(crate::db::pool())
-                        .await;
-                        // 快照：商品编辑表单回显的当前价
-                        let _ = sqlx::query(
-                            "INSERT OR REPLACE INTO product_price(product_id, price_type, price, collected_at, source) VALUES (?, ?, ?, ?, ?)"
-                        )
-                        .bind(pid)
-                        .bind(pt)
-                        .bind(pv)
-                        .bind(&today)
-                        .bind("商品导入")
-                        .execute(crate::db::pool())
-                        .await;
-                        // 维护时段连续性
-                        let _ = crate::rebuild_price_schedule_end_dates(pid, pt).await;
-                        // 政采平台价有数值时自动标记政采状态
-                        if pt == "gov_procurement" {
-                            auto_mark_gov_status(pid).await;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    // 汇总结果 + 失败明细（明细最多展示 50 条，避免弹窗过长）
-    let summary = format!("导入完成：新增 {} 条，更新 {} 条，失败 {} 条", success, updated, failed);
-    if failures.is_empty() {
-        (StatusCode::OK, summary).into_response()
-    } else {
-        let detail: String = failures.iter().take(50).cloned().collect::<Vec<_>>().join("\n");
-        let more = if failures.len() > 50 { format!("\n……其余 {} 条失败明细已省略", failures.len() - 50) } else { String::new() };
-        (StatusCode::OK, format!("{}\n失败明细：\n{}{}", summary, detail, more)).into_response()
+pub async fn api_product_unit_create(State(app): State<App>, Json(req): Json<ProductUnitReq>) -> (StatusCode, String) {
+    match app.product.unit_create(req).await {
+        Ok(msg) => (StatusCode::OK, msg),
+        Err(e) => text_error_response(e),
     }
 }
 
-pub async fn api_product_unit_create(Json(req): Json<ProductUnitReq>) -> impl IntoResponse {
-    // 商品单位属价格维度（随时变动），不受商品基础信息审核状态锁定
-    // 价格统一四舍五入保留两位小数
-    let unit_price = ((req.unit_price.unwrap_or(0.0)) * 100.0).round() / 100.0;
-    let purchase_price = ((req.purchase_price.unwrap_or(0.0)) * 100.0).round() / 100.0;
-    let result = sqlx::query(
-        "INSERT INTO product_unit(product_id, unit_name, ratio, unit_price, purchase_price, sort_order) VALUES (?, ?, ?, ?, ?, ?)"
-    )
-    .bind(req.product_id)
-    .bind(&req.unit_name)
-    .bind(req.ratio)
-    .bind(unit_price)
-    .bind(purchase_price)
-    .bind(req.sort_order.unwrap_or(0))
-    .execute(crate::db::pool())
-    .await;
-
-    match result {
-        Ok(_) => (StatusCode::OK, "创建成功".to_string()),
-        Err(e) => {
-            eprintln!("创建单位失败: {:?}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("创建单位失败: {:?}", e))
-        }
+pub async fn api_product_unit_update(State(app): State<App>, Json(req): Json<ProductUnitReq>) -> (StatusCode, String) {
+    match app.product.unit_update(req).await {
+        Ok(msg) => (StatusCode::OK, msg),
+        Err(e) => text_error_response(e),
     }
 }
 
-pub async fn api_product_unit_update(Json(req): Json<ProductUnitReq>) -> (StatusCode, String) {
-    // 价格统一四舍五入保留两位小数
-    let unit_price = ((req.unit_price.unwrap_or(0.0)) * 100.0).round() / 100.0;
-    let purchase_price = ((req.purchase_price.unwrap_or(0.0)) * 100.0).round() / 100.0;
-    let result = sqlx::query(
-        "UPDATE product_unit SET unit_name = ?, ratio = ?, unit_price = ?, purchase_price = ?, sort_order = ? WHERE id = ?"
-    )
-    .bind(&req.unit_name)
-    .bind(req.ratio)
-    .bind(unit_price)
-    .bind(purchase_price)
-    .bind(req.sort_order.unwrap_or(0))
-    .bind(req.product_id)
-    .execute(crate::db::pool())
-    .await;
-
-    match result {
-        Ok(_) => (StatusCode::OK, "更新成功".to_string()),
-        Err(e) => {
-            eprintln!("更新单位失败: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "更新失败".to_string())
-        }
+pub async fn api_product_unit_delete(State(app): State<App>, Json(req): Json<DeleteReq>) -> (StatusCode, String) {
+    match app.product.unit_delete(req.id).await {
+        Ok(msg) => (StatusCode::OK, msg),
+        Err(e) => text_error_response(e),
     }
 }
 
-pub async fn api_product_unit_delete(Json(req): Json<DeleteReq>) -> (StatusCode, String) {
-    let result = sqlx::query("DELETE FROM product_unit WHERE id = ?")
-        .bind(req.id)
-        .execute(crate::db::pool())
-        .await;
-    match result {
-        Ok(r) => {
-            if r.rows_affected() > 0 {
-                (StatusCode::OK, "删除成功".to_string())
-            } else {
-                (StatusCode::NOT_FOUND, "单位不存在".to_string())
-            }
-        }
-        Err(e) => {
-            eprintln!("删除单位失败: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "删除失败".to_string())
-        }
-    }
-}
-
-pub async fn api_product_unit_delete_by_product(Json(req): Json<serde_json::Value>) -> (StatusCode, String) {
+pub async fn api_product_unit_delete_by_product(State(app): State<App>, Json(req): Json<serde_json::Value>) -> (StatusCode, String) {
     let product_id = req["product_id"].as_i64().unwrap_or(0);
-    // 商品单位属价格维度（随时变动），不受商品基础信息审核状态锁定
-    let result = sqlx::query("DELETE FROM product_unit WHERE product_id = ?")
-        .bind(product_id)
-        .execute(crate::db::pool())
-        .await;
-    match result {
-        Ok(_) => (StatusCode::OK, "删除成功".to_string()),
-        Err(e) => {
-            eprintln!("删除单位失败: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "删除失败".to_string())
-        }
+    match app.product.unit_delete_by_product(product_id).await {
+        Ok(msg) => (StatusCode::OK, msg),
+        Err(e) => text_error_response(e),
     }
 }
 
-pub async fn api_product_unit_list(headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+pub async fn api_product_unit_list(State(app): State<App>, headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     let is_super_admin = crate::auth::get_user_ctx(&headers).await.role == "super_admin";
     let product_id = params.get("product_id").and_then(|s| s.parse::<i64>().ok());
-    if product_id.is_none() {
-        return (StatusCode::OK, serde_json::to_string(&Vec::<serde_json::Value>::new()).unwrap());
-    }
-    
-    let rows = sqlx::query(
-        "SELECT unit_name, ratio, unit_price, purchase_price FROM product_unit WHERE product_id = ? ORDER BY sort_order, id"
-    )
-    .bind(product_id.unwrap())
-    .fetch_all(crate::db::pool())
-    .await
-    .unwrap_or_default();
-    
-    let units: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|row| serde_json::json!({
-            "name": row.get::<String, _>("unit_name"),
-            "ratio": row.get::<f64, _>("ratio"),
-            "unit_price": row.get::<f64, _>("unit_price"),
-            "purchase_price": if is_super_admin { row.get::<f64, _>("purchase_price") } else { 0.0 },
-        }))
-        .collect();
-    
-    (StatusCode::OK, serde_json::to_string(&units).unwrap())
+    (StatusCode::OK, app.product.unit_list(is_super_admin, product_id).await)
 }
 
-pub async fn api_product_price_upsert(Json(req): Json<ProductPriceReq>) -> impl IntoResponse {
-    // product_price 为最新价快照（价格策略 schedule 会同步刷新），属价格维度，不受商品审核锁定
-    let result = sqlx::query(
-        "INSERT OR REPLACE INTO product_price(product_id, price_type, price, collected_at, source) VALUES (?, ?, ?, ?, ?)"
-    )
-    .bind(req.product_id)
-    .bind(&req.price_type)
-    .bind(req.price.unwrap_or(0.0))
-    .bind(&req.collected_at)
-    .bind(&req.source)
-    .execute(crate::db::pool())
-    .await;
-
-    // 政采平台价有数值时，政采平台状态自动标记为「政采商品（有指导价）」
-    if result.is_ok() {
-        auto_mark_gov_status(req.product_id).await;
-    }
-
-    match result {
-        Ok(_) => StatusCode::OK.into_response(),
-        Err(e) => {
-            eprintln!("保存价格失败: {:?}", e);
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
+pub async fn api_product_price_upsert(State(app): State<App>, Json(req): Json<ProductPriceReq>) -> impl IntoResponse {
+    match app.product.price_upsert(req).await {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(e) => text_error_response(e).into_response(),
     }
 }
 
-pub async fn api_product_price_list(axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+pub async fn api_product_price_list(State(app): State<App>, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     let product_id = match params.get("product_id") {
         Some(v) => v.parse::<i64>().unwrap_or(0),
         None => 0,
     };
-    
-    let rows = sqlx::query("SELECT id, product_id, price_type, price, collected_at, source FROM product_price WHERE product_id = ?")
-        .bind(product_id)
-        .fetch_all(crate::db::pool())
-        .await
-        .unwrap_or_default();
-    
-    let prices: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::json!({
-        "id": r.get::<i64, _>("id"),
-        "product_id": r.get::<i64, _>("product_id"),
-        "price_type": r.get::<String, _>("price_type"),
-        "price": r.get::<f64, _>("price"),
-        "collected_at": r.get::<Option<String>, _>("collected_at"),
-        "source": r.get::<Option<String>, _>("source"),
-    })).collect();
-    
-    (StatusCode::OK, serde_json::to_string(&prices).unwrap())
+    (StatusCode::OK, app.product.price_list(product_id).await)
 }
 
-pub async fn api_product_price_delete(Json(req): Json<DeleteReq>) -> (StatusCode, String) {
-    let result = sqlx::query("DELETE FROM product_price WHERE id = ?")
-        .bind(req.id)
-        .execute(crate::db::pool())
-        .await;
-    match result {
-        Ok(r) => {
-            if r.rows_affected() > 0 {
-                (StatusCode::OK, "删除成功".to_string())
-            } else {
-                (StatusCode::NOT_FOUND, "价格记录不存在".to_string())
-            }
-        }
-        Err(e) => {
-            eprintln!("删除价格失败: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "删除失败".to_string())
-        }
+pub async fn api_product_price_delete(State(app): State<App>, Json(req): Json<DeleteReq>) -> (StatusCode, String) {
+    match app.product.price_delete(req.id).await {
+        Ok(msg) => (StatusCode::OK, msg),
+        Err(e) => text_error_response(e),
     }
 }
 
-pub async fn api_product_price_delete_by_product(Json(req): Json<std::collections::HashMap<String, i64>>) -> impl IntoResponse {
+pub async fn api_product_price_delete_by_product(State(app): State<App>, Json(req): Json<std::collections::HashMap<String, i64>>) -> impl IntoResponse {
     let product_id = match req.get("product_id") {
         Some(&id) => id,
         None => return StatusCode::BAD_REQUEST.into_response(),
     };
-    // product_price 为最新价快照（价格策略 schedule 会同步刷新），属价格维度，不受商品审核锁定
-    sqlx::query("DELETE FROM product_price WHERE product_id = ?")
-        .bind(product_id)
-        .execute(crate::db::pool())
-        .await
-        .ok();
+    app.product.price_delete_by_product(product_id).await;
     StatusCode::OK.into_response()
 }
 
-/// 政采平台状态自动联动（双向）：
-/// - 快照中 gov_procurement 有数值 → 自动标记「政采商品（有指导价）」(1)
-/// - 快照中无 gov_procurement 或价格为零/空 → 自动回退「非政采商品」(0)，仅回退自动标记的 1，
-///   手动选择的「政采商品（无指导价）」(2) 不受影响。
-/// 依据 product_price 快照判断，价格录入/变更/清空后调用。
-pub(crate) async fn auto_mark_gov_status(product_id: i64) {
-    // 有价 → 1
-    let _ = sqlx::query(
-        "UPDATE product SET gov_status = 1
-         WHERE id = ? AND gov_status != 1
-         AND EXISTS (
-             SELECT 1 FROM product_price
-             WHERE product_id = product.id AND price_type = 'gov_procurement' AND price > 0
-         )",
-    )
-    .bind(product_id)
-    .execute(crate::db::pool())
-    .await;
-    // 无价/零 → 仅回退自动标记的 1 到 0（2 为手动选择，保留）
-    let _ = sqlx::query(
-        "UPDATE product SET gov_status = 0
-         WHERE id = ? AND gov_status = 1
-         AND NOT EXISTS (
-             SELECT 1 FROM product_price
-             WHERE product_id = product.id AND price_type = 'gov_procurement' AND price > 0
-         )",
-    )
-    .bind(product_id)
-    .execute(crate::db::pool())
-    .await;
-}
-
-/// 按价格策略快照（product_price）同步商品基础单价：
-/// 政采价优先，否则商超1/2/3/AI 非零平均；应用尾数规则后写回 product.base_price。
-/// 价格策略导入/编辑后调用，保证商品列表售价与编辑页计算售价一致。
-pub(crate) async fn sync_product_base_price(product_id: i64) {
-    let gov_row = sqlx::query("SELECT price FROM product_price WHERE product_id = ? AND price_type = 'gov_procurement'")
-        .bind(product_id)
-        .fetch_optional(crate::db::pool())
-        .await
-        .ok()
-        .flatten();
-    let gov_price: Option<f64> = gov_row.map(|r| r.get("price"));
-
-    // 政采平台状态联动（有价→1，零/空→回退0；手动选的2保留）
-    auto_mark_gov_status(product_id).await;
-
-    let avg_row = || async {
-        sqlx::query("SELECT COALESCE(AVG(price), 0.0) as avg_price FROM product_price WHERE product_id = ? AND price_type IN ('supermarket_1','supermarket_2','supermarket_3','ai_realtime') AND price > 0")
-            .bind(product_id)
-            .fetch_optional(crate::db::pool())
-            .await
-            .ok()
-            .flatten()
-            .map(|r| r.get::<f64, _>("avg_price"))
-            .unwrap_or(0.0)
-    };
-
-    let selling_price: f64 = match gov_price {
-        Some(gp) if gp > 0.0 => gp,
-        _ => avg_row().await,
-    };
-
-    if selling_price > 0.0 {
-        // 读取旧值用于日志
-        let old_row = sqlx::query("SELECT base_price FROM product WHERE id = ?")
-            .bind(product_id)
-            .fetch_optional(crate::db::pool())
-            .await
-            .ok()
-            .flatten();
-        let old_base_price: f64 = old_row.as_ref().map(|r| r.get::<f64, _>("base_price")).unwrap_or(0.0);
-
-        // 售价保留两位小数（四舍五入）后同步，不做末位数字限制
-        let normalized = round2(selling_price);
-        eprintln!(
-            "[售价同步] 商品ID={} 同步售价={:.4} 旧售价={:.4}",
-            product_id, normalized, old_base_price
-        );
-
-        let _ = sqlx::query("UPDATE product SET base_price = ? WHERE id = ?")
-            .bind(normalized)
-            .bind(product_id)
-            .execute(crate::db::pool())
-            .await;
-
-        // 若开启了自动售价更新，则该同步值会立即被加成率重算覆盖，这里仅记录日志
-        log_price_change(
-            product_id,
-            "base_price",
-            old_base_price,
-            normalized,
-            "sync_base_price",
-            None,
-            Some("按政府指导价/超市价同步"),
-        ).await;
-
-        // 若开启自动更新售价，则按加成率重算 base_price
-        recalc_base_price_by_markup(product_id, "sync_base_price", None).await;
-    }
-}
-
-pub async fn api_product_sync_base_price(Json(req): Json<std::collections::HashMap<String, i64>>) -> impl IntoResponse {
+pub async fn api_product_sync_base_price(State(app): State<App>, Json(req): Json<std::collections::HashMap<String, i64>>) -> impl IntoResponse {
     let product_id = match req.get("product_id") {
         Some(&id) => id,
         None => return StatusCode::BAD_REQUEST,
     };
-    sync_product_base_price(product_id).await;
+    app.product.sync_base_price(product_id).await;
     StatusCode::OK
 }
 
 pub async fn api_product_price_log_list(
+    State(app): State<App>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let product_id: Option<i64> = params.get("product_id").and_then(|s| s.parse().ok());
     let limit: i64 = params.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100);
-
-    let rows = if let Some(pid) = product_id {
-        sqlx::query(
-            "SELECT ppl.id, ppl.product_id, p.name as product_name, ppl.price_type, ppl.old_price, ppl.new_price, ppl.source, ppl.ref_id, ppl.remark, ppl.changed_at
-             FROM product_price_log ppl LEFT JOIN product p ON ppl.product_id = p.id
-             WHERE ppl.product_id = ? ORDER BY ppl.changed_at DESC LIMIT ?"
-        )
-        .bind(pid)
-        .bind(limit)
-        .fetch_all(crate::db::pool())
-        .await
-        .unwrap_or_default()
-    } else {
-        sqlx::query(
-            "SELECT ppl.id, ppl.product_id, p.name as product_name, ppl.price_type, ppl.old_price, ppl.new_price, ppl.source, ppl.ref_id, ppl.remark, ppl.changed_at
-             FROM product_price_log ppl LEFT JOIN product p ON ppl.product_id = p.id
-             ORDER BY ppl.changed_at DESC LIMIT ?"
-        )
-        .bind(limit)
-        .fetch_all(crate::db::pool())
-        .await
-        .unwrap_or_default()
-    };
-
-    let logs: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|r| serde_json::json!({
-            "id": r.get::<i64, _>("id"),
-            "product_id": r.get::<i64, _>("product_id"),
-            "product_name": r.get::<Option<String>, _>("product_name"),
-            "price_type": r.get::<String, _>("price_type"),
-            "old_price": r.get::<f64, _>("old_price"),
-            "new_price": r.get::<f64, _>("new_price"),
-            "source": r.get::<Option<String>, _>("source"),
-            "ref_id": r.get::<Option<i64>, _>("ref_id"),
-            "remark": r.get::<Option<String>, _>("remark"),
-            "changed_at": r.get::<Option<String>, _>("changed_at"),
-        }))
-        .collect();
-
-    (StatusCode::OK, serde_json::to_string(&logs).unwrap())
+    (StatusCode::OK, app.product.price_log_list(product_id, limit).await)
 }
 
 pub async fn api_category_list(State(app): State<App>) -> impl IntoResponse {
@@ -2768,6 +2149,7 @@ pub async fn api_order_generate_no(axum::extract::Query(params): axum::extract::
 }
 
 pub async fn api_product_set_auto_update_price(
+    State(app): State<App>,
     Json(req): Json<std::collections::HashMap<String, i64>>,
 ) -> impl IntoResponse {
     let product_id = match req.get("product_id") {
@@ -2775,70 +2157,21 @@ pub async fn api_product_set_auto_update_price(
         None => return (StatusCode::BAD_REQUEST, serde_json::json!({"error": "missing product_id"}).to_string()).into_response(),
     };
     let auto = req.get("auto_update_price").copied().unwrap_or(1);
-
-    let _ = sqlx::query("UPDATE product SET auto_update_price = ? WHERE id = ?")
-        .bind(auto)
-        .bind(product_id)
-        .execute(crate::db::pool())
-        .await;
-
-    recalc_base_price_by_markup(product_id, "set_auto_update_price", None).await;
-
+    app.product.set_auto_update_price(product_id, auto).await;
     (StatusCode::OK, serde_json::json!({"ok": true}).to_string()).into_response()
 }
 
 pub async fn api_product_batch_set_auto_update_price(
+    State(app): State<App>,
     Json(req): Json<std::collections::HashMap<String, i64>>,
 ) -> impl IntoResponse {
     let auto = req.get("auto_update_price").copied().unwrap_or(1);
-    let _ = sqlx::query("UPDATE product SET auto_update_price = ?")
-        .bind(auto)
-        .execute(crate::db::pool())
-        .await;
-
-    if auto == 1 {
-        eprintln!("[批量售价自动更新] 开始处理所有商品（auto=开启）");
-        // 开启时，对所有进价>0 的商品按加成率重算售价
-        let rows = sqlx::query("SELECT id, purchase_price, base_price, markup_rate FROM product WHERE purchase_price > 0")
-            .fetch_all(crate::db::pool())
-            .await
-            .unwrap_or_default();
-        eprintln!("[批量售价自动更新] 共 {} 个商品需要重算", rows.len());
-        for r in rows {
-            let pid: i64 = r.get("id");
-            let old_base: f64 = r.get("base_price");
-            let purchase: f64 = r.get("purchase_price");
-            let markup: f64 = r.get("markup_rate");
-            let raw = purchase * (1.0 + markup);
-            // 保留两位小数（四舍五入），不做末位数字限制
-            let new_base = round2(raw);
-            eprintln!(
-                "[批量售价自动更新] 商品ID={} 进价={:.4} 加成率={:.4} 计算售价={:.6} 旧售价={:.4}",
-                pid, purchase, markup, new_base, old_base
-            );
-            if (old_base - new_base).abs() >= 0.001 {
-                let _ = sqlx::query("UPDATE product SET base_price = ? WHERE id = ?")
-                    .bind(new_base)
-                    .bind(pid)
-                    .execute(crate::db::pool())
-                    .await;
-                log_price_change(
-                    pid,
-                    "base_price",
-                    old_base,
-                    new_base,
-                    "batch_set_auto_update_price",
-                    None,
-                    Some("批量开启自动更新售价"),
-                ).await;
-            }
-        }
-    }
-
+    app.product.batch_set_auto_update_price(auto).await;
     (StatusCode::OK, serde_json::json!({"ok": true}).to_string()).into_response()
 }
 
 pub async fn api_product_last_purchase_price(
+    State(app): State<App>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let product_id: i64 = match params.get("product_id").and_then(|s| s.parse().ok()) {
@@ -2846,54 +2179,10 @@ pub async fn api_product_last_purchase_price(
         None => return (StatusCode::BAD_REQUEST, serde_json::json!({"error": "missing product_id"}).to_string()).into_response(),
     };
 
-    // 优先用商品表里维护的 purchase_price（每次采购后已同步）
-    let row = sqlx::query(
-        "SELECT purchase_price, base_unit FROM product WHERE id = ?"
-    )
-    .bind(product_id)
-    .fetch_optional(crate::db::pool())
-    .await
-    .ok()
-    .flatten();
-
-    if let Some(r) = row {
-        let purchase_price: f64 = r.get("purchase_price");
-        let base_unit: String = r.get("base_unit");
-        // 同时取出最近一次采购的原始下单单价及单位，便于前端核对是否同基础单位
-        let last_row = sqlx::query(
-            "SELECT poi.unit_price, poi.unit, p.base_unit
-             FROM purchase_order_item poi
-             JOIN purchase_order po ON poi.order_id = po.id
-             JOIN product p ON poi.product_id = p.id
-             WHERE poi.product_id = ?
-             ORDER BY po.order_date DESC, po.id DESC
-             LIMIT 1"
-        )
-        .bind(product_id)
-        .fetch_optional(crate::db::pool())
-        .await
-        .ok()
-        .flatten();
-
-        let (last_unit_price, last_unit) = if let Some(lr) = last_row {
-            (
-                lr.get::<f64, _>("unit_price"),
-                lr.get::<String, _>("unit"),
-            )
-        } else {
-            (0.0, base_unit.clone())
-        };
-
-        let payload = serde_json::json!({
-            "purchase_price": purchase_price,
-            "base_unit": base_unit,
-            "last_unit_price": last_unit_price,
-            "last_unit": last_unit,
-        });
-        return (StatusCode::OK, serde_json::to_string(&payload).unwrap()).into_response();
+    match app.product.last_purchase_price(product_id).await {
+        Some(body) => (StatusCode::OK, body).into_response(),
+        None => (StatusCode::NOT_FOUND, serde_json::json!({"error": "product not found"}).to_string()).into_response(),
     }
-
-    (StatusCode::NOT_FOUND, serde_json::json!({"error": "product not found"}).to_string()).into_response()
 }
 
 pub async fn api_purchase_order_create(headers: axum::http::HeaderMap, Json(req): Json<PurchaseOrderReq>) -> impl IntoResponse {

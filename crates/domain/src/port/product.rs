@@ -186,6 +186,103 @@ impl std::fmt::Display for DeleteCascadeError {
     }
 }
 
+/// 商品导出行（api_product_export 宽表：政采/商超1/2/3/AI 左联展开）
+#[derive(Debug, Clone)]
+pub struct ProductExportRow {
+    pub id: i64,
+    pub name: String,
+    pub alias1: Option<String>,
+    pub alias2: Option<String>,
+    pub spec: Option<String>,
+    pub unit: String,
+    pub base_unit: Option<String>,
+    pub base_price: f64,
+    pub purchase_price: f64,
+    pub category_name: Option<String>,
+    pub gov_price: f64,
+    pub sm1_price: f64,
+    pub sm2_price: f64,
+    pub sm3_price: f64,
+    pub ai_price: f64,
+}
+
+/// 价格快照完整行（api_product_price_list）
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PriceSnapshotRow {
+    pub id: i64,
+    pub product_id: i64,
+    pub price_type: String,
+    pub price: f64,
+    pub collected_at: Option<String>,
+    pub source: Option<String>,
+}
+
+/// 价格变更日志行（api_product_price_log_list）
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PriceLogRow {
+    pub id: i64,
+    pub product_id: i64,
+    pub product_name: Option<String>,
+    pub price_type: String,
+    pub old_price: f64,
+    pub new_price: f64,
+    pub source: Option<String>,
+    pub ref_id: Option<i64>,
+    pub remark: Option<String>,
+    pub changed_at: Option<String>,
+}
+
+/// 商品进价信息（api_product_last_purchase_price 第一段查询）
+#[derive(Debug, Clone)]
+pub struct ProductPurchaseInfo {
+    pub purchase_price: f64,
+    pub base_unit: String,
+}
+
+/// 最近一次采购明细行（api_product_last_purchase_price 第二段查询）
+#[derive(Debug, Clone)]
+pub struct LastPurchaseItemRow {
+    pub unit_price: f64,
+    pub unit: String,
+}
+
+/// 导入行解析后的商品字段（价格已四舍五入两位）
+#[derive(Debug, Clone, Default)]
+pub struct ImportProduct {
+    pub name: String,
+    pub alias1: String,
+    pub alias2: String,
+    pub spec: String,
+    pub unit: String,
+    pub base_unit: String,
+    pub base_price: f64,
+    pub purchase_price: f64,
+    pub category_id: Option<i64>,
+}
+
+/// 导入追加结果：Inserted(新行id) / Ignored（INSERT OR IGNORE 被唯一约束忽略）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ImportInsertOutcome {
+    Inserted(i64),
+    Ignored,
+}
+
+/// 商品单位写入入参（unit_create / unit_update 共用）
+#[derive(Debug, Clone, Default)]
+pub struct NewProductUnit {
+    pub product_id: i64,
+    pub unit_name: String,
+    pub ratio: f64,
+    pub unit_price: f64,
+    pub purchase_price: f64,
+    pub sort_order: i32,
+}
+
+/// 远程图片转存出站端口：下载网络图片到本地 uploads 目录（导入/图片上传等场景）
+pub trait RemoteImageStore: Send + Sync {
+    async fn save_remote(&self, url: &str, name_prefix: &str) -> Result<String, String>;
+}
+
 /// 商品仓储端口
 pub trait ProductRepo: Send + Sync {
     /// 分页列表，返回 (行, 总数)；总数查询失败按旧行为上抛（旧 unwrap → 500）
@@ -216,4 +313,56 @@ pub trait ProductRepo: Send + Sync {
     async fn count_refs(&self, id: i64) -> Result<RefCounts, RefCountError>;
     /// 事务内清附属数据并删除商品，返回 rows_affected（0=不存在）
     async fn delete_cascade(&self, id: i64) -> Result<u64, DeleteCascadeError>;
+
+    // —— 子步b：导出 / 导入 ——
+
+    /// 导出宽表（政采/商超1/2/3/AI 左联展开；失败按旧行为吞错返回空，由用例层处理）
+    async fn list_for_export(&self) -> Result<Vec<ProductExportRow>, DomainError>;
+    /// 按分类名查 id（entity_type='product'）
+    async fn find_category_id(&self, name: &str) -> Result<Option<i64>, DomainError>;
+    /// 按 id 计数（导入按 ID 更新分支；失败按旧行为吞为 0）
+    async fn count_by_id(&self, id: i64) -> Result<i64, DomainError>;
+    /// 导入按 ID 更新（SQL 内置 audit_status='pending'），返回 rows_affected
+    async fn import_update(&self, id: i64, p: &ImportProduct) -> Result<u64, DomainError>;
+    /// 名称+规格定位占用商品 id（UNIQUE 冲突提示用）
+    async fn find_id_by_name_spec(&self, name: &str, spec: &str) -> Result<Option<i64>, DomainError>;
+    /// 导入追加（INSERT OR IGNORE；被忽略=Ignored，成功=Inserted(rowid)）
+    async fn import_insert(&self, id: Option<i64>, p: &ImportProduct) -> Result<ImportInsertOutcome, DomainError>;
+    /// 回填导入转存的图片 URL
+    async fn set_image_url(&self, id: i64, image_url: &str) -> Result<(), DomainError>;
+    /// 导入价格列：时段价写入（今天生效，同日覆盖）
+    async fn import_schedule_price(&self, product_id: i64, price_type: &str, price: f64, effective_date: &str, source: &str) -> Result<(), DomainError>;
+    /// 导入价格列：快照写入
+    async fn import_price_snapshot(&self, product_id: i64, price_type: &str, price: f64, collected_at: &str, source: &str) -> Result<(), DomainError>;
+
+    // —— 子步b：商品单位 ——
+
+    /// 新建商品单位
+    async fn unit_create(&self, u: &NewProductUnit) -> Result<(), DomainError>;
+    /// 更新商品单位（旧行为 WHERE id 直接取请求的 product_id 字段）
+    async fn unit_update(&self, id: i64, u: &NewProductUnit) -> Result<(), DomainError>;
+    /// 删除商品单位，返回 rows_affected（0=不存在）
+    async fn unit_delete(&self, id: i64) -> Result<u64, DomainError>;
+    /// 按商品清空单位（吞错由用例层处理）
+    async fn unit_delete_by_product(&self, product_id: i64) -> Result<(), DomainError>;
+
+    // —— 子步b：价格快照 ——
+
+    /// 价格快照 UPSERT（INSERT OR REPLACE）
+    async fn price_upsert(&self, product_id: i64, price_type: &str, price: f64, collected_at: Option<&str>, source: Option<&str>) -> Result<(), DomainError>;
+    /// 价格快照全列行（失败按旧行为吞错返回空，由用例层处理）
+    async fn price_rows(&self, product_id: i64) -> Result<Vec<PriceSnapshotRow>, DomainError>;
+    /// 删除价格快照，返回 rows_affected（0=不存在）
+    async fn price_delete(&self, id: i64) -> Result<u64, DomainError>;
+    /// 按商品清空价格快照（旧行为吞错恒成功）
+    async fn price_delete_by_product(&self, product_id: i64) -> Result<(), DomainError>;
+
+    // —— 子步b：最近进价 / 价格日志 ——
+
+    /// 商品进价信息（purchase_price/base_unit；None=不存在或查询失败）
+    async fn get_purchase_info(&self, product_id: i64) -> Result<Option<ProductPurchaseInfo>, DomainError>;
+    /// 最近一次采购明细（按 order_date DESC, id DESC 取一）
+    async fn get_last_purchase_item(&self, product_id: i64) -> Result<Option<LastPurchaseItemRow>, DomainError>;
+    /// 价格变更日志（可按商品过滤；失败按旧行为吞错返回空，由用例层处理）
+    async fn price_logs(&self, product_id: Option<i64>, limit: i64) -> Result<Vec<PriceLogRow>, DomainError>;
 }

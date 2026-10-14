@@ -5,9 +5,10 @@ use sqlx::{AssertSqlSafe, Row};
 
 use domain::error::DomainError;
 use domain::port::product::{
-    DeleteCascadeError, NewProduct, PriceSnapshot, ProductDetailRow, ProductListFilter, ProductPriceRow,
-    ProductRepo, ProductRow, ProductSearchRow, ProductSummaryRow, ProductUnitRow, RefCountError, RefCounts,
-    UpdateProduct,
+    DeleteCascadeError, ImportInsertOutcome, ImportProduct, LastPurchaseItemRow, NewProduct, NewProductUnit,
+    PriceLogRow, PriceSnapshot, PriceSnapshotRow, ProductDetailRow, ProductExportRow, ProductListFilter,
+    ProductPriceRow, ProductPurchaseInfo, ProductRepo, ProductRow, ProductSearchRow, ProductSummaryRow,
+    ProductUnitRow, RefCountError, RefCounts, UpdateProduct,
 };
 
 #[derive(Clone)]
@@ -394,6 +395,326 @@ impl ProductRepo for SqliteProductRepo {
                 .map_err(|e| DeleteCascadeError::Commit(e.to_string()))?;
         }
         Ok(rows)
+    }
+
+    // —— 子步b：导出 / 导入 ——
+
+    async fn list_for_export(&self) -> Result<Vec<ProductExportRow>, DomainError> {
+        let rows = sqlx::query(
+            "SELECT p.id, p.name, p.alias1, p.alias2, p.spec, p.unit, p.base_unit, p.base_price, p.purchase_price, c.name as category_name,\n                COALESCE(gp.price, 0.0) as gov_price,\n                COALESCE(sp1.price, 0.0) as sm1_price,\n                COALESCE(sp2.price, 0.0) as sm2_price,\n                COALESCE(sp3.price, 0.0) as sm3_price,\n                COALESCE(ai.price, 0.0) as ai_price\n         FROM product p\n         LEFT JOIN category c ON p.category_id = c.id\n         LEFT JOIN product_price gp ON gp.product_id = p.id AND gp.price_type = 'gov_procurement'\n         LEFT JOIN product_price sp1 ON sp1.product_id = p.id AND sp1.price_type = 'supermarket_1'\n         LEFT JOIN product_price sp2 ON sp2.product_id = p.id AND sp2.price_type = 'supermarket_2'\n         LEFT JOIN product_price sp3 ON sp3.product_id = p.id AND sp3.price_type = 'supermarket_3'\n         LEFT JOIN product_price ai ON ai.product_id = p.id AND ai.price_type = 'ai_realtime'\n         ORDER BY p.id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(rows
+            .iter()
+            .map(|r| ProductExportRow {
+                id: r.get::<i64, _>("id"),
+                name: r.get::<String, _>("name"),
+                alias1: r.get::<Option<String>, _>("alias1"),
+                alias2: r.get::<Option<String>, _>("alias2"),
+                spec: r.get::<Option<String>, _>("spec"),
+                unit: r.get::<String, _>("unit"),
+                base_unit: r.get::<Option<String>, _>("base_unit"),
+                base_price: r.get::<f64, _>("base_price"),
+                purchase_price: r.get::<f64, _>("purchase_price"),
+                category_name: r.get::<Option<String>, _>("category_name"),
+                gov_price: r.get::<f64, _>("gov_price"),
+                sm1_price: r.get::<f64, _>("sm1_price"),
+                sm2_price: r.get::<f64, _>("sm2_price"),
+                sm3_price: r.get::<f64, _>("sm3_price"),
+                ai_price: r.get::<f64, _>("ai_price"),
+            })
+            .collect())
+    }
+
+    async fn find_category_id(&self, name: &str) -> Result<Option<i64>, DomainError> {
+        sqlx::query("SELECT id FROM category WHERE name = ? AND entity_type = 'product'")
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?
+            .map(|r| Ok(r.get::<i64, _>("id")))
+            .transpose()
+    }
+
+    async fn count_by_id(&self, id: i64) -> Result<i64, DomainError> {
+        let c: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM product WHERE id = ?")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(storage)?;
+        Ok(c)
+    }
+
+    async fn import_update(&self, id: i64, p: &ImportProduct) -> Result<u64, DomainError> {
+        sqlx::query(
+            "UPDATE product SET name = ?, alias1 = ?, alias2 = ?, spec = ?, unit = ?, base_unit = ?, base_price = ?, purchase_price = ?, category_id = ?, audit_status = 'pending' WHERE id = ?",
+        )
+        .bind(&p.name)
+        .bind(&p.alias1)
+        .bind(&p.alias2)
+        .bind(&p.spec)
+        .bind(&p.unit)
+        .bind(&p.base_unit)
+        .bind(p.base_price)
+        .bind(p.purchase_price)
+        .bind(&p.category_id)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map(|r| r.rows_affected())
+        .map_err(storage)
+    }
+
+    async fn find_id_by_name_spec(&self, name: &str, spec: &str) -> Result<Option<i64>, DomainError> {
+        sqlx::query("SELECT id FROM product WHERE name = ? AND spec = ? LIMIT 1")
+            .bind(name)
+            .bind(spec)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?
+            .map(|r| Ok(r.get::<i64, _>("id")))
+            .transpose()
+    }
+
+    async fn import_insert(&self, id: Option<i64>, p: &ImportProduct) -> Result<ImportInsertOutcome, DomainError> {
+        let result = sqlx::query(
+            "INSERT OR IGNORE INTO product(id, name, alias1, alias2, spec, unit, base_unit, base_price, purchase_price, category_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(&p.name)
+        .bind(&p.alias1)
+        .bind(&p.alias2)
+        .bind(&p.spec)
+        .bind(&p.unit)
+        .bind(&p.base_unit)
+        .bind(p.base_price)
+        .bind(p.purchase_price)
+        .bind(&p.category_id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        if result.rows_affected() > 0 {
+            Ok(ImportInsertOutcome::Inserted(result.last_insert_rowid()))
+        } else {
+            Ok(ImportInsertOutcome::Ignored)
+        }
+    }
+
+    async fn set_image_url(&self, id: i64, image_url: &str) -> Result<(), DomainError> {
+        sqlx::query("UPDATE product SET image_url = ? WHERE id = ?")
+            .bind(image_url)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(storage)
+    }
+
+    async fn import_schedule_price(&self, product_id: i64, price_type: &str, price: f64, effective_date: &str, source: &str) -> Result<(), DomainError> {
+        sqlx::query(
+            "INSERT INTO product_price_schedule(product_id, price_type, price, effective_date, end_date, source, remark)\n                             VALUES (?, ?, ?, ?, NULL, ?, NULL)\n                             ON CONFLICT(product_id, price_type, effective_date) DO UPDATE SET price = excluded.price",
+        )
+        .bind(product_id)
+        .bind(price_type)
+        .bind(price)
+        .bind(effective_date)
+        .bind(source)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(storage)
+    }
+
+    async fn import_price_snapshot(&self, product_id: i64, price_type: &str, price: f64, collected_at: &str, source: &str) -> Result<(), DomainError> {
+        sqlx::query("INSERT OR REPLACE INTO product_price(product_id, price_type, price, collected_at, source) VALUES (?, ?, ?, ?, ?)")
+            .bind(product_id)
+            .bind(price_type)
+            .bind(price)
+            .bind(collected_at)
+            .bind(source)
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(storage)
+    }
+
+    // —— 子步b：商品单位 ——
+
+    async fn unit_create(&self, u: &NewProductUnit) -> Result<(), DomainError> {
+        // 行为保持：旧 500 响应体携带 sqlx 错误的 Debug 形态，此处以 Debug 字符串存入 Storage
+        sqlx::query(
+            "INSERT INTO product_unit(product_id, unit_name, ratio, unit_price, purchase_price, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(u.product_id)
+        .bind(&u.unit_name)
+        .bind(u.ratio)
+        .bind(u.unit_price)
+        .bind(u.purchase_price)
+        .bind(u.sort_order)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(|e| DomainError::Storage(format!("{:?}", e)))
+    }
+
+    async fn unit_update(&self, id: i64, u: &NewProductUnit) -> Result<(), DomainError> {
+        sqlx::query(
+            "UPDATE product_unit SET unit_name = ?, ratio = ?, unit_price = ?, purchase_price = ?, sort_order = ? WHERE id = ?",
+        )
+        .bind(&u.unit_name)
+        .bind(u.ratio)
+        .bind(u.unit_price)
+        .bind(u.purchase_price)
+        .bind(u.sort_order)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(storage)
+    }
+
+    async fn unit_delete(&self, id: i64) -> Result<u64, DomainError> {
+        sqlx::query("DELETE FROM product_unit WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected())
+            .map_err(storage)
+    }
+
+    async fn unit_delete_by_product(&self, product_id: i64) -> Result<(), DomainError> {
+        sqlx::query("DELETE FROM product_unit WHERE product_id = ?")
+            .bind(product_id)
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(storage)
+    }
+
+    // —— 子步b：价格快照 ——
+
+    async fn price_upsert(&self, product_id: i64, price_type: &str, price: f64, collected_at: Option<&str>, source: Option<&str>) -> Result<(), DomainError> {
+        sqlx::query(
+            "INSERT OR REPLACE INTO product_price(product_id, price_type, price, collected_at, source) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(product_id)
+        .bind(price_type)
+        .bind(price)
+        .bind(collected_at)
+        .bind(source)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(storage)
+    }
+
+    async fn price_rows(&self, product_id: i64) -> Result<Vec<PriceSnapshotRow>, DomainError> {
+        let rows = sqlx::query("SELECT id, product_id, price_type, price, collected_at, source FROM product_price WHERE product_id = ?")
+            .bind(product_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage)?;
+        Ok(rows
+            .iter()
+            .map(|r| PriceSnapshotRow {
+                id: r.get::<i64, _>("id"),
+                product_id: r.get::<i64, _>("product_id"),
+                price_type: r.get::<String, _>("price_type"),
+                price: r.get::<f64, _>("price"),
+                collected_at: r.get::<Option<String>, _>("collected_at"),
+                source: r.get::<Option<String>, _>("source"),
+            })
+            .collect())
+    }
+
+    async fn price_delete(&self, id: i64) -> Result<u64, DomainError> {
+        sqlx::query("DELETE FROM product_price WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected())
+            .map_err(storage)
+    }
+
+    async fn price_delete_by_product(&self, product_id: i64) -> Result<(), DomainError> {
+        sqlx::query("DELETE FROM product_price WHERE product_id = ?")
+            .bind(product_id)
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(storage)
+    }
+
+    // —— 子步b：最近进价 / 价格日志 ——
+
+    async fn get_purchase_info(&self, product_id: i64) -> Result<Option<ProductPurchaseInfo>, DomainError> {
+        sqlx::query("SELECT purchase_price, base_unit FROM product WHERE id = ?")
+            .bind(product_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?
+            .map(|r| {
+                Ok(ProductPurchaseInfo {
+                    purchase_price: r.get::<f64, _>("purchase_price"),
+                    base_unit: r.get::<String, _>("base_unit"),
+                })
+            })
+            .transpose()
+    }
+
+    async fn get_last_purchase_item(&self, product_id: i64) -> Result<Option<LastPurchaseItemRow>, DomainError> {
+        sqlx::query(
+            "SELECT poi.unit_price, poi.unit, p.base_unit\n             FROM purchase_order_item poi\n             JOIN purchase_order po ON poi.order_id = po.id\n             JOIN product p ON poi.product_id = p.id\n             WHERE poi.product_id = ?\n             ORDER BY po.order_date DESC, po.id DESC\n             LIMIT 1",
+        )
+        .bind(product_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?
+        .map(|lr| {
+            Ok(LastPurchaseItemRow {
+                unit_price: lr.get::<f64, _>("unit_price"),
+                unit: lr.get::<String, _>("unit"),
+            })
+        })
+        .transpose()
+    }
+
+    async fn price_logs(&self, product_id: Option<i64>, limit: i64) -> Result<Vec<PriceLogRow>, DomainError> {
+        let rows = if let Some(pid) = product_id {
+            sqlx::query(
+                "SELECT ppl.id, ppl.product_id, p.name as product_name, ppl.price_type, ppl.old_price, ppl.new_price, ppl.source, ppl.ref_id, ppl.remark, ppl.changed_at\n             FROM product_price_log ppl LEFT JOIN product p ON ppl.product_id = p.id\n             WHERE ppl.product_id = ? ORDER BY ppl.changed_at DESC LIMIT ?",
+            )
+            .bind(pid)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage)?
+        } else {
+            sqlx::query(
+                "SELECT ppl.id, ppl.product_id, p.name as product_name, ppl.price_type, ppl.old_price, ppl.new_price, ppl.source, ppl.ref_id, ppl.remark, ppl.changed_at\n             FROM product_price_log ppl LEFT JOIN product p ON ppl.product_id = p.id\n             ORDER BY ppl.changed_at DESC LIMIT ?",
+            )
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage)?
+        };
+        Ok(rows
+            .iter()
+            .map(|r| PriceLogRow {
+                id: r.get::<i64, _>("id"),
+                product_id: r.get::<i64, _>("product_id"),
+                product_name: r.get::<Option<String>, _>("product_name"),
+                price_type: r.get::<String, _>("price_type"),
+                old_price: r.get::<f64, _>("old_price"),
+                new_price: r.get::<f64, _>("new_price"),
+                source: r.get::<Option<String>, _>("source"),
+                ref_id: r.get::<Option<i64>, _>("ref_id"),
+                remark: r.get::<Option<String>, _>("remark"),
+                changed_at: r.get::<Option<String>, _>("changed_at"),
+            })
+            .collect())
     }
 }
 
