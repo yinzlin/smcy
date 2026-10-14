@@ -2,7 +2,8 @@
 //! 待验收单导出切片迁移后删除。
 
 use database::*;
-use super::*;
+
+pub struct UserSimple { pub nickname: String, pub phone: String }
 
 pub async fn get_user_by_id(id: i64) -> Option<UserSimple> {
     sqlx::query_as::<_, (String, Option<String>)>(

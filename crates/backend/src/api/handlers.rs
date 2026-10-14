@@ -7,6 +7,7 @@ use application::port::category::CategoryUseCase;
 use application::port::inventory::InventoryUseCase;
 use application::port::price_schedule::PriceScheduleUseCase;
 use application::port::product::ProductUseCase;
+use application::port::purchase_order::PurchaseOrderUseCase;
 use application::port::purchaser::PurchaserUseCase;
 use application::port::supplier::SupplierUseCase;
 use application::port::today_price::TodayPriceUseCase;
@@ -14,10 +15,12 @@ use application::port::user::UserUseCase;
 use application::port::warehouse::WarehouseUseCase;
 use crate::di::App;
 use bytes::Bytes;
+use database::sqlite::repo::stock_writer;
 use calamine::{open_workbook_auto_from_rs, Data, Reader};
 use chrono::Local;
 use domain::port::audit::BasicTable;
 use domain::port::price_schedule::ScheduleFilter;
+use domain::port::purchase_order::PurchaseOrderListFilter;
 use domain::port::purchaser::UpsertPurchaser;
 use domain::port::supplier::UpsertSupplier;
 use domain::port::today_price::TodayPriceSaveItem;
@@ -25,11 +28,6 @@ use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder, Workbook, XlsxEr
 use crate::utils::{xlsx_response, xlsx_header_format, parse_keyword_pattern, parse_csv, sanitize_filename_prefix, image_url_to_path, operation_action_label, sanitize_xlsx_string};
 use crate::generate_order_no;
 use crate::models::*;
-use crate::update_product_purchase_prices;
-use crate::build_purchase_order_export_workbook;
-use crate::get_purchase_order_with_items;
-use crate::PurchaseOrderPrintItem;
-use crate::get_user_by_id;
 use crate::compute_stock_summary;
 use crate::compute_stock_summary_reimburse;
 use crate::get_category_sort_key;
@@ -2035,706 +2033,98 @@ pub async fn api_product_last_purchase_price(
     }
 }
 
-pub async fn api_purchase_order_create(headers: axum::http::HeaderMap, Json(req): Json<PurchaseOrderReq>) -> impl IntoResponse {
+pub async fn api_purchase_order_create(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<PurchaseOrderReq>) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/purchase_order/create").await {
         Err(e) => return e,
         Ok(_) => {}
     }
     let ctx = crate::auth::get_user_ctx(&headers).await;
-
-    // 仅已审核的供应商允许下单
-    if !is_audit_confirmed("supplier", req.supplier_id).await {
-        return (StatusCode::BAD_REQUEST, "该供应商尚未审核通过，暂不能下单".to_string());
-    }
-
-    // 行级数据权限：supplier 只能为自己绑定的供应商创建采购单
-    if ctx.role == "supplier" {
-        let effective_supplier_id = if req.supplier_id != 0 { req.supplier_id } else { ctx.supplier_id };
-        if ctx.supplier_id == 0 || effective_supplier_id != ctx.supplier_id {
-            return (StatusCode::FORBIDDEN, "供应商账号只能为自己创建采购单".to_string());
-        }
-    }
-
-    // 主表仓库按明细汇总：各行全部同一仓库则记该仓库；否则仓库名去重后以"、"连接
-    let mut wh_id_set: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    let mut wh_names: Vec<String> = Vec::new();
-    for it in &req.items {
-        let wid = it.warehouse_id.unwrap_or(0);
-        let wname = it.warehouse_name.clone().unwrap_or_default();
-        if wid > 0 { wh_id_set.insert(wid); }
-        if !wname.trim().is_empty() && !wh_names.contains(&wname) { wh_names.push(wname); }
-    }
-    let main_wh_id = if wh_id_set.len() == 1 { *wh_id_set.iter().next().unwrap() } else { 0 };
-    let main_wh_name = wh_names.join("、");
-
-    let result = sqlx::query(
-        "INSERT INTO purchase_order(supplier_id, order_no, order_date, total_amount, discount_rate, amount_reduction, final_amount, warehouse_id, warehouse_name, user_id, handler_phone, remark, is_settled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    )
-    .bind(req.supplier_id)
-    .bind(&req.order_no)
-    .bind(&req.order_date)
-    .bind(req.total_amount)
-    .bind(req.discount_rate)
-    .bind(req.amount_reduction)
-    .bind(req.final_amount)
-    .bind(main_wh_id)
-    .bind(&main_wh_name)
-    .bind(req.user_id.unwrap_or(0))
-    .bind(&req.handler_phone.clone().unwrap_or_default())
-    .bind(&req.remark)
-    .bind(req.is_settled.unwrap_or(0))
-    .execute(crate::db::pool())
-    .await;
-    
-    match result {
-        Ok(res) => {
-            let order_id = res.last_insert_rowid();
-            if !req.items.is_empty() {
-                // base_quantity 服务端统一重算（product_unit.ratio 权威），不信任前端值——与销售单同一规则
-                let base_inputs: Vec<(i64, String, f64, f64)> = req.items.iter()
-                    .map(|it| (it.product_id, it.unit.clone().unwrap_or_default(), it.quantity, it.base_quantity.unwrap_or(0.0)))
-                    .collect();
-                let base_qtys = compute_base_quantities(&base_inputs).await;
-                let placeholders: Vec<String> = req.items.iter()
-                    .map(|_| "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)".to_string())
-                    .collect();
-                let sql = format!(
-                    "INSERT INTO purchase_order_item(order_id, product_id, product_name, alias1, alias2, spec, unit, unit_price, quantity, base_quantity, amount, ordered_quantity, remark, warehouse_id, warehouse_name, production_date, batch_no) VALUES {}",
-                    placeholders.join(", ")
-                );
-
-                let mut query = sqlx::query(AssertSqlSafe(sql.as_str()));
-                for (idx, item) in req.items.iter().enumerate() {
-                    query = query
-                        .bind(order_id)
-                        .bind(item.product_id)
-                        .bind(&item.product_name)
-                        .bind(&item.alias1)
-                        .bind(&item.alias2)
-                        .bind(&item.spec)
-                        .bind(&item.unit)
-                        .bind(item.unit_price)
-                        .bind(item.quantity)
-                        .bind(base_qtys[idx])
-                        .bind(item.amount)
-                        .bind(item.ordered_quantity.unwrap_or(0.0))
-                        .bind(&item.remark)
-                        .bind(item.warehouse_id.unwrap_or(0))
-                        .bind(&item.warehouse_name.clone().unwrap_or_default())
-                        .bind(&item.production_date)
-                        .bind(&item.batch_no);
-                }
-                let _ = query.execute(crate::db::pool()).await;
-                // 采购入库后更新商品进价（当前/最高/最低）
-                update_product_purchase_prices(&req.items).await;
+    match app.purchase_order.create(req, &ctx).await {
+        Ok(outcome) => {
+            if let Some((target_id, detail)) = outcome.log {
+                crate::auth::log_operation(&ctx, "purchase_order.create", "purchase_order", &target_id, &detail).await;
             }
-            crate::auth::log_operation(&ctx, "purchase_order.create", "purchase_order", &order_id.to_string(),
-                &format!("创建采购单 {}（供应商ID={}）", req.order_no, req.supplier_id)).await;
-            (StatusCode::OK, "创建成功".to_string())
+            (StatusCode::OK, outcome.body)
         }
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "创建失败".to_string()),
+        Err(e) => text_error_response(e),
     }
 }
 
-pub async fn api_purchase_order_list(headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
-    let keyword_pattern = parse_keyword_pattern(&params);
-    
-    let page: i64 = params.get("page").and_then(|s| s.parse().ok()).unwrap_or(1);
-    let page_size: i64 = params.get("page_size").and_then(|s| s.parse().ok()).unwrap_or(20);
-    let offset = (page - 1) * page_size;
-    
-    // 行级数据权限：supplier 角色强制只看自己绑定的供应商
+pub async fn api_purchase_order_list(State(app): State<App>, headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     let ctx = crate::auth::get_user_ctx(&headers).await;
-    let supplier_id: Option<i64> = if ctx.role == "supplier" {
-        if ctx.supplier_id > 0 { Some(ctx.supplier_id) } else { Some(-1) /* 未绑定则查不到任何数据 */ }
-    } else {
-        params.get("supplier_id").and_then(|s| s.parse().ok())
+    let filter = PurchaseOrderListFilter {
+        keyword_pattern: parse_keyword_pattern(&params),
+        supplier_id: params.get("supplier_id").and_then(|s| s.parse().ok()),
+        is_settled: params.get("is_settled").cloned(),
+        sort_field: params.get("sort_field").cloned().unwrap_or_else(|| "id".to_string()),
+        sort_order: params.get("sort_order").cloned().unwrap_or_else(|| "desc".to_string()),
+        page: params.get("page").and_then(|s| s.parse().ok()).unwrap_or(1),
+        page_size: params.get("page_size").and_then(|s| s.parse().ok()).unwrap_or(20),
     };
-    
-    // 排序处理
-    let sort_field = params.get("sort_field").map(|s| s.as_str()).unwrap_or("id");
-    let sort_order = params.get("sort_order").map(|s| s.as_str()).unwrap_or("desc");
-    let order_clause = match sort_field {
-        "order_no" => format!("po.order_no {}", sort_order),
-        "order_date" => format!("po.order_date {}", sort_order),
-        "unit_name" => format!("s.name {}", sort_order),
-        "status" => format!("po.status {}", sort_order),
-        _ => format!("po.id {}", sort_order),
-    };
-    
-    let is_settled_filter: Option<String> = match params.get("is_settled").map(|s| s.as_str()) {
-        Some("0") | Some("1") => params.get("is_settled").cloned(),
-        _ => None,
-    };
-
-    let (total_sql, total_params) = match (supplier_id, is_settled_filter.as_ref()) {
-        (Some(sid), Some(isf)) => (
-            "SELECT COUNT(*) as count FROM purchase_order po JOIN supplier s ON po.supplier_id = s.id
-             WHERE po.supplier_id = ? AND po.is_settled = ? AND (po.order_no LIKE ? OR s.name LIKE ? OR po.order_date LIKE ?)",
-            vec![sid.to_string(), isf.clone(), keyword_pattern.clone(), keyword_pattern.clone(), keyword_pattern.clone()]
-        ),
-        (Some(sid), None) => (
-            "SELECT COUNT(*) as count FROM purchase_order po JOIN supplier s ON po.supplier_id = s.id
-             WHERE po.supplier_id = ? AND (po.order_no LIKE ? OR s.name LIKE ? OR po.order_date LIKE ?)",
-            vec![sid.to_string(), keyword_pattern.clone(), keyword_pattern.clone(), keyword_pattern.clone()]
-        ),
-        (None, Some(isf)) => (
-            "SELECT COUNT(*) as count FROM purchase_order po JOIN supplier s ON po.supplier_id = s.id
-             WHERE po.is_settled = ? AND (po.order_no LIKE ? OR s.name LIKE ? OR po.order_date LIKE ?)",
-            vec![isf.clone(), keyword_pattern.clone(), keyword_pattern.clone(), keyword_pattern.clone()]
-        ),
-        (None, None) => (
-            "SELECT COUNT(*) as count FROM purchase_order po JOIN supplier s ON po.supplier_id = s.id
-             WHERE po.order_no LIKE ? OR s.name LIKE ? OR po.order_date LIKE ?",
-            vec![keyword_pattern.clone(), keyword_pattern.clone(), keyword_pattern.clone()]
-        ),
-    };
-
-    let mut total_query = sqlx::query(total_sql);
-    for p in &total_params {
-        total_query = total_query.bind(p);
+    match app.purchase_order.list(&ctx, filter).await {
+        Ok(json) => (StatusCode::OK, json),
+        Err(e) => text_error_response(e),
     }
-    let total_rows = total_query.fetch_one(crate::db::pool()).await.unwrap();
-    let total: i64 = total_rows.get("count");
-
-    let (sql, query_params) = match (supplier_id, is_settled_filter.as_ref()) {
-        (Some(sid), Some(isf)) => (
-            format!(
-                "SELECT po.id, po.order_no, po.order_date, po.total_amount, po.discount_rate, po.amount_reduction, po.final_amount, po.status, po.remark, po.warehouse_id, po.warehouse_name, po.is_settled, s.name as supplier_name,
-                        (SELECT GROUP_CONCAT(DISTINCT NULLIF(TRIM(poi.warehouse_name), ''))
-                         FROM purchase_order_item poi
-                         WHERE poi.order_id = po.id) as item_warehouse_names,
-                        (SELECT COUNT(DISTINCT NULLIF(TRIM(poi.warehouse_name), ''))
-                         FROM purchase_order_item poi
-                         WHERE poi.order_id = po.id) as item_warehouse_count
-                 FROM purchase_order po JOIN supplier s ON po.supplier_id = s.id
-                 WHERE po.supplier_id = ? AND po.is_settled = ? AND (po.order_no LIKE ? OR s.name LIKE ? OR po.order_date LIKE ?)
-                 ORDER BY {} LIMIT ? OFFSET ?",
-                order_clause
-            ),
-            vec![sid.to_string(), isf.clone(), keyword_pattern.clone(), keyword_pattern.clone(), keyword_pattern.clone()]
-        ),
-        (Some(sid), None) => (
-            format!(
-                "SELECT po.id, po.order_no, po.order_date, po.total_amount, po.discount_rate, po.amount_reduction, po.final_amount, po.status, po.remark, po.warehouse_id, po.warehouse_name, po.is_settled, s.name as supplier_name,
-                        (SELECT GROUP_CONCAT(DISTINCT NULLIF(TRIM(poi.warehouse_name), ''))
-                         FROM purchase_order_item poi
-                         WHERE poi.order_id = po.id) as item_warehouse_names,
-                        (SELECT COUNT(DISTINCT NULLIF(TRIM(poi.warehouse_name), ''))
-                         FROM purchase_order_item poi
-                         WHERE poi.order_id = po.id) as item_warehouse_count
-                 FROM purchase_order po JOIN supplier s ON po.supplier_id = s.id
-                 WHERE po.supplier_id = ? AND (po.order_no LIKE ? OR s.name LIKE ? OR po.order_date LIKE ?)
-                 ORDER BY {} LIMIT ? OFFSET ?",
-                order_clause
-            ),
-            vec![sid.to_string(), keyword_pattern.clone(), keyword_pattern.clone(), keyword_pattern.clone()]
-        ),
-        (None, Some(isf)) => (
-            format!(
-                "SELECT po.id, po.order_no, po.order_date, po.total_amount, po.discount_rate, po.amount_reduction, po.final_amount, po.status, po.remark, po.warehouse_id, po.warehouse_name, po.is_settled, s.name as supplier_name,
-                        (SELECT GROUP_CONCAT(DISTINCT NULLIF(TRIM(poi.warehouse_name), ''))
-                         FROM purchase_order_item poi
-                         WHERE poi.order_id = po.id) as item_warehouse_names,
-                        (SELECT COUNT(DISTINCT NULLIF(TRIM(poi.warehouse_name), ''))
-                         FROM purchase_order_item poi
-                         WHERE poi.order_id = po.id) as item_warehouse_count
-                 FROM purchase_order po JOIN supplier s ON po.supplier_id = s.id
-                 WHERE po.is_settled = ? AND (po.order_no LIKE ? OR s.name LIKE ? OR po.order_date LIKE ?)
-                 ORDER BY {} LIMIT ? OFFSET ?",
-                order_clause
-            ),
-            vec![isf.clone(), keyword_pattern.clone(), keyword_pattern.clone(), keyword_pattern.clone()]
-        ),
-        (None, None) => (
-            format!(
-                "SELECT po.id, po.order_no, po.order_date, po.total_amount, po.discount_rate, po.amount_reduction, po.final_amount, po.status, po.remark, po.warehouse_id, po.warehouse_name, po.is_settled, s.name as supplier_name,
-                        (SELECT GROUP_CONCAT(DISTINCT NULLIF(TRIM(poi.warehouse_name), ''))
-                         FROM purchase_order_item poi
-                         WHERE poi.order_id = po.id) as item_warehouse_names,
-                        (SELECT COUNT(DISTINCT NULLIF(TRIM(poi.warehouse_name), ''))
-                         FROM purchase_order_item poi
-                         WHERE poi.order_id = po.id) as item_warehouse_count
-                 FROM purchase_order po JOIN supplier s ON po.supplier_id = s.id
-                 WHERE po.order_no LIKE ? OR s.name LIKE ? OR po.order_date LIKE ?
-                 ORDER BY {} LIMIT ? OFFSET ?",
-                order_clause
-            ),
-            vec![keyword_pattern.clone(), keyword_pattern.clone(), keyword_pattern.clone()]
-        ),
-    };
-
-    let mut query = sqlx::query(AssertSqlSafe(sql.as_str()));
-    for p in &query_params {
-        query = query.bind(p);
-    }
-    query = query.bind(page_size).bind(offset);
-    let rows = query.fetch_all(crate::db::pool()).await.unwrap_or_default();
-
-    let orders: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|row| {
-            let item_wh_count: i64 = row.get::<i64, _>("item_warehouse_count");
-            let item_wh_names: Option<String> = row.try_get::<Option<String>, _>("item_warehouse_names").unwrap_or(None);
-            let main_wh_name: Option<String> = row.try_get::<Option<String>, _>("warehouse_name").unwrap_or(None);
-
-            // 仓库展示规则：
-            // 1) 明细里无任何仓库名 → 沿用主表仓库名
-            // 2) 明细里只有一个去重仓库名 → 显示该仓库名
-            // 3) 明细里有 ≥2 个去重仓库名 → 显示"综合"
-            let display_warehouse = if item_wh_count == 0 {
-                main_wh_name.unwrap_or_default()
-            } else if item_wh_count == 1 {
-                item_wh_names.unwrap_or_default()
-            } else {
-                "综合".to_string()
-            };
-
-            serde_json::json!({
-                "id": row.get::<i64, _>("id"),
-                "order_no": row.get::<String, _>("order_no"),
-                "order_date": row.get::<String, _>("order_date"),
-                "total_amount": row.get::<f64, _>("total_amount"),
-                "discount_rate": row.get::<f64, _>("discount_rate"),
-                "amount_reduction": row.get::<f64, _>("amount_reduction"),
-                "final_amount": row.get::<f64, _>("final_amount"),
-                "warehouse_id": row.get::<i64, _>("warehouse_id"),
-                "warehouse_name": display_warehouse,
-                "status": row.get::<String, _>("status"),
-                "remark": row.get::<Option<String>, _>("remark"),
-                "supplier_name": row.get::<String, _>("supplier_name"),
-                "is_settled": row.get::<i64, _>("is_settled"),
-            })
-        })
-        .collect();
-    
-    let result = serde_json::json!({
-        "data": orders,
-        "page": page,
-        "page_size": page_size,
-        "total": total,
-        "total_pages": (total + page_size - 1) / page_size
-    });
-    
-    (StatusCode::OK, serde_json::to_string(&result).unwrap())
 }
 
-pub async fn api_purchase_order_detail(headers: axum::http::HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
+pub async fn api_purchase_order_detail(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
     let ctx = crate::auth::get_user_ctx(&headers).await;
-    let order_row = sqlx::query(
-        "SELECT po.id, po.supplier_id, po.order_no, po.order_date, po.total_amount, po.discount_rate, po.amount_reduction, po.final_amount, po.status, po.remark, po.warehouse_id, po.warehouse_name, po.user_id, po.version, po.is_settled, s.name as supplier_name
-         FROM purchase_order po JOIN supplier s ON po.supplier_id = s.id WHERE po.id = ?"
-    )
-    .bind(id)
-    .fetch_optional(crate::db::pool())
-    .await
-    .unwrap_or(None);
-    
-    if order_row.is_none() {
-        return (StatusCode::NOT_FOUND, "订单不存在".to_string());
+    match app.purchase_order.detail(id, &ctx).await {
+        Ok(json) => (StatusCode::OK, json),
+        Err(e) => text_error_response(e),
     }
-    
-    let row = order_row.unwrap();
-    // 行级数据权限：supplier 只能看自己的
-    let order_supplier_id: i64 = row.get("supplier_id");
-    if !crate::auth::can_access_purchase_order(&ctx, order_supplier_id) {
-        return (StatusCode::FORBIDDEN, "您没有权限查看此订单".to_string());
-    }
-    
-    let item_rows = sqlx::query(
-        "SELECT id, product_id, product_name, alias1, alias2, spec, unit, unit_price, quantity, base_quantity, amount, ordered_quantity, remark, warehouse_id, warehouse_name, production_date, batch_no FROM purchase_order_item WHERE order_id = ?"
-    )
-    .bind(id)
-    .fetch_all(crate::db::pool())
-    .await
-    .unwrap_or_default();
-
-    let items: Vec<serde_json::Value> = item_rows
-        .iter()
-        .map(|r| serde_json::json!({
-            "id": r.get::<i64, _>("id"),
-            "product_id": r.get::<i64, _>("product_id"),
-            "product_name": r.get::<String, _>("product_name"),
-            "alias1": r.get::<Option<String>, _>("alias1"),
-            "alias2": r.get::<Option<String>, _>("alias2"),
-            "spec": r.get::<Option<String>, _>("spec"),
-            "unit": r.get::<Option<String>, _>("unit"),
-            "unit_price": r.get::<f64, _>("unit_price"),
-            "quantity": r.get::<f64, _>("quantity"),
-            "base_quantity": r.get::<Option<f64>, _>("base_quantity"),
-            "amount": r.get::<f64, _>("amount"),
-            "ordered_quantity": r.get::<Option<f64>, _>("ordered_quantity"),
-            "remark": r.get::<Option<String>, _>("remark"),
-            "warehouse_id": r.get::<i64, _>("warehouse_id"),
-            "warehouse_name": r.get::<Option<String>, _>("warehouse_name"),
-            "production_date": r.get::<Option<String>, _>("production_date"),
-            "batch_no": r.get::<Option<String>, _>("batch_no"),
-        }))
-        .collect();
-    
-    let order = serde_json::json!({
-        "id": row.get::<i64, _>("id"),
-        "supplier_id": row.get::<i64, _>("supplier_id"),
-        "order_no": row.get::<String, _>("order_no"),
-        "order_date": row.get::<String, _>("order_date"),
-        "total_amount": row.get::<f64, _>("total_amount"),
-        "discount_rate": row.get::<f64, _>("discount_rate"),
-        "amount_reduction": row.get::<f64, _>("amount_reduction"),
-        "final_amount": row.get::<f64, _>("final_amount"),
-        "warehouse_id": row.get::<i64, _>("warehouse_id"),
-        "warehouse_name": row.get::<Option<String>, _>("warehouse_name"),
-        "status": row.get::<String, _>("status"),
-        "version": row.get::<i64, _>("version"),
-        "is_settled": row.get::<i64, _>("is_settled"),
-        "remark": row.get::<Option<String>, _>("remark"),
-        "supplier_name": row.get::<String, _>("supplier_name"),
-        "items": items,
-    });
-    
-    (StatusCode::OK, serde_json::to_string(&order).unwrap())
 }
 
-/// 采购单明细单条 INSERT（更新流程中新增明细/兜底插入共用）：
-/// source_sales_order_id 用主表 source 兜底，保证新增明细归属到生成它的销售单。
-async fn insert_purchase_item(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    order_id: i64,
-    item: &crate::models::PurchaseOrderItemReq,
-    fallback_source: Option<i64>,
-    base_qty: f64,
-) {
-    let _ = sqlx::query(
-        "INSERT INTO purchase_order_item(order_id, product_id, product_name, alias1, alias2, spec, unit, unit_price, quantity, base_quantity, amount, ordered_quantity, remark, warehouse_id, warehouse_name, sales_unit, source_sales_order_id, production_date, batch_no) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    )
-    .bind(order_id)
-    .bind(item.product_id)
-    .bind(&item.product_name)
-    .bind(&item.alias1)
-    .bind(&item.alias2)
-    .bind(&item.spec)
-    .bind(&item.unit)
-    .bind(item.unit_price)
-    .bind(item.quantity)
-    .bind(base_qty)
-    .bind(item.amount)
-    .bind(item.ordered_quantity.unwrap_or(0.0))
-    .bind(&item.remark)
-    .bind(item.warehouse_id.unwrap_or(0))
-    .bind(&item.warehouse_name.clone().unwrap_or_default())
-    .bind(&item.unit.clone().unwrap_or_default())
-    .bind(fallback_source)
-    .bind(&item.production_date)
-    .bind(&item.batch_no)
-    .execute(&mut **tx)
-    .await
-    .ok();
-}
-
-pub async fn api_purchase_order_update(headers: axum::http::HeaderMap, Json(req): Json<PurchaseOrderReq>) -> impl IntoResponse {
+pub async fn api_purchase_order_update(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<PurchaseOrderReq>) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/purchase_order/update").await {
         Err(e) => return e,
         Ok(_) => {}
     }
     let ctx = crate::auth::get_user_ctx(&headers).await;
-
-    // 行级数据权限：先查订单所属供应商
-    let order = sqlx::query("SELECT supplier_id, status FROM purchase_order WHERE id = ?")
-        .bind(req.id)
-        .fetch_optional(crate::db::pool())
-        .await
-        .ok()
-        .flatten();
-    let order = match order {
-        Some(o) => o,
-        None => return (StatusCode::NOT_FOUND, "订单不存在".to_string()),
-    };
-    let order_supplier_id: i64 = order.get("supplier_id");
-    let order_status: String = order.get("status");
-    if !crate::auth::can_access_purchase_order(&ctx, order_supplier_id) {
-        return (StatusCode::FORBIDDEN, "您没有权限操作此订单".to_string());
-    }
-    // 仅待审核（pending）状态的订单允许修改；已审核/已流转/已作废的订单必须反审核后才能修改（防篡改）
-    if order_status != "pending" {
-        return (StatusCode::BAD_REQUEST, format!("当前订单状态为「{}」，仅待审核状态的订单允许修改；已审核订单需管理员反审核后才能修改", order_status));
-    }
-    // 强制乐观锁：req.version 必须传入且 > 0。
-    // 前端一定传 version（从 loadOrderDetail 取得），如果缺失说明调用方不是前端合法路径，直接拒绝。
-    let ver = match req.version {
-        Some(v) if v > 0 => v,
-        _ => return (StatusCode::BAD_REQUEST, "保存失败：缺少订单版本号，请刷新页面后重试".to_string()),
-    };
-    // 安全护栏：更新时明细不允许为空（防止并发覆盖导致明细被清空）
-    if req.items.is_empty() {
-        return (StatusCode::BAD_REQUEST, "保存失败：订单明细不能为空".to_string());
-    }
-
-    // 主表仓库按明细汇总（与创建逻辑一致）
-    let mut wh_id_set: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    let mut wh_names: Vec<String> = Vec::new();
-    for it in &req.items {
-        let wid = it.warehouse_id.unwrap_or(0);
-        let wname = it.warehouse_name.clone().unwrap_or_default();
-        if wid > 0 { wh_id_set.insert(wid); }
-        if !wname.trim().is_empty() && !wh_names.contains(&wname) { wh_names.push(wname); }
-    }
-    let main_wh_id = if wh_id_set.len() == 1 { *wh_id_set.iter().next().unwrap() } else { 0 };
-    let main_wh_name = wh_names.join("、");
-
-    // 用 BEGIN IMMEDIATE 启动写事务，立即获得 SQLite 写锁（RESERVED）。
-    // 作用：把"主表 UPDATE + 明细同步"整体串行化，
-    // 杜绝连点两次保存时两个事务都读到同一 version、都通过乐观锁、都把主表 version 自增、
-    // 然后后提交的事务用全量 items 把先提交的事务的明细覆盖/丢失。
-    let mut tx = match crate::db::pool().begin_with("BEGIN IMMEDIATE").await {
-        Ok(t) => t,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "更新失败：事务启动失败".to_string()),
-    };
-
-    // 事务内做"主表 UPDATE + version 自增"：WHERE 同时校验 id 和 version。
-    // 如果行不存在或 version 已被他人递增，rows_affected = 0 → 回滚事务 + 返回 409。
-    let upd = sqlx::query(
-        "UPDATE purchase_order SET supplier_id = ?, order_no = ?, order_date = ?, total_amount = ?, discount_rate = ?, amount_reduction = ?, final_amount = ?, warehouse_id = ?, warehouse_name = ?, user_id = ?, handler_phone = ?, remark = ?, is_settled = ?, version = version + 1 WHERE id = ? AND version = ?"
-    )
-    .bind(req.supplier_id)
-    .bind(&req.order_no)
-    .bind(&req.order_date)
-    .bind(req.total_amount)
-    .bind(req.discount_rate)
-    .bind(req.amount_reduction)
-    .bind(req.final_amount)
-    .bind(main_wh_id)
-    .bind(&main_wh_name)
-    .bind(req.user_id.unwrap_or(0))
-    .bind(&req.handler_phone.clone().unwrap_or_default())
-    .bind(&req.remark)
-    .bind(req.is_settled.unwrap_or(0))
-    .bind(req.id)
-    .bind(ver)
-    .execute(&mut *tx)
-    .await;
-
-    let upd_res = match upd {
-        Ok(r) => r,
-        Err(e) => {
-            // 出现异常，让事务 drop 时自动回滚
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("更新失败: {}", e));
-        }
-    };
-    if upd_res.rows_affected() == 0 {
-        // version 已被他人递增（极端并发）→ 整个事务回滚（其实只 UPDATE 了一行 ROLLBACK 也无害）
-        return (StatusCode::CONFLICT, format!("订单已被其他用户修改（版本 {} 已被覆盖），请刷新后重试", ver));
-    }
-    let new_version = ver + 1;
-    let old_order_no = req.order_no.clone();
-    let old_total = req.total_amount;
-    let old_final = req.final_amount;
-
-    // 按 id 精确同步明细（保留每条明细的 source_sales_order_id 归属）
-    let po_main_source: Option<i64> = sqlx::query("SELECT source_sales_order_id FROM purchase_order WHERE id = ?")
-        .bind(req.id)
-        .fetch_optional(&mut *tx)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|r| r.try_get("source_sales_order_id").ok().flatten());
-
-    let existing_by_id: std::collections::HashMap<i64, Option<i64>> = sqlx::query(
-        "SELECT id, source_sales_order_id FROM purchase_order_item WHERE order_id = ?"
-    )
-    .bind(req.id)
-    .fetch_all(&mut *tx)
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .map(|r| {
-        let id: i64 = r.get("id");
-        let src: Option<i64> = r.try_get("source_sales_order_id").ok().flatten();
-        (id, src)
-    })
-    .collect();
-
-    let mut req_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    for item in &req.items {
-        if let Some(iid) = item.id {
-            if iid > 0 {
-                req_ids.insert(iid);
+    match app.purchase_order.update(req, &ctx).await {
+        Ok(outcome) => {
+            if let Some((target_id, detail)) = outcome.log {
+                crate::auth::log_operation(&ctx, "purchase_order.update", "purchase_order", &target_id, &detail).await;
             }
+            (StatusCode::OK, outcome.body)
         }
+        Err(e) => text_error_response(e),
     }
-    // base_quantity 服务端统一重算（product_unit.ratio 权威），不信任前端值——与销售单同一规则
-    let base_inputs: Vec<(i64, String, f64, f64)> = req.items.iter()
-        .map(|it| (it.product_id, it.unit.clone().unwrap_or_default(), it.quantity, it.base_quantity.unwrap_or(0.0)))
-        .collect();
-    let base_qtys = compute_base_quantities(&base_inputs).await;
-    for (db_id, _src) in &existing_by_id {
-        if !req_ids.contains(db_id) {
-            let _ = sqlx::query("DELETE FROM purchase_order_item WHERE id = ? AND order_id = ?")
-                .bind(db_id)
-                .bind(req.id)
-                .execute(&mut *tx)
-                .await;
-        }
-    }
-
-    for (idx, item) in req.items.iter().enumerate() {
-        if let Some(iid) = item.id {
-            if iid > 0 && existing_by_id.contains_key(&iid) {
-                let _ = sqlx::query(
-                    "UPDATE purchase_order_item SET product_id = ?, product_name = ?, alias1 = ?, alias2 = ?, spec = ?, unit = ?, unit_price = ?, quantity = ?, base_quantity = ?, amount = ?, ordered_quantity = ?, remark = ?, warehouse_id = ?, warehouse_name = ?, production_date = ?, batch_no = ? WHERE id = ? AND order_id = ?"
-                )
-                .bind(item.product_id)
-                .bind(&item.product_name)
-                .bind(&item.alias1)
-                .bind(&item.alias2)
-                .bind(&item.spec)
-                .bind(&item.unit)
-                .bind(item.unit_price)
-                .bind(item.quantity)
-                .bind(base_qtys[idx])
-                .bind(item.amount)
-                .bind(item.ordered_quantity.unwrap_or(0.0))
-                .bind(&item.remark)
-                .bind(item.warehouse_id.unwrap_or(0))
-                .bind(&item.warehouse_name.clone().unwrap_or_default())
-                .bind(&item.production_date)
-                .bind(&item.batch_no)
-                .bind(iid)
-                .bind(req.id)
-                .execute(&mut *tx)
-                .await
-                .ok();
-            } else {
-                insert_purchase_item(&mut tx, req.id.unwrap_or(0), item, po_main_source, base_qtys[idx]).await;
-            }
-        } else {
-            insert_purchase_item(&mut tx, req.id.unwrap_or(0), item, po_main_source, base_qtys[idx]).await;
-        }
-    }
-    if let Err(_) = tx.commit().await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "更新失败：事务提交失败".to_string());
-    }
-    if !req.items.is_empty() {
-        // 采购单更新后同步商品进价（当前/最高/最低）
-        update_product_purchase_prices(&req.items).await;
-    }
-    crate::auth::log_operation(&ctx, "purchase_order.update", "purchase_order", &req.id.unwrap_or(0).to_string(),
-        &format!("更新采购单 {}（原单号 {}）：金额 {:.2}→{:.2}，下浮后合计 {:.2}→{:.2}，版本 {}→{}",
-            req.order_no, old_order_no, old_total, req.total_amount, old_final, req.final_amount, ver, new_version)).await;
-    (StatusCode::OK, "更新成功".to_string())
 }
 
-pub async fn api_purchase_order_delete(headers: axum::http::HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
+pub async fn api_purchase_order_delete(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/purchase_order/delete").await {
         Err(e) => return e,
         Ok(_) => {}
     }
     let ctx = crate::auth::get_user_ctx(&headers).await;
-
-    // 行级数据权限 + 状态约束
-    let order = sqlx::query("SELECT supplier_id, status FROM purchase_order WHERE id = ?")
-        .bind(id)
-        .fetch_optional(crate::db::pool())
-        .await
-        .ok()
-        .flatten();
-    let order = match order {
-        Some(o) => o,
-        None => return (StatusCode::NOT_FOUND, "订单不存在".to_string()),
-    };
-    let order_supplier_id: i64 = order.get("supplier_id");
-    let order_status: String = order.get("status");
-    if !crate::auth::can_access_purchase_order(&ctx, order_supplier_id) {
-        return (StatusCode::FORBIDDEN, "您没有权限操作此订单".to_string());
-    }
-    if order_status != "pending" {
-        return (StatusCode::BAD_REQUEST, format!("当前订单状态为「{}」，仅待审核状态的订单允许删除；已审核订单需管理员反审核后才能删除", order_status));
-    }
-
-    // 删除前收集本单涉及的商品，便于删除后从剩余采购历史重算最近/最高/最低进价
-    let mut affected_products: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    if let Ok(rows) = sqlx::query("SELECT DISTINCT product_id FROM purchase_order_item WHERE order_id = ? AND product_id > 0")
-        .bind(id)
-        .fetch_all(crate::db::pool())
-        .await
-    {
-        for r in rows {
-            if let Ok(pid) = r.try_get::<i64, _>("product_id") {
-                affected_products.insert(pid);
+    match app.purchase_order.delete(id, &ctx).await {
+        Ok(outcome) => {
+            if let Some((target_id, detail)) = outcome.log {
+                crate::auth::log_operation(&ctx, "purchase_order.delete", "purchase_order", &target_id, &detail).await;
             }
+            (StatusCode::OK, outcome.body)
         }
-    }
-
-    sqlx::query("DELETE FROM purchase_order_item WHERE order_id = ?")
-        .bind(id)
-        .execute(crate::db::pool())
-        .await
-        .ok();
-    
-    let result = sqlx::query("DELETE FROM purchase_order WHERE id = ?")
-        .bind(id)
-        .execute(crate::db::pool())
-        .await;
-    
-    match result {
-        Ok(_) => {
-            // 删除成功后，对涉及的商品从剩余采购历史重算进价（回滚/刷新最高/最低/最近价）
-            for pid in affected_products {
-                crate::recalc_product_purchase_prices_from_history(pid).await;
-            }
-            crate::auth::log_operation(&ctx, "purchase_order.delete", "purchase_order", &id.to_string(),
-                &format!("删除采购单 ID={}", id)).await;
-            (StatusCode::OK, "删除成功".to_string())
-        }
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "删除失败".to_string()),
+        Err(e) => text_error_response(e),
     }
 }
 
 /// 设置采购订单结算状态（0=未结 1=已结），无需版本号，操作列直接调用
-pub async fn api_purchase_order_settle(headers: axum::http::HeaderMap, Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn api_purchase_order_settle(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/purchase_order/settle").await {
         Err(e) => return e,
         Ok(_) => {}
     }
     let ctx = crate::auth::get_user_ctx(&headers).await;
-
-    let order = sqlx::query("SELECT supplier_id, status FROM purchase_order WHERE id = ?")
-        .bind(id)
-        .fetch_optional(crate::db::pool())
-        .await
-        .ok()
-        .flatten();
-    let order = match order {
-        Some(o) => o,
-        None => return (StatusCode::NOT_FOUND, "订单不存在".to_string()),
-    };
-    let order_supplier_id: i64 = order.get("supplier_id");
-    let order_status: String = order.get("status");
-    if !crate::auth::can_access_purchase_order(&ctx, order_supplier_id) {
-        return (StatusCode::FORBIDDEN, "您没有权限操作此订单".to_string());
-    }
-    // 审核后需先反审核
-    if order_status != "pending" {
-        return (StatusCode::CONFLICT, "该单据已审核，需先反审核后才能修改结算状态".to_string());
-    }
-
-    let is_settled: i64 = data["is_settled"].as_i64().unwrap_or(0);
-    if is_settled != 0 && is_settled != 1 {
-        return (StatusCode::BAD_REQUEST, "参数无效".to_string());
-    }
-
-    let result = sqlx::query("UPDATE purchase_order SET is_settled = ? WHERE id = ?")
-        .bind(is_settled)
-        .bind(id)
-        .execute(crate::db::pool())
-        .await;
-
-    match result {
-        Ok(res) if res.rows_affected() > 0 => {
-            let label = if is_settled == 1 { "已结" } else { "未结" };
-            crate::auth::log_operation(&ctx, "purchase_order.settle", "purchase_order", &id.to_string(),
-                &format!("设置采购单结算状态为「{}」", label)).await;
-            (StatusCode::OK, "操作成功".to_string())
+    let is_settled = data["is_settled"].as_i64();
+    match app.purchase_order.settle(id, is_settled, &ctx).await {
+        Ok(outcome) => {
+            if let Some((target_id, detail)) = outcome.log {
+                crate::auth::log_operation(&ctx, "purchase_order.settle", "purchase_order", &target_id, &detail).await;
+            }
+            (StatusCode::OK, outcome.body)
         }
-        _ => (StatusCode::CONFLICT, "订单不存在或状态已变化".to_string()),
+        Err(e) => text_error_response(e),
     }
 }
 
@@ -2795,885 +2185,92 @@ pub(crate) async fn fifo_earliest_batch(product_id: i64) -> (Option<String>, Opt
     (None, None)
 }
 
-/// 按 product_unit.ratio 在服务端统一计算明细的基础单位数量，不依赖前端传入的 base_quantity。
-/// 入参每项：(product_id, unit, quantity, 前端传入 base_quantity)，返回同序的基础数量。
-/// - 命中辅助单位比例：quantity × ratio（保留 2 位小数）
-/// - 未命中（基础单位/无单位配置）：前端值 > 0 用前端值，否则用 quantity 兜底
-pub(crate) async fn compute_base_quantities(
-    items: &[(i64, String, f64, f64)],
-) -> Vec<f64> {
-    let mut unique_pids: Vec<i64> = items.iter().map(|x| x.0).filter(|id| *id > 0).collect();
-    unique_pids.sort_unstable();
-    unique_pids.dedup();
-
-    let mut ratio_map: std::collections::HashMap<(i64, String), f64> = std::collections::HashMap::new();
-    if !unique_pids.is_empty() {
-        let placeholders = unique_pids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!(
-            "SELECT product_id, unit_name, ratio FROM product_unit WHERE product_id IN ({})",
-            placeholders
-        );
-        let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
-        for pid in &unique_pids {
-            q = q.bind(pid);
-        }
-        if let Ok(rows) = q.fetch_all(crate::db::pool()).await {
-            for r in rows {
-                let pid: i64 = r.get("product_id");
-                let uname: String = r.get("unit_name");
-                let ratio: f64 = r.get("ratio");
-                ratio_map.insert((pid, uname), ratio);
-            }
-        }
-    }
-
-    items
-        .iter()
-        .map(|(pid, unit, qty, client_bq)| {
-            if let Some(ratio) = ratio_map.get(&(*pid, unit.clone())) {
-                (*qty * ratio * 100.0).round() / 100.0
-            } else if *client_bq > 0.0 {
-                *client_bq
-            } else {
-                *qty
-            }
-        })
-        .collect()
-}
-
-/// 审核订单时为每个明细写一条 stock_movement + 同步 inventory.quantity。
-/// - direction: "in"（采购入库）/"out"（销售出库），决定 base_quantity 符号
-/// - movement_type/ref_type: 例如 "purchase"/"purchase" 或 "sales"/"sales"
-/// - remark_prefix: 备注前缀，例如 "采购入库"
-/// - action_label: 动作标签，拼在 prefix 后，例如 "审核" → "采购入库-审核"、"确认验收" → "销售出库-确认验收"
-/// 必须在已开始的事务内调用。
-async fn write_stock_movements_for_audit(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    order_id: i64,
-    item_table: &str,
-    direction: &str,
-    movement_type: &str,
-    ref_type: &str,
-    remark_prefix: &str,
-    action_label: &str,
-) -> Result<(), sqlx::Error> {
-    // base_quantity 缺失（老数据/部分开单入口未计算）时，用 quantity × product_unit.ratio 现算
-    // 同时取明细 id 与批次快照（采购=到货批次；销售=确认验收时写入的 FIFO 批次）
-    let sql = format!(
-        "SELECT items.id, items.product_id,
-                CASE WHEN items.base_quantity > 0 THEN items.base_quantity
-                     ELSE items.quantity * COALESCE(
-                         (SELECT pu.ratio FROM product_unit pu
-                          WHERE pu.product_id = items.product_id AND pu.unit_name = items.unit), 1)
-                END AS eff_base,
-                items.quantity, items.unit, items.production_date, items.batch_no
-         FROM {} items WHERE items.order_id = ?",
-        item_table
-    );
-    let items: Vec<(i64, i64, f64, f64, String, Option<String>, Option<String>)> = sqlx::query_as(AssertSqlSafe(sql))
-        .bind(order_id)
-        .fetch_all(&mut **tx)
-        .await?;
-    // 业务归属日期取单据日期（定量），与实际审核时间分离；同时快照单据号与往来单位名称
-    let (order_table, party_table, party_fk): (&str, &str, &str) = if movement_type == "purchase" {
-        ("purchase_order", "supplier", "supplier_id")
-    } else {
-        ("sales_order", "purchaser", "purchaser_id")
-    };
-    let order_info: (String, String, Option<String>) = sqlx::query_as(AssertSqlSafe(format!(
-        "SELECT o.order_date, o.order_no, pt.name
-         FROM {} o JOIN {} pt ON o.{} = pt.id WHERE o.id = ?",
-        order_table, party_table, party_fk
-    )))
-    .bind(order_id)
-    .fetch_one(&mut **tx)
-    .await?;
-    let (order_date, order_no, party_name) = order_info;
-    let sign: f64 = if direction == "in" { 1.0 } else { -1.0 };
-    for (item_id, product_id, base_qty, orig_qty, unit, production_date, batch_no) in items {
-        if base_qty == 0.0 { continue; }
-        // 当前余额（事务内）
-        let cur: f64 = sqlx::query_scalar(
-            "SELECT quantity FROM inventory WHERE product_id=? AND warehouse_id=1"
-        )
-        .bind(product_id)
-        .fetch_optional(&mut **tx)
-        .await?
-        .unwrap_or(0.0);
-        let new_balance = cur + sign * base_qty;
-        // UPSERT inventory
-        let _ = sqlx::query(
-            "INSERT INTO inventory (product_id, warehouse_id, quantity, last_update)
-             VALUES (?, 1, ?, datetime('now','localtime'))
-             ON CONFLICT(product_id, warehouse_id) DO UPDATE SET quantity = excluded.quantity, last_update = datetime('now','localtime')"
-        )
-        .bind(product_id).bind(new_balance)
-        .execute(&mut **tx).await?;
-        // 写流水（含账本快照：明细id/批次/单据号/往来单位）
-        let _ = sqlx::query(
-            "INSERT INTO stock_movement (product_id, warehouse_id, direction, movement_type, base_quantity, orig_quantity, orig_unit, balance_after, ref_type, ref_id, remark, order_date,
-                                         ref_item_id, production_date, batch_no, ref_no, party_name, snapshot_version)
-             VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)"
-        )
-        .bind(product_id).bind(direction).bind(movement_type)
-        .bind(base_qty).bind(orig_qty).bind(&unit).bind(new_balance)
-        .bind(ref_type).bind(order_id)
-        .bind(format!("{}-{}", remark_prefix, action_label))
-        .bind(&order_date)
-        .bind(item_id).bind(production_date).bind(batch_no).bind(&order_no).bind(&party_name)
-        .execute(&mut **tx).await?;
-    }
-    Ok(())
-}
-
-/// 反审核/撤销时为每个明细写一条冲销流水（direction 与原方向相反）+ 同步 inventory.quantity。
-/// 必须在已开始的事务内调用。
-async fn write_stock_movements_for_unaudit(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    order_id: i64,
-    item_table: &str,
-    original_direction: &str,  // "in" 或 "out" — 原审核时的方向
-    movement_type: &str,      // 保持原 movement_type，台账按 direction 区分正/冲销
-    ref_type: &str,
-    remark_prefix: &str,
-    action_label: &str,       // 例如 "反审核冲销"/"撤销验收冲销"
-) -> Result<(), sqlx::Error> {
-    // base_quantity 缺失时同样用 quantity × product_unit.ratio 现算；批次取原明细当前快照
-    let sql = format!(
-        "SELECT items.id, items.product_id,
-                CASE WHEN items.base_quantity > 0 THEN items.base_quantity
-                     ELSE items.quantity * COALESCE(
-                         (SELECT pu.ratio FROM product_unit pu
-                          WHERE pu.product_id = items.product_id AND pu.unit_name = items.unit), 1)
-                END AS eff_base,
-                items.quantity, items.unit, items.production_date, items.batch_no
-         FROM {} items WHERE items.order_id = ?",
-        item_table
-    );
-    let items: Vec<(i64, i64, f64, f64, String, Option<String>, Option<String>)> = sqlx::query_as(AssertSqlSafe(sql))
-        .bind(order_id)
-        .fetch_all(&mut **tx)
-        .await?;
-    // 冲销归属原单据日期：同月审核又反审核时净影响为 0；单据号/往来单位随原单据快照
-    let (order_table, party_table, party_fk): (&str, &str, &str) = if movement_type == "purchase" {
-        ("purchase_order", "supplier", "supplier_id")
-    } else {
-        ("sales_order", "purchaser", "purchaser_id")
-    };
-    let order_info: (String, String, Option<String>) = sqlx::query_as(AssertSqlSafe(format!(
-        "SELECT o.order_date, o.order_no, pt.name
-         FROM {} o JOIN {} pt ON o.{} = pt.id WHERE o.id = ?",
-        order_table, party_table, party_fk
-    )))
-    .bind(order_id)
-    .fetch_one(&mut **tx)
-    .await?;
-    let (order_date, order_no, party_name) = order_info;
-    // 冲销方向：原 in → out，原 out → in
-    let reversal_direction = if original_direction == "in" { "out" } else { "in" };
-    let sign: f64 = if reversal_direction == "in" { 1.0 } else { -1.0 };
-    for (item_id, product_id, base_qty, orig_qty, unit, production_date, batch_no) in items {
-        if base_qty == 0.0 { continue; }
-        let cur: f64 = sqlx::query_scalar(
-            "SELECT quantity FROM inventory WHERE product_id=? AND warehouse_id=1"
-        )
-        .bind(product_id)
-        .fetch_optional(&mut **tx)
-        .await?
-        .unwrap_or(0.0);
-        let new_balance = cur + sign * base_qty;
-        let _ = sqlx::query(
-            "INSERT INTO inventory (product_id, warehouse_id, quantity, last_update)
-             VALUES (?, 1, ?, datetime('now','localtime'))
-             ON CONFLICT(product_id, warehouse_id) DO UPDATE SET quantity = excluded.quantity, last_update = datetime('now','localtime')"
-        )
-        .bind(product_id).bind(new_balance)
-        .execute(&mut **tx).await?;
-        let _ = sqlx::query(
-            "INSERT INTO stock_movement (product_id, warehouse_id, direction, movement_type, base_quantity, orig_quantity, orig_unit, balance_after, ref_type, ref_id, remark, order_date,
-                                         ref_item_id, production_date, batch_no, ref_no, party_name, snapshot_version)
-             VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)"
-        )
-        .bind(product_id).bind(reversal_direction).bind(movement_type)
-        .bind(base_qty).bind(orig_qty).bind(&unit).bind(new_balance)
-        .bind(ref_type).bind(order_id)
-        .bind(format!("{}-{}", remark_prefix, action_label))
-        .bind(&order_date)
-        .bind(item_id).bind(production_date).bind(batch_no).bind(&order_no).bind(&party_name)
-        .execute(&mut **tx).await?;
-    }
-    Ok(())
-}
-
-pub async fn api_purchase_order_approve(headers: axum::http::HeaderMap, Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn api_purchase_order_approve(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/purchase_order/approve").await {
         Err(e) => return e,
         Ok(_) => {}
     }
     let ctx = crate::auth::get_user_ctx(&headers).await;
-
-    let order = sqlx::query("SELECT supplier_id, status FROM purchase_order WHERE id = ?")
-        .bind(id)
-        .fetch_optional(crate::db::pool())
-        .await
-        .ok()
-        .flatten();
-    let order = match order {
-        Some(o) => o,
-        None => return (StatusCode::NOT_FOUND, "订单不存在".to_string()),
-    };
-    let order_supplier_id: i64 = order.get("supplier_id");
-    let order_status: String = order.get("status");
-    if !crate::auth::can_access_purchase_order(&ctx, order_supplier_id) {
-        return (StatusCode::FORBIDDEN, "您没有权限操作此订单".to_string());
-    }
-    if order_status == "confirmed" {
-        return (StatusCode::BAD_REQUEST, "订单已审核，请勿重复操作".to_string());
-    }
-    if order_status != "pending" {
-        return (StatusCode::BAD_REQUEST, format!("当前订单状态为「{}」，仅待审核状态的订单允许审核", order_status));
-    }
-
     let reason = data["reason"].as_str().unwrap_or("").trim().to_string();
-    // 用 BEGIN IMMEDIATE 事务：主表 UPDATE + 写库存流水 + 更新 inventory.quantity 三步原子化
-    let mut tx = match crate::db::pool().begin_with("BEGIN IMMEDIATE").await {
-        Ok(t) => t,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "审核失败：事务启动失败".to_string()),
-    };
-    let upd = sqlx::query("UPDATE purchase_order SET status = 'confirmed', version = version + 1 WHERE id = ? AND status = 'pending'")
-        .bind(id)
-        .execute(&mut *tx)
-        .await;
-
-    match upd {
-        Ok(res) if res.rows_affected() > 0 => {
-            // 写库存流水 + 更新 inventory
-            if let Err(e) = write_stock_movements_for_audit(
-                &mut tx, id, "purchase_order_item", "in", "purchase", "purchase", "采购入库", "审核"
-            ).await {
-                let _ = tx.rollback().await;
-                return (StatusCode::INTERNAL_SERVER_ERROR, format!("审核失败：写库存流水失败 {}", e));
+    match app.purchase_order.approve(id, reason, &ctx).await {
+        Ok(outcome) => {
+            if let Some((target_id, detail)) = outcome.log {
+                crate::auth::log_operation(&ctx, "purchase_order.approve", "purchase_order", &target_id, &detail).await;
             }
-            match tx.commit().await {
-                Ok(_) => {
-                    crate::auth::log_operation(&ctx, "purchase_order.approve", "purchase_order", &id.to_string(),
-                        &format!("审核通过采购单 ID={}（{}）", id, if reason.is_empty() { "无备注" } else { &reason })).await;
-                    (StatusCode::OK, "审核成功，订单已锁定".to_string())
-                }
-                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("审核失败：提交事务失败 {}", e)),
-            }
+            (StatusCode::OK, outcome.body)
         }
-        _ => {
-            let _ = tx.rollback().await;
-            (StatusCode::CONFLICT, "订单状态已变化，请刷新后重试".to_string())
-        }
+        Err(e) => text_error_response(e),
     }
 }
 
-pub async fn api_purchase_order_unapprove(headers: axum::http::HeaderMap, Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn api_purchase_order_unapprove(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/purchase_order/unapprove").await {
         Err(e) => return e,
         Ok(_) => {}
     }
     let ctx = crate::auth::get_user_ctx(&headers).await;
-
     let reason = data["reason"].as_str().unwrap_or("").trim().to_string();
-    if reason.is_empty() {
-        return (StatusCode::BAD_REQUEST, "反审核必须填写原因".to_string());
-    }
-
-    let order = sqlx::query("SELECT supplier_id, status FROM purchase_order WHERE id = ?")
-        .bind(id)
-        .fetch_optional(crate::db::pool())
-        .await
-        .ok()
-        .flatten();
-    let order = match order {
-        Some(o) => o,
-        None => return (StatusCode::NOT_FOUND, "订单不存在".to_string()),
-    };
-    let order_supplier_id: i64 = order.get("supplier_id");
-    let order_status: String = order.get("status");
-    if !crate::auth::can_access_purchase_order(&ctx, order_supplier_id) {
-        return (StatusCode::FORBIDDEN, "您没有权限操作此订单".to_string());
-    }
-    // 超级管理员拥有任何时刻的反审核权限；其他角色仅允许对已审核（confirmed）订单反审核
-    let is_super_admin = ctx.role == "super_admin";
-    if !is_super_admin && order_status != "confirmed" {
-        return (StatusCode::BAD_REQUEST, format!("当前订单状态为「{}」，仅已审核状态的订单允许反审核", order_status));
-    }
-
-    let update_sql = if is_super_admin {
-        "UPDATE purchase_order SET status = 'pending', version = version + 1 WHERE id = ?"
-    } else {
-        "UPDATE purchase_order SET status = 'pending', version = version + 1 WHERE id = ? AND status = 'confirmed'"
-    };
-    // 用 BEGIN IMMEDIATE 事务：主表 UPDATE + 写冲销流水 + 回滚 inventory.quantity 三步原子化
-    let mut tx = match crate::db::pool().begin_with("BEGIN IMMEDIATE").await {
-        Ok(t) => t,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "反审核失败：事务启动失败".to_string()),
-    };
-    let result = sqlx::query(AssertSqlSafe(update_sql.to_string()))
-        .bind(id)
-        .execute(&mut *tx)
-        .await;
-
-    match result {
-        Ok(res) if res.rows_affected() > 0 => {
-            // 写冲销流水（原方向 in → 冲销方向 out）+ 同步 inventory
-            if let Err(e) = write_stock_movements_for_unaudit(
-                &mut tx, id, "purchase_order_item", "in", "purchase", "purchase", "采购入库", "反审核冲销"
-            ).await {
-                let _ = tx.rollback().await;
-                return (StatusCode::INTERNAL_SERVER_ERROR, format!("反审核失败：写冲销流水失败 {}", e));
+    match app.purchase_order.unapprove(id, reason, &ctx).await {
+        Ok(outcome) => {
+            if let Some((target_id, detail)) = outcome.log {
+                crate::auth::log_operation(&ctx, "purchase_order.unapprove", "purchase_order", &target_id, &detail).await;
             }
-            match tx.commit().await {
-                Ok(_) => {
-                    crate::auth::log_operation(&ctx, "purchase_order.unapprove", "purchase_order", &id.to_string(),
-                        &format!("反审核采购单 ID={}，原因：{}", id, reason)).await;
-                    (StatusCode::OK, "反审核成功，订单已解锁".to_string())
-                }
-                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("反审核失败：提交事务失败 {}", e)),
-            }
+            (StatusCode::OK, outcome.body)
         }
-        _ => {
-            let _ = tx.rollback().await;
-            (StatusCode::CONFLICT, "订单状态已变化，请刷新后重试".to_string())
-        }
+        Err(e) => text_error_response(e),
     }
 }
 
 pub async fn api_purchase_order_export(
+    State(app): State<App>,
     headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    // 行级数据权限：supplier 只能导出自己的
+    // 行级数据权限：supplier 只能导出自己的（强制逻辑在用例层）
     let ctx = crate::auth::get_user_ctx(&headers).await;
     let keyword_pattern = parse_keyword_pattern(&params);
-
-    // 行级数据权限 + 筛选：supplier 强制只看自己，其他角色可按 supplier_id 过滤
-    let supplier_id: Option<i64> = if ctx.role == "supplier" {
-        if ctx.supplier_id > 0 { Some(ctx.supplier_id) } else { Some(-1) }
-    } else {
-        params.get("supplier_id").and_then(|s| s.parse().ok())
-    };
-
-    // 导出按订单ID与明细ID顺序排列，便于阅读核对
-    let base_sql = "SELECT po.id, po.order_no, po.order_date, po.total_amount, po.discount_rate, po.final_amount, po.status, po.remark, po.warehouse_id, po.warehouse_name, s.name as supplier_name,
-                           (SELECT GROUP_CONCAT(DISTINCT NULLIF(TRIM(poi2.warehouse_name), ''))
-                            FROM purchase_order_item poi2
-                            WHERE poi2.order_id = po.id) as item_warehouse_names,
-                           (SELECT COUNT(DISTINCT NULLIF(TRIM(poi2.warehouse_name), ''))
-                            FROM purchase_order_item poi2
-                            WHERE poi2.order_id = po.id) as item_warehouse_count,
-                           poi.product_name, poi.alias1, poi.alias2, poi.spec, poi.unit, poi.ordered_quantity, poi.quantity, poi.unit_price, poi.base_quantity, poi.amount, poi.remark as item_remark, poi.warehouse_name as item_warehouse_name
-                    FROM purchase_order po
-                    JOIN supplier s ON po.supplier_id = s.id
-                    LEFT JOIN purchase_order_item poi ON po.id = poi.order_id
-                    WHERE (po.order_no LIKE ? OR s.name LIKE ? OR po.order_date LIKE ?)";
-    let (sql, rows): (String, Vec<sqlx::sqlite::SqliteRow>) = if let Some(sid) = supplier_id {
-        let sql = format!("{} AND po.supplier_id = ? ORDER BY po.id, poi.id", base_sql);
-        let q = sqlx::query(AssertSqlSafe(sql.as_str()))
-            .bind(&keyword_pattern).bind(&keyword_pattern).bind(&keyword_pattern)
-            .bind(sid);
-        (sql, q.fetch_all(crate::db::pool()).await.unwrap_or_default())
-    } else {
-        let sql = format!("{} ORDER BY po.id, poi.id", base_sql);
-        let q = sqlx::query(AssertSqlSafe(sql.as_str()))
-            .bind(&keyword_pattern).bind(&keyword_pattern).bind(&keyword_pattern);
-        (sql, q.fetch_all(crate::db::pool()).await.unwrap_or_default())
-    };
-    let _ = sql; // 当前未使用，保留以备后续排查
-    build_purchase_order_export_workbook(rows)
+    let supplier_id = params.get("supplier_id").and_then(|s| s.parse().ok());
+    match app.purchase_order.export(&ctx, keyword_pattern, supplier_id).await {
+        Ok(data) => (
+            StatusCode::OK,
+            [
+                ("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+                ("Content-Disposition", "attachment; filename=\"purchase_orders.xlsx\""),
+            ],
+            data,
+        ).into_response(),
+        Err(e) => text_error_response(e).into_response(),
+    }
 }
 
 pub async fn api_purchase_order_print_excel(
+    State(app): State<App>,
     Path(id): Path<i64>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let (order, items) = match get_purchase_order_with_items(id).await {
-        Some(v) => v,
-        None => return (StatusCode::NOT_FOUND, "采购订单不存在".to_string()).into_response(),
-    };
-
-    // 如果传入了 user_id 则优先使用参数里的；否则使用订单里存的
-    let (mut handler_name, mut handler_phone) = (
-        order.user_name.clone().unwrap_or_default(),
-        order.handler_phone.clone().unwrap_or_default(),
-    );
-    if let Some(uid_str) = params.get("user_id").or(params.get("userId")) {
-        if let Ok(uid) = uid_str.parse::<i64>() {
-            if uid > 0 {
-                if let Some(u) = get_user_by_id(uid).await {
-                    handler_name = u.nickname;
-                    handler_phone = u.phone;
-                }
-            }
-        }
-    }
-    let export_filename = format!("采购单_{}.xlsx", order.order_no);
-
-    let title_format = Format::new()
-        .set_bold()
-        .set_font_size(16)
-        .set_align(FormatAlign::Center)
-        .set_align(FormatAlign::VerticalCenter);
-    let header_format = Format::new()
-        .set_bold()
-        .set_align(FormatAlign::Center)
-        .set_align(FormatAlign::VerticalCenter)
-        .set_border(FormatBorder::Thin);
-    let cell_center = Format::new()
-        .set_align(FormatAlign::Center)
-        .set_align(FormatAlign::VerticalCenter)
-        .set_border(FormatBorder::Thin);
-    // 合并单元格左对齐格式（默认不加自动换行）
-    let info_left = Format::new()
-        .set_align(FormatAlign::Left)
-        .set_align(FormatAlign::VerticalCenter);
-    // 合并单元格左对齐格式（自动换行，仅用于 E2:F3 地址/长文本）
-    let info_left_wrap = Format::new()
-        .set_align(FormatAlign::Left)
-        .set_align(FormatAlign::VerticalCenter)
-        .set_text_wrap();
-    let sum_left_noline = Format::new()
-        .set_bold()
-        .set_align(FormatAlign::Left)
-        .set_align(FormatAlign::VerticalCenter);
-    // 最后一行的"最终合计"靠右布局
-    let sum_right_noline = Format::new()
-        .set_bold()
-        .set_align(FormatAlign::Right)
-        .set_align(FormatAlign::VerticalCenter);
-    // 打印导出：分组标题（仓库）格式，灰底加粗
-    let print_group_title = Format::new()
-        .set_bold()
-        .set_align(FormatAlign::Left)
-        .set_align(FormatAlign::VerticalCenter)
-        .set_background_color("#E5E7EB")
-        .set_font_color("#374151");
-    // 打印导出：分组小计 A:D（保留 A 列左外框、右边框去掉，与 E:F 合并之间无竖线）
-    let print_summary_format = Format::new()
-        .set_bold()
-        .set_align(FormatAlign::Left)
-        .set_align(FormatAlign::VerticalCenter)
-        .set_border_left(FormatBorder::Thin)
-        .set_border_right(FormatBorder::None)
-        .set_border_top(FormatBorder::Thin)
-        .set_border_bottom(FormatBorder::Thin);
-    // 打印导出：小计 E:F 合并（左边框去掉，与小计文本之间无竖线；F 列右外框保留）
-    let print_summary_right = Format::new()
-        .set_bold()
-        .set_align(FormatAlign::Right)
-        .set_align(FormatAlign::VerticalCenter)
-        .set_border_left(FormatBorder::None)
-        .set_border_right(FormatBorder::Thin)
-        .set_border_top(FormatBorder::Thin)
-        .set_border_bottom(FormatBorder::Thin)
-        .set_num_format("¥#,##0.00");
-    // 打印导出：总计 A:D 灰底（A 列左外框保留、右边框去掉）
-    let print_grand_total_label = Format::new()
-        .set_bold()
-        .set_align(FormatAlign::Left)
-        .set_align(FormatAlign::VerticalCenter)
-        .set_background_color("#E5E7EB")
-        .set_font_color("#374151")
-        .set_border_left(FormatBorder::Thin)
-        .set_border_right(FormatBorder::None)
-        .set_border_top(FormatBorder::Thin)
-        .set_border_bottom(FormatBorder::Thin);
-    // 打印导出：总计 E:F 合并 灰底（左边框去掉；F 列右外框保留）
-    let print_grand_total_amount = Format::new()
-        .set_bold()
-        .set_align(FormatAlign::Right)
-        .set_align(FormatAlign::VerticalCenter)
-        .set_background_color("#E5E7EB")
-        .set_font_color("#374151")
-        .set_border_left(FormatBorder::None)
-        .set_border_right(FormatBorder::Thin)
-        .set_border_top(FormatBorder::Thin)
-        .set_border_bottom(FormatBorder::Thin)
-        .set_num_format("¥#,##0.00");
-    // 货币格式（¥ 前缀，右对齐）
-    let currency_right = Format::new()
-        .set_num_format("¥#,##0.00")
-        .set_align(FormatAlign::Right)
-        .set_align(FormatAlign::VerticalCenter)
-        .set_border(FormatBorder::Thin);
-    let cell_left = Format::new()
-        .set_align(FormatAlign::Left)
-        .set_align(FormatAlign::VerticalCenter)
-        .set_border(FormatBorder::Thin);
-    let cell_right = Format::new()
-        .set_align(FormatAlign::Right)
-        .set_align(FormatAlign::VerticalCenter)
-        .set_border(FormatBorder::Thin);
-
-    let result: Result<Vec<u8>, XlsxError> = (move || {
-        let mut wb = Workbook::new();
-        let ws = wb.add_worksheet();
-        ws.set_name("采购单")?;
-        // 页面设置：241-2S 两层两等份，0 左右边距，水平居中，横向
-        ws.set_landscape();
-        ws.set_margins(0.0, 0.0, 0.0, 0.4, 0.0, 0.0);
-        ws.set_print_center_horizontally(true);
-
-        // 列宽（用户指定，cm→px 按 96dpi 换算，1cm≈38px）：A=4cm B=1cm C=1cm D=2cm E=2cm F=2cm
-        ws.set_column_width_pixels(0, 150)?;
-        ws.set_column_width_pixels(1, 40)?;
-        ws.set_column_width_pixels(2, 50)?;
-        ws.set_column_width_pixels(3, 80)?;
-        ws.set_column_width_pixels(4, 80)?;
-        ws.set_column_width_pixels(5, 50)?;
-
-        // 行 0: 标题（采购单），合并 A-F
-        ws.merge_range(0, 0, 0, 5, "采购单", &title_format)?;
-        ws.set_row_height(0, 28)?;
-
-        // 准备主表数据用于页眉
-        let order_no = order.order_no.clone();
-        let order_date = order.order_date.clone();
-        let supplier_name = order.supplier_name.clone().unwrap_or_default();
-        let supplier_phone = order.supplier_phone.clone().unwrap_or_default();
-        let supplier_addr = order.supplier_address.clone().unwrap_or_default();
-        let remark_val = order.remark.clone().unwrap_or_default();
-
-        // ---- 排版：A+B / C+D / E+F 三段两等份 ----
-        // 每行 6 列：A(20)+B(5)=25, C(6)+D(8)=14, E(10)+F(18)=28
-        // 参考截图：订单号+日期+地址（地址跨两行）、供应商+联系、经手人+联系+备注
-        // -------------------------------------------------------------------
-
-        // 行 1: 间隔
-        ws.set_row_height(1, 6)?;
-
-        // 行 2: A+B="订单号：xxx", C+D="日期：xxx"
-        let cell_ab2 = format!("订单号：{}", order_no);
-        let cell_cd2 = format!("日期：{}", order_date);
-        ws.merge_range(2, 0, 2, 1, cell_ab2.as_str(), &info_left)?;
-        ws.merge_range(2, 2, 2, 3, cell_cd2.as_str(), &info_left)?;
-
-        // 行 3: A+B="供应商：xxx", C+D="联系：xxx"
-        let cell_ab3 = format!("供应商：{}", supplier_name);
-        let cell_cd3 = format!("联系：{}", supplier_phone);
-        ws.merge_range(3, 0, 3, 1, cell_ab3.as_str(), &info_left)?;
-        ws.merge_range(3, 2, 3, 3, cell_cd3.as_str(), &info_left)?;
-
-        // 行 2~3: E+F 合并（跨两行）写"地址：xxx"，靠左自动换行
-        let cell_ef23 = format!("地址：{}", supplier_addr);
-        ws.merge_range(2, 4, 3, 5, cell_ef23.as_str(), &info_left_wrap)?;
-
-        // 行 4: A+B="经手人：xxx", C+D="联系：xxx", E+F="备注：xxx"
-        let cell_ab4 = format!("经手人：{}", handler_name);
-        let cell_cd4 = format!("联系：{}", handler_phone);
-        let cell_ef4 = format!("备注：{}", remark_val);
-        ws.merge_range(4, 0, 4, 1, cell_ab4.as_str(), &info_left)?;
-        ws.merge_range(4, 2, 4, 3, cell_cd4.as_str(), &info_left)?;
-        ws.merge_range(4, 4, 4, 5, cell_ef4.as_str(), &info_left)?;
-
-        // 行 5: 间隔
-        ws.set_row_height(5, 6)?;
-
-        // 行 6: 表头
-        let header_row = 6u32;
-        let headers = ["品名规格", "单位", "数量", "单价", "金额", "备注"];
-        for (i, h) in headers.iter().enumerate() {
-            ws.write_with_format(header_row, i as u16, *h, &header_format)?;
-        }
-        ws.set_row_height(header_row, 22)?;
-
-        // ---- 打印分页设置 ----
-        // 页头（每一页都显示标题+主表+间隔+表头）：重复行 0~6
-        let _ = ws.set_repeat_rows(0, 6);
-        // 页脚：居中"第 X 页，共 Y 页"
-        ws.set_footer("&C第 &P 页，共 &N 页");
-
-        // ---- 明细按仓库分组：分组标题 + 明细 + 小计 + 总计 ----
-        // 预估行数：每组 = 1（标题） + N（明细） + 1（小计），加最后 1（总计）
-        let mut cur_row: u32 = 7; // 紧接表头行 6
-        let mut grand_item_count: i64 = 0;
-        let mut grand_amount: f64 = 0.0;
-
-        // 按仓库分组（保持 SQL 排序顺序：warehouse_name, id）
-        let mut last_wh: Option<String> = None;
-        let mut group_buf: Vec<&PurchaseOrderPrintItem> = Vec::new();
-        let mut finished_groups: Vec<(String, Vec<&PurchaseOrderPrintItem>)> = Vec::new();
-
-        // 先把所有分组聚合好，便于最后按顺序统一输出（避免在循环内同时写小计/总计造成行索引管理复杂）
-        for it in &items {
-            let wh = it.warehouse_name.trim().to_string();
-            if last_wh.as_deref() != Some(wh.as_str()) {
-                if let Some(prev) = last_wh.take() {
-                    let prev_display = if prev.is_empty() { "未指定".to_string() } else { prev.clone() };
-                    finished_groups.push((prev_display, std::mem::take(&mut group_buf)));
-                }
-                last_wh = Some(wh);
-                group_buf.push(it);
-            } else {
-                group_buf.push(it);
-            }
-        }
-        if let Some(prev) = last_wh.take() {
-            let prev_display = if prev.is_empty() { "未指定".to_string() } else { prev.clone() };
-            finished_groups.push((prev_display, group_buf));
-        }
-
-        for (wh_display, group_items) in &finished_groups {
-            // 分组标题
-            let title = format!("├── {}", wh_display);
-            ws.merge_range(cur_row, 0, cur_row, 5, title.as_str(), &print_group_title)?;
-            ws.set_row_height(cur_row, 20)?;
-            cur_row += 1;
-            for it in group_items {
-                // 导出名称优先级：规格 -> 名称（独立取值不拼接，规格为空时才用名称）
-                let name_spec = match it.spec.as_deref().map(str::trim) {
-                    Some(s) if !s.is_empty() => s.to_string(),
-                    _ => it.product_name.clone(),
-                };
-                ws.write_with_format(cur_row, 0, name_spec, &cell_left)?;
-                ws.write_with_format(cur_row, 1, it.unit.clone().unwrap_or_default(), &cell_center)?;
-                ws.write_with_format(cur_row, 2, it.quantity, &cell_right)?;
-                ws.write_with_format(cur_row, 3, it.unit_price, &currency_right)?;
-                ws.write_with_format(cur_row, 4, it.amount, &currency_right)?;
-                ws.write_with_format(cur_row, 5, it.remark.clone().unwrap_or_default(), &cell_left)?;
-                ws.set_row_height(cur_row, 22)?;
-                cur_row += 1;
-                grand_item_count += 1;
-                grand_amount += it.amount;
-            }
-            // 分组小计：A:D 合并写文本，E:F 合并写金额（合并单元格的左竖线去除）
-            let group_amount: f64 = group_items.iter().map(|x| x.amount).sum();
-            let subtotal = format!("小计: 包装数量 {}", group_items.len());
-            ws.merge_range(cur_row, 0, cur_row, 3, subtotal.as_str(), &print_summary_format)?;
-            ws.merge_range(cur_row, 4, cur_row, 5, "", &print_summary_right)?;
-            ws.write_with_format(cur_row, 4, group_amount, &print_summary_right)?;
-            ws.set_row_height(cur_row, 20)?;
-            cur_row += 1;
-        }
-
-        // 总计：A:D 合并写文本，E:F 合并写金额（合并单元格的左竖线去除，整行灰底）
-        let grand_total = format!("总计: 包装数量 {}", grand_item_count);
-        ws.merge_range(cur_row, 0, cur_row, 3, grand_total.as_str(), &print_grand_total_label)?;
-        ws.merge_range(cur_row, 4, cur_row, 5, "", &print_grand_total_amount)?;
-        ws.write_with_format(cur_row, 4, grand_amount, &print_grand_total_amount)?;
-        ws.set_row_height(cur_row, 22)?;
-        cur_row += 1;
-
-        let sum_row = cur_row;
-
-        // ---- 合计排版（A+B | C+D 靠左；E+F 最终合计靠右）----
-        let cell_sum = format!("合计金额: ¥{:.2}", order.total_amount);
-        let cell_discount = format!("折减金额: ¥{:.2}", order.amount_reduction);
-        let cell_final = format!("最终合计: ¥{:.2}", order.final_amount);
-        ws.merge_range(sum_row, 0, sum_row, 1, cell_sum.as_str(), &sum_left_noline)?;
-        ws.merge_range(sum_row, 2, sum_row, 3, cell_discount.as_str(), &sum_left_noline)?;
-        ws.merge_range(sum_row, 4, sum_row, 5, cell_final.as_str(), &sum_right_noline)?;
-
-        wb.save_to_buffer()
-    })();
-
-    match result {
-        Ok(data) => xlsx_response(data, export_filename.as_str()),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("导出失败: {}", e)).into_response(),
+    // 如果传入了 user_id 则优先使用参数里的；否则使用订单里存的（解析失败/非正数均不覆盖）
+    let user_id_override = params.get("user_id").or(params.get("userId")).and_then(|s| s.parse::<i64>().ok());
+    match app.purchase_order.print_excel(id, user_id_override).await {
+        Ok((data, filename)) => xlsx_response(data, &filename),
+        Err(e) => text_error_response(e).into_response(),
     }
 }
 
-pub async fn api_purchase_order_import(headers: axum::http::HeaderMap, content: Bytes) -> impl IntoResponse {
+pub async fn api_purchase_order_import(State(app): State<App>, headers: axum::http::HeaderMap, content: Bytes) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/purchase_order/import").await {
         Err(e) => return e.into_response(),
         Ok(_) => {}
     }
     let ctx = crate::auth::get_user_ctx(&headers).await;
-
-    let rows: Vec<Vec<String>>;
-    
-    if content.starts_with(&[0x50, 0x4B, 0x03, 0x04]) {
-        let content_vec = content.to_vec();
-        match open_workbook_auto_from_rs(std::io::Cursor::new(content_vec)) {
-            Ok(mut workbook) => {
-                let sheets = workbook.sheet_names().to_vec();
-                if sheets.is_empty() {
-                    return (StatusCode::BAD_REQUEST, "Excel文件中没有工作表".to_string()).into_response();
-                }
-                
-                let range = match workbook.worksheet_range(&sheets[0]) {
-                    Ok(r) => r,
-                    Err(e) => return (StatusCode::BAD_REQUEST, format!("无法读取Excel文件内容: {}", e)).into_response(),
-                };
-                
-                rows = range.rows()
-                    .map(|row| {
-                        row.iter()
-                            .map(|cell| match cell {
-                                Data::Empty => "".to_string(),
-                                Data::Int(v) => v.to_string(),
-                                Data::Float(v) => v.to_string(),
-                                Data::String(v) => v.to_string(),
-                                Data::Bool(v) => v.to_string(),
-                                _ => "".to_string(),
-                            })
-                            .collect()
-                    })
-                    .collect();
+    match app.purchase_order.import(content.to_vec(), &ctx).await {
+        Ok(outcome) => {
+            if let Some((target_id, detail)) = outcome.log {
+                crate::auth::log_operation(&ctx, "purchase_order.import", "purchase_order", &target_id, &detail).await;
             }
-            Err(e) => {
-                return (StatusCode::BAD_REQUEST, format!("读取Excel文件失败: {}", e)).into_response();
-            }
+            (StatusCode::OK, outcome.body).into_response()
         }
-    } else {
-        let content_str = String::from_utf8_lossy(&content).to_string();
-        rows = parse_csv(&content_str);
+        Err(e) => text_error_response(e).into_response(),
     }
-    
-    if rows.len() < 2 {
-        return (StatusCode::BAD_REQUEST, "文件至少需要包含标题行和一行数据".to_string()).into_response();
-    }
-    
-    let mut orders: std::collections::HashMap<String, (Vec<String>, Vec<Vec<String>>)> = std::collections::HashMap::new();
-    
-    for row in rows.iter().skip(1) {
-        if row.len() < 3 {
-            continue;
-        }
-        
-        let order_no = row[1].trim().to_string();
-        if order_no.is_empty() {
-            continue;
-        }
-        
-        if !orders.contains_key(&order_no) {
-            orders.insert(order_no.clone(), (row.clone(), Vec::new()));
-        }
-        
-        if row.len() > 9 && !row[9].trim().is_empty() {
-            let item: Vec<String> = row[9..].to_vec();
-            orders.get_mut(&order_no).unwrap().1.push(item);
-        }
-    }
-    
-    let mut success = 0;
-    let mut failed = 0;
-    
-    for (order_no, (order_row, items)) in orders {
-        let supplier_name = if order_row.len() > 3 { order_row[3].trim() } else { "" };
-        let supplier_id = if !supplier_name.is_empty() {
-            let sid: Option<i64> = sqlx::query("SELECT id FROM supplier WHERE name = ?")
-                .bind(supplier_name)
-                .fetch_optional(crate::db::pool())
-                .await
-                .ok()
-                .flatten()
-                .map(|r| r.get::<i64, _>("id"));
-            sid
-        } else {
-            None
-        };
-        
-        if supplier_id.is_none() {
-            failed += 1;
-            continue;
-        }
-        
-        let order_date = if order_row.len() > 2 { order_row[2].trim() } else { "" };
-        if order_date.is_empty() {
-            failed += 1;
-            continue;
-        }
-        
-        let total_amount: f64 = if order_row.len() > 4 { order_row[4].trim().parse().unwrap_or(0.0) } else { 0.0 };
-        let discount_rate: f64 = if order_row.len() > 5 { order_row[5].trim().parse().unwrap_or(0.0) } else { 0.0 };
-        let final_amount: f64 = if order_row.len() > 6 { order_row[6].trim().parse().unwrap_or(0.0) } else { 0.0 };
-        let remark = if order_row.len() > 8 { order_row[8].trim() } else { "" };
-        
-        let result = sqlx::query(
-            "INSERT OR IGNORE INTO purchase_order(order_no, supplier_id, order_date, total_amount, discount_rate, final_amount, remark, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')"
-        )
-        .bind(&order_no)
-        .bind(supplier_id.unwrap())
-        .bind(order_date)
-        .bind(total_amount)
-        .bind(discount_rate)
-        .bind(final_amount)
-        .bind(remark)
-        .execute(crate::db::pool())
-        .await;
-        
-        match result {
-            Ok(res) => {
-                if res.rows_affected() > 0 {
-                    let order_id = res.last_insert_rowid();
-                    for item in items {
-                        if item.len() < 1 {
-                            continue;
-                        }
-                        
-                        let product_name = if item.len() > 0 { item[0].trim() } else { "" };
-                        let alias1 = if item.len() > 1 { item[1].trim() } else { "" };
-                        let alias2 = if item.len() > 2 { item[2].trim() } else { "" };
-                        let spec = if item.len() > 3 { item[3].trim() } else { "" };
-                        let unit = if item.len() > 4 { item[4].trim() } else { "个" };
-                        let unit_price: f64 = if item.len() > 5 { item[5].trim().parse().unwrap_or(0.0) } else { 0.0 };
-                        let quantity: f64 = if item.len() > 6 { item[6].trim().parse().unwrap_or(0.0) } else { 0.0 };
-                        let amount: f64 = if item.len() > 8 { item[8].trim().parse().unwrap_or(0.0) } else { 0.0 };
-                        let item_remark = if item.len() > 9 { item[9].trim() } else { "" };
-                        
-                        let product_id: i64 = sqlx::query("SELECT id FROM product WHERE name = ? AND (spec IS NULL OR spec = ?)")
-                            .bind(product_name)
-                            .bind(spec)
-                            .fetch_optional(crate::db::pool())
-                            .await
-                            .ok()
-                            .flatten()
-                            .map(|r| r.get::<i64, _>("id"))
-                            .unwrap_or(0);
-
-                        // base_quantity 服务端按 product_unit.ratio 重算（有 ratio 时权威，否则回退模板值或 quantity）
-                        let computed_bq = if product_id > 0 {
-                            sqlx::query("SELECT ratio FROM product_unit WHERE product_id = ? AND unit_name = ?")
-                                .bind(product_id).bind(unit)
-                                .fetch_optional(crate::db::pool()).await
-                                .ok().flatten()
-                                .map(|r| ((quantity * r.get::<f64, _>("ratio")) * 100.0).round() / 100.0)
-                        } else { None };
-                        let bq = computed_bq.unwrap_or_else(|| {
-                            let from_sheet = if item.len() > 7 { item[7].trim().parse().unwrap_or(0.0) } else { 0.0 };
-                            if from_sheet > 0.0 { from_sheet } else { quantity }
-                        });
-
-                        sqlx::query(
-                            "INSERT INTO purchase_order_item(order_id, product_id, product_name, alias1, alias2, spec, unit, unit_price, quantity, base_quantity, amount, ordered_quantity, remark) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                        )
-                        .bind(order_id)
-                        .bind(product_id)
-                        .bind(product_name)
-                        .bind(alias1)
-                        .bind(alias2)
-                        .bind(spec)
-                        .bind(unit)
-                        .bind(unit_price)
-                        .bind(quantity)
-                        .bind(bq)
-                        .bind(amount)
-                        .bind(0.0f64)
-                        .bind(item_remark)
-                        .execute(crate::db::pool())
-                        .await
-                        .ok();
-                    }
-                    success += 1;
-                } else {
-                    failed += 1;
-                }
-            }
-            Err(_) => {
-                failed += 1;
-            }
-        }
-    }
-    
-    crate::auth::log_operation(&ctx, "purchase_order.import", "purchase_order", "",
-        &format!("导入采购单：成功 {} 条，失败 {} 条", success, failed)).await;
-
-    (StatusCode::OK, format!("导入完成：成功 {} 条，失败 {} 条", success, failed)).into_response()
 }
 
 pub async fn api_sales_order_detail(headers: axum::http::HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
@@ -3951,7 +2548,7 @@ pub async fn api_sales_order_update(headers: axum::http::HeaderMap, Json(req): J
                 )
             })
             .collect();
-        let base_qtys = compute_base_quantities(&base_inputs).await;
+        let base_qtys = stock_writer::compute_base_quantities(crate::db::pool(), &base_inputs).await;
 
         let mut query = sqlx::query(AssertSqlSafe(sql.as_str()));
         for (idx, mut item) in req.items.into_iter().enumerate() {
@@ -8899,7 +7496,7 @@ pub async fn api_sales_order_create(headers: axum::http::HeaderMap, Json(req): J
                         )
                     })
                     .collect();
-                let base_qtys = compute_base_quantities(&base_inputs).await;
+                let base_qtys = stock_writer::compute_base_quantities(crate::db::pool(), &base_inputs).await;
 
                 let mut query = sqlx::query(AssertSqlSafe(sql.as_str()));
                 for (idx, item) in req.items.iter().enumerate() {
@@ -12235,11 +10832,11 @@ pub async fn api_sales_order_update_status(headers: axum::http::HeaderMap, Json(
     }
 
     let mv_res: Result<(), sqlx::Error> = if new_status == "accepted" {
-        write_stock_movements_for_audit(
+        stock_writer::write_stock_movements_for_audit(
             &mut tx, id, "sales_order_item", "out", "sales", "sales", "销售出库", "确认验收"
         ).await
     } else if current_status == "accepted" {
-        write_stock_movements_for_unaudit(
+        stock_writer::write_stock_movements_for_unaudit(
             &mut tx, id, "sales_order_item", "out", "sales", "sales", "销售出库", "撤销验收冲销"
         ).await
     } else {
@@ -12369,7 +10966,7 @@ pub async fn api_sales_order_unapprove(headers: axum::http::HeaderMap, Path(id):
             // 出库时点在验收：只有原状态为 accepted（已出库）才需写冲销（in）；
             // confirmed 等未出库状态反审核只改状态，不动库存。
             if order_status == "accepted" {
-                if let Err(e) = write_stock_movements_for_unaudit(
+                if let Err(e) = stock_writer::write_stock_movements_for_unaudit(
                     &mut tx, id, "sales_order_item", "out", "sales", "sales", "销售出库", "反审核冲销"
                 ).await {
                     let _ = tx.rollback().await;

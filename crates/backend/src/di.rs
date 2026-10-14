@@ -8,6 +8,7 @@ use application::service::category::CategoryService;
 use application::service::inventory::InventoryService;
 use application::service::price_schedule::PriceScheduleService;
 use application::service::product::ProductService;
+use application::service::purchase_order::PurchaseOrderService;
 use application::service::purchaser::PurchaserService;
 use application::service::supplier::SupplierService;
 use application::service::today_price::TodayPriceService;
@@ -19,6 +20,7 @@ use database::sqlite::repo::inventory::SqliteInventoryRepo;
 use database::sqlite::repo::oplog::SqliteOperationLogRepo;
 use database::sqlite::repo::price_schedule::SqlitePriceScheduleRepo;
 use database::sqlite::repo::product::SqliteProductRepo;
+use database::sqlite::repo::purchase_order::SqlitePurchaseOrderRepo;
 use database::sqlite::repo::purchaser::SqlitePurchaserRepo;
 use database::sqlite::repo::supplier::SqliteSupplierRepo;
 use database::sqlite::repo::today_price::SqliteTodayPriceRepo;
@@ -75,6 +77,7 @@ pub struct App {
     pub today_price: TodayPriceService<SqliteTodayPriceRepo>,
     pub price_schedule: PriceScheduleService<SqlitePriceScheduleRepo>,
     pub inventory: InventoryService<SqliteInventoryRepo>,
+    pub purchase_order: PurchaseOrderService<SqlitePurchaseOrderRepo>,
 }
 
 /// 初始化数据库；如有待重建的 price_schedule 时段则补跑重建，完成后升级 user_version
@@ -100,5 +103,6 @@ pub async fn bootstrap() -> App {
         today_price: TodayPriceService::new(SqliteTodayPriceRepo::new(database::pool().clone())),
         price_schedule: PriceScheduleService::new(SqlitePriceScheduleRepo::new(database::pool().clone())),
         inventory: InventoryService::new(SqliteInventoryRepo::new(database::pool().clone())),
+        purchase_order: PurchaseOrderService::new(SqlitePurchaseOrderRepo::new(database::pool().clone())),
     }
 }
