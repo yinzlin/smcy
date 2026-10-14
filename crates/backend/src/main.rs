@@ -2,10 +2,8 @@
 
 pub mod api;
 pub mod middleware;
-pub mod pages;
 mod app_assets;
 mod di;
-mod static_assets;
 mod tray;
 
 // ---- 兼容 shim：保持历史代码中的 crate::xxx 路径不变 ----
@@ -16,7 +14,6 @@ pub(crate) use crate::middleware::auth;
 
 pub(crate) use application::service::*;
 pub(crate) use common::utils::*;
-pub(crate) use database::*;
 pub(crate) use crate::middleware::auth::*;
 
 use tao::event_loop::{ControlFlow, EventLoop};

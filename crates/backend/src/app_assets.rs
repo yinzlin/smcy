@@ -1,4 +1,4 @@
-//! React 前端资源内嵌：crates/frontend/dist 编译进二进制，挂 /app，SPA 路由回退 index.html
+﻿//! React 前端资源内嵌：crates/frontend/dist 编译进二进制，挂 /app，SPA 路由回退 index.html
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -38,32 +38,32 @@ pub async fn serve_app(Path(path): Path<String>, headers: HeaderMap) -> impl Int
     serve_embedded("index.html", &headers)
 }
 
-/// /login 302 到 React 登录页（老登录页保留在 /legacy/login 回退）
+/// /login 302 到 React 登录页（老登录页已删除）
 pub async fn redirect_app_login() -> impl IntoResponse {
     Redirect::temporary("/app/login")
 }
 
-/// /product 302 到 React 商品页（老商品页保留在 /legacy/product 回退）
+/// /product 302 到 React 商品页（老商品页已删除）
 pub async fn redirect_app_product() -> impl IntoResponse {
     Redirect::temporary("/app/product")
 }
 
-/// /purchase 302 到 React 采购订单页（老采购页保留在 /legacy/purchase 回退）
+/// /purchase 302 到 React 采购订单页（老采购页已删除）
 pub async fn redirect_app_purchase() -> impl IntoResponse {
     Redirect::temporary("/app/purchase")
 }
 
-/// /sales 302 到 React 销售订单页（老销售页保留在 /legacy/sales 回退）
+/// /sales 302 到 React 销售订单页（老销售页已删除）
 pub async fn redirect_app_sales() -> impl IntoResponse {
     Redirect::temporary("/app/sales")
 }
 
-/// /mobile/today_price 302 到 React 今日进价采集页（老页保留在 /legacy/today_price 回退）
+/// /mobile/today_price 302 到 React 今日进价采集页（老页已删除）
 pub async fn redirect_app_today_price() -> impl IntoResponse {
     Redirect::temporary("/app/today-price")
 }
 
-/// /query/price_schedule 302 到 React 价格策略页（老页保留在 /legacy/price_schedule 回退）
+/// /query/price_schedule 302 到 React 价格策略页（老页已删除）
 pub async fn redirect_app_price_schedule() -> impl IntoResponse {
     Redirect::temporary("/app/price-schedule")
 }
@@ -121,7 +121,7 @@ redirect_app!(redirect_app_query_overview, "/app/query/overview");
 redirect_app!(redirect_app_query_category_stats, "/app/query/category-stats");
 redirect_app!(redirect_app_query_document_summary, "/app/query/document-summary");
 
-// 移动端分拣页（老页保留在 /legacy/sort* 回退）
+// 移动端分拣页（老页已删除，重定向保留书签兼容）
 redirect_app!(redirect_app_mobile_sort, "/app/mobile/sort");
 redirect_app!(redirect_app_mobile_sort_by_purchaser, "/app/mobile/sort-by-purchaser");
 redirect_app!(redirect_app_mobile_sort_by_category, "/app/mobile/sort-by-category");

@@ -1,6 +1,6 @@
 import { Button, Drawer, Dropdown, Grid, Layout, Menu, Space } from 'antd'
 import type { MenuProps } from 'antd'
-import { LogoutOutlined, MenuOutlined, SwapOutlined, UserOutlined } from '@ant-design/icons'
+import { LogoutOutlined, MenuOutlined, UserOutlined } from '@ant-design/icons'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useAuth } from '../stores/auth'
@@ -448,9 +448,6 @@ export default function MainLayout() {
             {isMobile && <Button icon={<MenuOutlined />} onClick={() => setDrawerOpen(true)} />}
           </Space>
           <Space size="middle">
-            <Button icon={<SwapOutlined />} href="/">
-              老系统入口
-            </Button>
             <Dropdown
               menu={{
                 items: [{ key: 'logout', icon: <LogoutOutlined />, label: '退出登录' }],
