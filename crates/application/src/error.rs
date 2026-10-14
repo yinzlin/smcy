@@ -16,6 +16,9 @@ pub enum UseCaseError {
     NotFound(String),
     /// 存储失败 → HTTP 500（文本契约接口携带上下文文案，JSON 契约接口固定"服务器内部错误"）
     Storage(String),
+    /// 逐字节自定义响应（HTTP 状态码 + 完整响应体）：仅用于旧接口非标准错误契约的逐字节保持
+    /// （如价格策略 create 的 400 纯文本 / 409 带空格手写 JSON / 500 携带原始错误消息）
+    RawResponse(u16, String),
 }
 
 impl From<DomainError> for UseCaseError {

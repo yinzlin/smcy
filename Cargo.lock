@@ -36,6 +36,7 @@ dependencies = [
  "anyhow",
  "axum",
  "bcrypt",
+ "calamine",
  "chrono",
  "common",
  "database",
