@@ -63,6 +63,59 @@ pub async fn redirect_app_price_schedule() -> impl IntoResponse {
     Redirect::temporary("/app/price-schedule")
 }
 
+/// 批量定义旧路由 → 新 React 路由的 302 重定向函数
+macro_rules! redirect_app {
+    ($name:ident, $target:expr) => {
+        pub async fn $name() -> impl IntoResponse {
+            Redirect::temporary($target)
+        }
+    };
+}
+
+// 管理类页面
+redirect_app!(redirect_app_index, "/app");
+redirect_app!(redirect_app_supplier, "/app/supplier");
+redirect_app!(redirect_app_purchaser, "/app/purchaser");
+redirect_app!(redirect_app_warehouse, "/app/warehouse");
+redirect_app!(redirect_app_inventory, "/app/inventory");
+redirect_app!(redirect_app_supplement, "/app/supplement");
+redirect_app!(redirect_app_user, "/app/user");
+redirect_app!(redirect_app_system, "/app/system");
+redirect_app!(redirect_app_operation_log, "/app/operation-log");
+redirect_app!(redirect_app_backup, "/app/backup");
+redirect_app!(redirect_app_restore, "/app/restore");
+
+// 数据查询——采购查询
+redirect_app!(redirect_app_query_purchase_order, "/app/query/purchase-order");
+redirect_app!(redirect_app_query_purchase_document, "/app/query/purchase-document");
+redirect_app!(redirect_app_query_purchase_price, "/app/query/purchase-price");
+redirect_app!(redirect_app_query_purchase_summary, "/app/query/purchase-summary");
+redirect_app!(redirect_app_query_supplier_balance, "/app/query/supplier-balance");
+// 数据查询——销售查询
+redirect_app!(redirect_app_query_sales_order, "/app/query/sales-order");
+redirect_app!(redirect_app_query_sales_summary, "/app/query/sales-summary");
+redirect_app!(redirect_app_query_sales_price, "/app/query/sales-price");
+redirect_app!(redirect_app_query_purchaser_balance, "/app/query/purchaser-balance");
+redirect_app!(redirect_app_query_product_rank, "/app/query/product-rank");
+redirect_app!(redirect_app_query_reimburse_summary, "/app/query/reimburse-summary");
+redirect_app!(redirect_app_query_allocation_source, "/app/query/allocation-source");
+redirect_app!(redirect_app_query_order_adjust, "/app/query/order-adjust");
+// 数据查询——库存查询
+redirect_app!(redirect_app_query_stock_balance, "/app/query/stock-balance");
+redirect_app!(redirect_app_query_stock_flow, "/app/query/stock-flow");
+redirect_app!(redirect_app_query_stock_summary, "/app/query/stock-summary");
+redirect_app!(redirect_app_query_stock_summary_reimburse, "/app/query/stock-summary-reimburse");
+redirect_app!(redirect_app_query_stock_warning, "/app/query/stock-warning");
+redirect_app!(redirect_app_query_slow_stock, "/app/query/slow-stock");
+// 数据查询——财务查询
+redirect_app!(redirect_app_query_income_expense, "/app/query/income-expense");
+redirect_app!(redirect_app_query_profit_detail, "/app/query/profit-detail");
+redirect_app!(redirect_app_query_finance_settlement, "/app/query/finance-settlement");
+// 数据查询——统计报表
+redirect_app!(redirect_app_query_overview, "/app/query/overview");
+redirect_app!(redirect_app_query_category_stats, "/app/query/category-stats");
+redirect_app!(redirect_app_query_document_summary, "/app/query/document-summary");
+
 fn serve_embedded(path: &str) -> axum::response::Response {
     match AppAssets::get(path) {
         Some(content) => {

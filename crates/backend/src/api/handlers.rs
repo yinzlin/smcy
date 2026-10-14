@@ -35,6 +35,41 @@ pub async fn api_system_config(Json(data): Json<std::collections::HashMap<String
     (StatusCode::OK, "设置保存成功".to_string())
 }
 
+/// GET /api/system/config：返回全部配置键值对（供新前端系统参数页回显）
+pub async fn api_system_config_get() -> impl IntoResponse {
+    let rows = sqlx::query("SELECT key, value FROM system_config")
+        .fetch_all(crate::db::pool())
+        .await
+        .unwrap_or_default();
+    let mut map = serde_json::Map::new();
+    for row in rows {
+        let key: String = row.get("key");
+        let value: String = row.get("value");
+        map.insert(key, serde_json::Value::String(value));
+    }
+    Json(serde_json::Value::Object(map))
+}
+
+/// GET /api/backup/list：返回备份记录列表（供新前端备份/恢复页）
+pub async fn api_backup_list() -> impl IntoResponse {
+    let rows = sqlx::query("SELECT id, backup_time, file_name, size FROM backup_record ORDER BY backup_time DESC")
+        .fetch_all(crate::db::pool())
+        .await
+        .unwrap_or_default();
+    let list: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.get::<i64, _>("id"),
+                "backup_time": r.get::<String, _>("backup_time"),
+                "file_name": r.get::<String, _>("file_name"),
+                "size": r.get::<i64, _>("size"),
+            })
+        })
+        .collect();
+    Json(list)
+}
+
 pub async fn api_operation_log_list(
     headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
