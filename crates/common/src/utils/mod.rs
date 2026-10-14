@@ -4,8 +4,6 @@ use axum::{
 };
 use chrono::Local;
 use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder};
-use sqlx::sqlite::SqliteRow;
-use sqlx::Row;
 use std::collections::HashMap;
 
 // ===== 导出通用辅助 =====
@@ -1368,35 +1366,6 @@ pub fn operation_action_label(action: &str) -> String {
         }
     }
     action.to_string()
-}
-
-pub fn build_category_tree_json(
-    rows: &[SqliteRow],
-    parent_id: Option<i64>,
-    entity_type: &str,
-) -> Vec<serde_json::Value> {
-    let mut result = vec![];
-    for row in rows {
-        let et: String = row.get("entity_type");
-        let pid: Option<i64> = row.get("parent_id");
-        if et != entity_type {
-            continue;
-        }
-        if pid != parent_id {
-            continue;
-        }
-        let id: i64 = row.get("id");
-        let children = build_category_tree_json(rows, Some(id), entity_type);
-        result.push(serde_json::json!({
-            "id": id,
-            "name": row.get::<String, _>("name"),
-            "parent_id": pid,
-            "sort_order": row.get::<i32, _>("sort_order"),
-            "children": children,
-        }));
-    }
-    result.sort_by_key(|x| (x["sort_order"].as_i64().unwrap_or(0), x["id"].as_i64().unwrap_or(0)));
-    result
 }
 
 /// 校验日期字符串是否为合法 'YYYY-MM-DD'

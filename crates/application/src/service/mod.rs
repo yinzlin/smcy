@@ -1,4 +1,6 @@
 //! 业务服务集合（由原 src/main.rs 业务函数切片迁移而来）
+pub mod basic_audit;
+pub mod category;
 pub mod excel;
 pub mod legacy_user;
 pub mod order_no;
@@ -6,7 +8,10 @@ pub mod price;
 pub mod purchase;
 pub mod stock;
 pub mod user;
+pub mod warehouse;
 
+pub use basic_audit::*;
+pub use category::*;
 pub use excel::*;
 pub use legacy_user::*;
 pub use order_no::*;
@@ -14,6 +19,7 @@ pub use price::*;
 pub use purchase::*;
 pub use stock::*;
 pub use user::*;
+pub use warehouse::*;
 
 
 pub fn get_category_sort_key(category_name: &str, parent_name: &str) -> i64 {

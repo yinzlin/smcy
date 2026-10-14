@@ -2,13 +2,17 @@ use axum::extract::{Json, Path, Query, Multipart, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use application::error::UseCaseError;
+use application::port::audit::BasicAuditUseCase;
+use application::port::category::CategoryUseCase;
 use application::port::user::UserUseCase;
+use application::port::warehouse::WarehouseUseCase;
 use crate::di::App;
 use bytes::Bytes;
 use calamine::{open_workbook_auto_from_rs, Data, Reader};
 use chrono::Local;
+use domain::port::audit::BasicTable;
 use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder, Workbook, XlsxError};
-use crate::utils::{xlsx_response, xlsx_header_format, parse_keyword_pattern, parse_csv, sanitize_filename_prefix, image_url_to_path, operation_action_label, build_category_tree_json, sanitize_xlsx_string, round2};
+use crate::utils::{xlsx_response, xlsx_header_format, parse_keyword_pattern, parse_csv, sanitize_filename_prefix, image_url_to_path, operation_action_label, sanitize_xlsx_string, round2};
 use crate::generate_order_no;
 use crate::models::*;
 use crate::update_product_purchase_prices;
@@ -36,8 +40,23 @@ fn api_message_json(success: bool, message: &str) -> String {
 fn usecase_error_response(e: UseCaseError) -> (StatusCode, String) {
     match e {
         UseCaseError::Business(m) => (StatusCode::OK, api_message_json(false, &m)),
+        UseCaseError::BadRequest(m) => (StatusCode::BAD_REQUEST, api_message_json(false, &m)),
         UseCaseError::Unauthorized(m) => (StatusCode::UNAUTHORIZED, api_message_json(false, &m)),
+        UseCaseError::Forbidden(m) => (StatusCode::FORBIDDEN, api_message_json(false, &m)),
+        UseCaseError::NotFound(m) => (StatusCode::NOT_FOUND, api_message_json(false, &m)),
         UseCaseError::Storage(_) => (StatusCode::INTERNAL_SERVER_ERROR, api_message_json(false, "服务器内部错误")),
+    }
+}
+
+/// UseCaseError → 文本契约响应（旧基础数据接口为纯文本响应体，前端 postAction 直读 text 展示）
+fn text_error_response(e: UseCaseError) -> (StatusCode, String) {
+    match e {
+        UseCaseError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
+        UseCaseError::Unauthorized(m) => (StatusCode::UNAUTHORIZED, m),
+        UseCaseError::Forbidden(m) => (StatusCode::FORBIDDEN, m),
+        UseCaseError::NotFound(m) => (StatusCode::NOT_FOUND, m),
+        UseCaseError::Storage(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
+        UseCaseError::Business(m) => (StatusCode::BAD_REQUEST, m),
     }
 }
 
@@ -1247,18 +1266,20 @@ pub async fn api_product_unapprove(headers: axum::http::HeaderMap, Json(req): Js
         Err((code, msg)) => (code, msg).into_response(),
     }
 }
-pub async fn api_warehouse_approve(headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn api_warehouse_approve(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
     let id = req["id"].as_i64().unwrap_or(0);
-    match set_basic_audit_status(&headers, "warehouse", id, "confirmed", "warehouse.approve").await {
+    let ctx = crate::auth::get_user_ctx(&headers).await;
+    match app.audit.set_audit_status(&ctx, BasicTable::Warehouse, id, "confirmed", "warehouse.approve").await {
         Ok(()) => (StatusCode::OK, "审核成功".to_string()).into_response(),
-        Err((code, msg)) => (code, msg).into_response(),
+        Err(e) => text_error_response(e).into_response(),
     }
 }
-pub async fn api_warehouse_unapprove(headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn api_warehouse_unapprove(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
     let id = req["id"].as_i64().unwrap_or(0);
-    match set_basic_audit_status(&headers, "warehouse", id, "pending", "warehouse.unapprove").await {
+    let ctx = crate::auth::get_user_ctx(&headers).await;
+    match app.audit.set_audit_status(&ctx, BasicTable::Warehouse, id, "pending", "warehouse.unapprove").await {
         Ok(()) => (StatusCode::OK, "反审核成功".to_string()).into_response(),
-        Err((code, msg)) => (code, msg).into_response(),
+        Err(e) => text_error_response(e).into_response(),
     }
 }
 
@@ -3612,99 +3633,40 @@ pub async fn api_product_price_log_list(
     (StatusCode::OK, serde_json::to_string(&logs).unwrap())
 }
 
-pub async fn api_category_list() -> impl IntoResponse {
-    let rows = sqlx::query("SELECT id, name, parent_id, entity_type, sort_order FROM category ORDER BY entity_type, sort_order, id")
-        .fetch_all(crate::db::pool())
-        .await
-        .unwrap_or_default();
-    
-    let categories: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|row| serde_json::json!({
-            "id": row.get::<i64, _>("id"),
-            "name": row.get::<String, _>("name"),
-            "parent_id": row.get::<Option<i64>, _>("parent_id"),
-            "entity_type": row.get::<String, _>("entity_type"),
-            "sort_order": row.get::<i32, _>("sort_order"),
-        }))
-        .collect();
-    
-    (StatusCode::OK, serde_json::to_string(&categories).unwrap())
+pub async fn api_category_list(State(app): State<App>) -> impl IntoResponse {
+    let rows = app.category.list().await;
+    (StatusCode::OK, serde_json::to_string(&rows).unwrap())
 }
 
-pub async fn api_category_create(Json(req): Json<CategoryReq>) -> impl IntoResponse {
-    let result = sqlx::query(
-        "INSERT INTO category(name, parent_id, entity_type, sort_order) VALUES (?, ?, ?, ?)"
-    )
-    .bind(&req.name)
-    .bind(&req.parent_id)
-    .bind(&req.entity_type)
-    .bind(&req.sort_order)
-    .execute(crate::db::pool())
-    .await;
-    
-    match result {
-        Ok(_) => StatusCode::OK,
-        Err(e) => {
-            eprintln!("创建分类失败: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
+pub async fn api_category_create(State(app): State<App>, Json(req): Json<CategoryReq>) -> impl IntoResponse {
+    match app
+        .category
+        .create(req.name, req.parent_id, req.entity_type, req.sort_order)
+        .await
+    {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(e) => text_error_response(e).into_response(),
     }
 }
 
-pub async fn api_category_delete(Json(req): Json<serde_json::Value>) -> (StatusCode, String) {
+pub async fn api_category_delete(State(app): State<App>, Json(req): Json<serde_json::Value>) -> (StatusCode, String) {
     let id = req["id"].as_i64().unwrap_or(0);
-    // 先检查是否有子分类
-    let child_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM category WHERE parent_id = ?")
-        .bind(id)
-        .fetch_one(crate::db::pool())
-        .await
-        .unwrap_or(0);
-    if child_count > 0 {
-        return (StatusCode::BAD_REQUEST, "该分类下有子分类，无法删除".to_string());
-    }
-    // 检查是否有实体引用
-    for table in &["supplier", "purchaser", "product"] {
-        let count = match *table {
-            "supplier" => sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM supplier WHERE category_id = ?").bind(id).fetch_one(crate::db::pool()).await.unwrap_or(0),
-            "purchaser" => sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM purchaser WHERE category_id = ?").bind(id).fetch_one(crate::db::pool()).await.unwrap_or(0),
-            "product" => sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM product WHERE category_id = ?").bind(id).fetch_one(crate::db::pool()).await.unwrap_or(0),
-            _ => 0,
-        };
-        if count > 0 {
-            return (StatusCode::BAD_REQUEST, format!("该分类已被{}引用，无法删除", table));
-        }
-    }
-    let result = sqlx::query("DELETE FROM category WHERE id = ?").bind(id).execute(crate::db::pool()).await;
-    match result {
-        Ok(_) => (StatusCode::OK, "删除成功".to_string()),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "删除失败".to_string()),
+    match app.category.delete(id).await {
+        Ok(msg) => (StatusCode::OK, msg),
+        Err(e) => text_error_response(e),
     }
 }
 
-pub async fn api_category_rename(Json(req): Json<CategoryRenameReq>) -> (StatusCode, String) {
-    let result = sqlx::query("UPDATE category SET name = ? WHERE id = ?")
-        .bind(&req.name)
-        .bind(req.id)
-        .execute(crate::db::pool())
-        .await;
-    match result {
-        Ok(_) => (StatusCode::OK, "重命名成功".to_string()),
-        Err(e) => {
-            eprintln!("重命名分类失败: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "重命名失败".to_string())
-        }
+pub async fn api_category_rename(State(app): State<App>, Json(req): Json<CategoryRenameReq>) -> (StatusCode, String) {
+    match app.category.rename(req.id, req.name).await {
+        Ok(msg) => (StatusCode::OK, msg),
+        Err(e) => text_error_response(e),
     }
 }
 
-pub async fn api_category_tree(axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+pub async fn api_category_tree(State(app): State<App>, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     let entity_type = params.get("entity_type").cloned().unwrap_or_else(|| "product".to_string());
-    let rows = sqlx::query("SELECT id, name, parent_id, entity_type, sort_order FROM category ORDER BY sort_order, id")
-        .fetch_all(crate::db::pool())
-        .await
-        .unwrap_or_default();
-    
-    let tree = build_category_tree_json(&rows, None, &entity_type);
+    let tree = app.category.tree(&entity_type).await;
     (StatusCode::OK, serde_json::to_string(&tree).unwrap())
 }
 
@@ -3735,119 +3697,38 @@ pub async fn api_inventory_list() -> impl IntoResponse {
     (StatusCode::OK, serde_json::to_string(&inventory).unwrap())
 }
 
-pub async fn api_warehouse_list() -> impl IntoResponse {
-    let rows = sqlx::query(
-        "SELECT id, name, code, address, contact, phone, status, sort_order, audit_status, create_at, update_at FROM warehouse ORDER BY sort_order, id"
-    )
-    .fetch_all(crate::db::pool())
-    .await
-    .unwrap_or_default();
-    
-    let warehouses: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|row| serde_json::json!({
-            "id": row.get::<i64, _>("id"),
-            "name": row.get::<String, _>("name"),
-            "code": row.get::<Option<String>, _>("code"),
-            "address": row.get::<Option<String>, _>("address"),
-            "contact": row.get::<Option<String>, _>("contact"),
-            "phone": row.get::<Option<String>, _>("phone"),
-            "status": row.get::<i32, _>("status"),
-            "sort_order": row.get::<i32, _>("sort_order"),
-            "audit_status": row.get::<Option<String>, _>("audit_status"),
-            "create_at": row.get::<Option<String>, _>("create_at"),
-            "update_at": row.get::<Option<String>, _>("update_at"),
-        }))
-        .collect();
-    
-    (StatusCode::OK, serde_json::to_string(&warehouses).unwrap())
+pub async fn api_warehouse_list(State(app): State<App>) -> impl IntoResponse {
+    let rows = app.warehouse.list().await;
+    (StatusCode::OK, serde_json::to_string(&rows).unwrap())
 }
 
-pub async fn api_warehouse_create(Json(req): Json<WarehouseCreateReq>) -> (StatusCode, String) {
-    let result = sqlx::query(
-        "INSERT INTO warehouse (name, code, address, contact, phone, sort_order) VALUES (?, ?, ?, ?, ?, ?)"
-    )
-    .bind(&req.name)
-    .bind(req.code)
-    .bind(req.address)
-    .bind(req.contact)
-    .bind(req.phone)
-    .bind(req.sort_order.unwrap_or(0))
-    .execute(crate::db::pool())
-    .await;
-    
-    match result {
-        Ok(_) => (StatusCode::OK, "创建成功".to_string()),
-        Err(e) => {
-            eprintln!("创建仓库失败: {}", e);
-            if e.to_string().contains("UNIQUE constraint failed") {
-                (StatusCode::BAD_REQUEST, "仓库名称或编号已存在".to_string())
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, "创建失败".to_string())
-            }
-        }
-    }
-}
-
-pub async fn api_warehouse_update(Json(req): Json<WarehouseUpdateReq>) -> (StatusCode, String) {
-    if let Err((code, msg)) = check_basic_not_confirmed("warehouse", req.id).await {
-        return (code, msg);
-    }
-    let result = sqlx::query(
-        "UPDATE warehouse SET name = ?, code = ?, address = ?, contact = ?, phone = ?, status = ?, sort_order = ?, audit_status='pending', update_at = datetime('now','localtime') WHERE id = ?"
-    )
-    .bind(&req.name)
-    .bind(req.code)
-    .bind(req.address)
-    .bind(req.contact)
-    .bind(req.phone)
-    .bind(req.status.unwrap_or(1))
-    .bind(req.sort_order.unwrap_or(0))
-    .bind(req.id)
-    .execute(crate::db::pool())
-    .await;
-    
-    match result {
-        Ok(_) => (StatusCode::OK, "更新成功".to_string()),
-        Err(e) => {
-            eprintln!("更新仓库失败: {}", e);
-            if e.to_string().contains("UNIQUE constraint failed") {
-                (StatusCode::BAD_REQUEST, "仓库名称或编号已存在".to_string())
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, "更新失败".to_string())
-            }
-        }
-    }
-}
-
-pub async fn api_warehouse_delete(Json(req): Json<std::collections::HashMap<String, i64>>) -> (StatusCode, String) {
-    let id = req.get("id").copied().unwrap_or(0);
-    if id == 1 {
-        return (StatusCode::BAD_REQUEST, "默认仓库无法删除".to_string());
-    }
-    if let Err((code, msg)) = check_basic_not_confirmed("warehouse", id).await {
-        return (code, msg);
-    }
-    
-    let count: i64 = sqlx::query("SELECT COUNT(*) FROM inventory WHERE warehouse_id = ?")
-        .bind(id)
-        .fetch_one(crate::db::pool())
+pub async fn api_warehouse_create(State(app): State<App>, Json(req): Json<WarehouseCreateReq>) -> (StatusCode, String) {
+    match app
+        .warehouse
+        .create(req.name, req.code, req.address, req.contact, req.phone, req.sort_order)
         .await
-        .map(|r| r.get(0))
-        .unwrap_or(0);
-    
-    if count > 0 {
-        return (StatusCode::BAD_REQUEST, "该仓库存在库存记录，无法删除".to_string());
+    {
+        Ok(msg) => (StatusCode::OK, msg),
+        Err(e) => text_error_response(e),
     }
-    
-    let result = sqlx::query("DELETE FROM warehouse WHERE id = ?")
-        .bind(id)
-        .execute(crate::db::pool())
-        .await;
-    
-    match result {
-        Ok(_) => (StatusCode::OK, "删除成功".to_string()),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "删除失败".to_string()),
+}
+
+pub async fn api_warehouse_update(State(app): State<App>, Json(req): Json<WarehouseUpdateReq>) -> (StatusCode, String) {
+    match app
+        .warehouse
+        .update(req.id, req.name, req.code, req.address, req.contact, req.phone, req.status, req.sort_order)
+        .await
+    {
+        Ok(msg) => (StatusCode::OK, msg),
+        Err(e) => text_error_response(e),
+    }
+}
+
+pub async fn api_warehouse_delete(State(app): State<App>, Json(req): Json<std::collections::HashMap<String, i64>>) -> (StatusCode, String) {
+    let id = req.get("id").copied().unwrap_or(0);
+    match app.warehouse.delete(id).await {
+        Ok(msg) => (StatusCode::OK, msg),
+        Err(e) => text_error_response(e),
     }
 }
 

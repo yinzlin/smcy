@@ -7,7 +7,6 @@ description = "通用工具层：Excel 导出辅助、页面布局、文件名�
 [dependencies]
 axum = { workspace = true }
 rust_xlsxwriter = { workspace = true }
-sqlx = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }

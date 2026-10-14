@@ -6,6 +6,14 @@
 
 #![allow(async_fn_in_trait)]
 
+pub mod audit;
+pub mod category;
+pub mod oplog;
 pub mod user;
+pub mod warehouse;
 
+pub use audit::*;
+pub use category::*;
+pub use oplog::*;
 pub use user::*;
+pub use warehouse::*;

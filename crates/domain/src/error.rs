@@ -13,3 +13,14 @@ pub enum DomainError {
     /// 存储访问失败（携带技术细节，不直接透出给前端）
     Storage(String),
 }
+
+impl std::fmt::Display for DomainError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DomainError::NotFound(m) => write!(f, "not found: {}", m),
+            DomainError::InvalidInput(m) => write!(f, "invalid input: {}", m),
+            DomainError::Conflict(m) => write!(f, "conflict: {}", m),
+            DomainError::Storage(m) => write!(f, "storage: {}", m),
+        }
+    }
+}
