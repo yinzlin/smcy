@@ -1,5 +1,5 @@
 import { Button, Dropdown, Layout, Menu, Space } from 'antd'
-import { AppstoreOutlined, HomeOutlined, LogoutOutlined, SwapOutlined, UserOutlined } from '@ant-design/icons'
+import { AppstoreOutlined, HomeOutlined, LogoutOutlined, ShoppingOutlined, SwapOutlined, UserOutlined } from '@ant-design/icons'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../stores/auth'
 
@@ -28,6 +28,7 @@ export default function MainLayout() {
           items={[
             { key: '/', icon: <HomeOutlined />, label: '首页' },
             { key: '/product', icon: <AppstoreOutlined />, label: '商品管理' },
+            { key: '/purchase', icon: <ShoppingOutlined />, label: '采购订单' },
           ]}
           onClick={({ key }) => navigate(key)}
         />

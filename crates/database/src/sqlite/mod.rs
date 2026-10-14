@@ -804,16 +804,6 @@ pub async fn init_tables(pool: &SqlitePool) -> Result<(), anyhow::Error> {
         .execute(pool)
         .await;
 
-    // 验收单导出快照：确认验收时按 FIFO 取当前库存最早批次的 生产日期/批号 写入销售明细，
-    // 导出验收单/报销单直接读快照，不再实时计算
-    let _ = sqlx::query("ALTER TABLE sales_order_item ADD COLUMN production_date TEXT")
-        .execute(pool)
-        .await;
-
-    let _ = sqlx::query("ALTER TABLE sales_order_item ADD COLUMN batch_no TEXT")
-        .execute(pool)
-        .await;
-
     // 采购订单：是否已结算（0=未结 1=已结），幂等迁移
     let _ = sqlx::query("ALTER TABLE purchase_order ADD COLUMN is_settled INTEGER NOT NULL DEFAULT 0")
         .execute(pool)
@@ -862,6 +852,16 @@ pub async fn init_tables(pool: &SqlitePool) -> Result<(), anyhow::Error> {
     )
     .execute(pool)
     .await?;
+
+    // 验收单导出快照：确认验收时按 FIFO 取当前库存最早批次的 生产日期/批号 写入销售明细，
+    // 导出验收单/报销单直接读快照，不再实时计算
+    let _ = sqlx::query("ALTER TABLE sales_order_item ADD COLUMN production_date TEXT")
+        .execute(pool)
+        .await;
+
+    let _ = sqlx::query("ALTER TABLE sales_order_item ADD COLUMN batch_no TEXT")
+        .execute(pool)
+        .await;
 
     // 销售订单：是否已结算（0=未结 1=已结），幂等迁移
     let _ = sqlx::query("ALTER TABLE sales_order ADD COLUMN is_settled INTEGER NOT NULL DEFAULT 0")
@@ -996,27 +996,6 @@ pub async fn init_tables(pool: &SqlitePool) -> Result<(), anyhow::Error> {
         .await;
 
     let _ = sqlx::query("ALTER TABLE purchase_order ADD COLUMN handler_phone TEXT")
-        .execute(pool)
-        .await;
-
-    // 用户表增加联系方式字段（用于采购单/销售单打印）
-    let _ = sqlx::query("ALTER TABLE user_account ADD COLUMN phone TEXT")
-        .execute(pool)
-        .await;
-
-    // 用户表增加行级数据权限关联字段：supplier 账号绑定供应商，purchaser 账号绑定采购单位
-    // 用于"只能查看/操作自己的单据"的行级数据权限
-    let _ = sqlx::query("ALTER TABLE user_account ADD COLUMN supplier_id INTEGER DEFAULT 0")
-        .execute(pool)
-        .await;
-
-    let _ = sqlx::query("ALTER TABLE user_account ADD COLUMN purchaser_id INTEGER DEFAULT 0")
-        .execute(pool)
-        .await;
-
-    // 联系方式：销售订单主表单上"联系方式"输入框的最近一次输入值，用于导出验收单/报销单时填入 xlsx。
-    // 跨设备共享，按当前登录用户更新。
-    let _ = sqlx::query("ALTER TABLE user_account ADD COLUMN contact_phone TEXT")
         .execute(pool)
         .await;
 
@@ -1203,6 +1182,27 @@ pub async fn init_tables(pool: &SqlitePool) -> Result<(), anyhow::Error> {
     )
     .execute(pool)
     .await?;
+
+    // 用户表增加联系方式字段（用于采购单/销售单打印）
+    let _ = sqlx::query("ALTER TABLE user_account ADD COLUMN phone TEXT")
+        .execute(pool)
+        .await;
+
+    // 用户表增加行级数据权限关联字段：supplier 账号绑定供应商，purchaser 账号绑定采购单位
+    // 用于"只能查看/操作自己的单据"的行级数据权限
+    let _ = sqlx::query("ALTER TABLE user_account ADD COLUMN supplier_id INTEGER DEFAULT 0")
+        .execute(pool)
+        .await;
+
+    let _ = sqlx::query("ALTER TABLE user_account ADD COLUMN purchaser_id INTEGER DEFAULT 0")
+        .execute(pool)
+        .await;
+
+    // 联系方式：销售订单主表单上"联系方式"输入框的最近一次输入值，用于导出验收单/报销单时填入 xlsx。
+    // 跨设备共享，按当前登录用户更新。
+    let _ = sqlx::query("ALTER TABLE user_account ADD COLUMN contact_phone TEXT")
+        .execute(pool)
+        .await;
 
     let super_admin_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_account WHERE username = 'super_admin')")
         .fetch_one(pool)
