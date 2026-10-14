@@ -40,7 +40,7 @@ pub async fn compute_stock_summary(start_date: &str, end_date: &str) -> (Vec<Sto
          SELECT day,
                 warehouse_id,
                 warehouse_name,
-                COALESCE(SUM(amount), 0) as in_amount,
+                COALESCE(SUM(amount), 0.0) as in_amount,
                 COUNT(*) as in_item_count,
                 COUNT(DISTINCT po_id) as in_order_count
          FROM src
@@ -216,7 +216,7 @@ pub async fn compute_stock_summary_reimburse(start_date: &str, end_date: &str) -
          SELECT day,
                 warehouse_id,
                 warehouse_name,
-                COALESCE(SUM(amount), 0) as in_amount,
+                COALESCE(SUM(amount), 0.0) as in_amount,
                 COUNT(*) as in_item_count,
                 COUNT(DISTINCT po_id) as in_order_count
          FROM src

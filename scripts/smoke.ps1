@@ -10,9 +10,6 @@
 #   - Target server must run in an ISOLATED working directory (a copy of the
 #     exe started in an empty temp dir), NEVER inside the repo root.
 #   - Exits 0 when all assertions pass, 1 when any assertion fails.
-#   - XFAIL marks assertions hitting KNOWN PRODUCT BUGS (handlers panic and
-#     close the connection). They are recorded, not counted as gate failures;
-#     they print as XPASS once the bug gets fixed.
 #   - All output is ASCII on purpose (GBK console safe).
 # ============================================================================
 
@@ -37,13 +34,12 @@ $script:LastRes = $null
 function Start-Group([string]$Name) {
     $script:GroupPass = 0
     $script:GroupFail = 0
-    $script:GroupXfail = 0
     Write-Host ""
     Write-Host ("=== " + $Name + " ===")
 }
 
 function End-Group([string]$Name) {
-    Write-Host ("--- " + $Name + ": PASS=" + $script:GroupPass + " FAIL=" + $script:GroupFail + " XFAIL=" + $script:GroupXfail)
+    Write-Host ("--- " + $Name + ": PASS=" + $script:GroupPass + " FAIL=" + $script:GroupFail)
 }
 
 function Add-Result([string]$Name, [bool]$Ok, [string]$Detail) {
@@ -76,38 +72,6 @@ function Assert-Status([string]$Name, [int]$Actual, [int[]]$Expected) {
 
 function Assert-True([string]$Name, [bool]$Cond, [string]$Detail) {
     Add-Result $Name $Cond $Detail
-}
-
-# ---------------------------------------------------------------------------
-# XFAIL: known product bugs (recorded in the report, NOT fixed here).
-# handlers.rs:8090/9220/8147/10924 - f64 column decode of INTEGER literal
-# COALESCE(SUM(x), 0) panics whenever a purchaser/month has no sales rows,
-# the connection is closed without reply. XFAIL keeps the gate green for
-# regressions while keeping the bug visible; prints XPASS when fixed.
-# ---------------------------------------------------------------------------
-$script:XfailCount = 0
-$script:XpassCount = 0
-
-function Add-XfailJson([string]$Name, $Res) {
-    $script:GroupXfail++
-    if ($Res.Status -eq 200 -and $null -ne $Res.Json) {
-        $script:XpassCount++
-        Write-Host ("  [XPASS] " + $Name + " (known bug appears fixed: 200 + json ok)")
-    } else {
-        $script:XfailCount++
-        Write-Host ("  [XFAIL] " + $Name + " known product bug: handler panic closes connection (status=" + $Res.Status + ")")
-    }
-}
-
-function Add-XfailXlsx([string]$Name, $Res) {
-    $script:GroupXfail++
-    if ($Res.Status -eq 200 -and $Res.ContentType -like "*spreadsheetml*") {
-        $script:XpassCount++
-        Write-Host ("  [XPASS] " + $Name + " (known bug appears fixed: 200 + xlsx ok)")
-    } else {
-        $script:XfailCount++
-        Write-Host ("  [XFAIL] " + $Name + " known product bug: handler panic closes connection (status=" + $Res.Status + ")")
-    }
 }
 
 function ConvertTo-JsonSafe([object]$Obj) {
@@ -801,7 +765,8 @@ if (-not $Quick) {
     Assert-Status "query.sales_summary.status" $r.Status @(200)
     Assert-True "query.sales_summary.json" ($null -ne $r.Json) ""
     $r = Invoke-Api -Method Get -Path "/api/query/purchaser_balance"
-    Add-XfailJson "query.purchaser_balance.json" $r
+    Assert-Status "query.purchaser_balance.status" $r.Status @(200)
+    Assert-True "query.purchaser_balance.json" ($null -ne $r.Json) ""
     $r = Invoke-Api -Method Get -Path "/api/query/product_rank?$d"
     Assert-Status "query.product_rank.status" $r.Status @(200)
     Assert-True "query.product_rank.json" ($null -ne $r.Json) ""
@@ -845,7 +810,8 @@ if (-not $Quick) {
     Assert-Status "query.category_stats.status" $r.Status @(200)
     Assert-True "query.category_stats.json" ($null -ne $r.Json) ""
     $r = Invoke-Api -Method Get -Path "/api/query/document_summary?$m"
-    Add-XfailJson "query.document_summary.json" $r
+    Assert-Status "query.document_summary.status" $r.Status @(200)
+    Assert-True "query.document_summary.json" ($null -ne $r.Json) ""
 
     # trend / compare need product_id
     if ($null -ne $script:ProdId) {
@@ -865,7 +831,7 @@ if (-not $Quick) {
     Assert-Xlsx "query.sales_order.export.xlsx" (Invoke-Api -Method Get -Path "/api/query/sales_order/export?$d")
     Assert-Xlsx "query.sales_price.export.xlsx" (Invoke-Api -Method Get -Path "/api/query/sales_price/export?page=1&page_size=10")
     Assert-Xlsx "query.sales_summary.export.xlsx" (Invoke-Api -Method Get -Path "/api/query/sales_summary/export?$d")
-    Add-XfailXlsx "query.purchaser_balance.export.xlsx" (Invoke-Api -Method Get -Path "/api/query/purchaser_balance/export")
+    Assert-Xlsx "query.purchaser_balance.export.xlsx" (Invoke-Api -Method Get -Path "/api/query/purchaser_balance/export")
     Assert-Xlsx "query.product_rank.export.xlsx" (Invoke-Api -Method Get -Path "/api/query/product_rank/export?$d")
     Assert-Xlsx "query.reimburse_summary.export.xlsx" (Invoke-Api -Method Get -Path "/api/query/reimburse_summary/export?$d")
     Assert-Xlsx "query.allocation_source.export.xlsx" (Invoke-Api -Method Get -Path "/api/query/allocation_source/export?$d")
@@ -879,7 +845,7 @@ if (-not $Quick) {
     Assert-Xlsx "query.profit_detail.export.xlsx" (Invoke-Api -Method Get -Path "/api/query/profit_detail/export?$d")
     Assert-Xlsx "query.overview.export.xlsx" (Invoke-Api -Method Get -Path "/api/query/overview/export?$m")
     Assert-Xlsx "query.category_stats.export.xlsx" (Invoke-Api -Method Get -Path "/api/query/category_stats/export?$d")
-    Add-XfailXlsx "query.document_summary.export.xlsx" (Invoke-Api -Method Get -Path "/api/query/document_summary/export?$m")
+    Assert-Xlsx "query.document_summary.export.xlsx" (Invoke-Api -Method Get -Path "/api/query/document_summary/export?$m")
     End-Group "Group H"
 } else {
     Write-Host ""
@@ -919,7 +885,7 @@ End-Group "Group I"
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host ("========================================")
-Write-Host ("SMOKE RESULT: PASS=" + $script:PassCount + "  FAIL=" + $script:FailCount + "  XFAIL=" + $script:XfailCount + "  XPASS=" + $script:XpassCount)
+Write-Host ("SMOKE RESULT: PASS=" + $script:PassCount + "  FAIL=" + $script:FailCount)
 if ($script:FailCount -gt 0) {
     Write-Host "Failed assertions:"
     foreach ($f in $script:Failures) { Write-Host ("  - " + $f) }

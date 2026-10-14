@@ -4952,7 +4952,7 @@ pub(crate) async fn fifo_earliest_batch(product_id: i64) -> (Option<String>, Opt
 
     // 净出库：销售出库 out 为正，撤销验收冲销 in 为负（撤销后批次自动"退回"队列）
     let net_out: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(CASE WHEN direction='out' THEN base_quantity ELSE -base_quantity END), 0)
+        "SELECT COALESCE(SUM(CASE WHEN direction='out' THEN base_quantity ELSE -base_quantity END), 0.0)
          FROM stock_movement WHERE product_id = ? AND movement_type = 'sales'"
     )
     .bind(product_id)
@@ -8066,8 +8066,8 @@ pub async fn api_query_purchaser_balance(headers: axum::http::HeaderMap) -> impl
     let ctx = crate::auth::get_user_ctx(&headers).await;
     let mut sql = String::from(
         "SELECT p.id, p.name, 
-                COALESCE(SUM(so.final_amount), 0) as sales_total,
-                COALESCE(SUM(so.final_amount), 0) as unreceived
+                COALESCE(SUM(so.final_amount), 0.0) as sales_total,
+                COALESCE(SUM(so.final_amount), 0.0) as unreceived
          FROM purchaser p 
          LEFT JOIN sales_order so ON so.purchaser_id = p.id"
     );
@@ -8108,8 +8108,8 @@ pub async fn api_query_purchaser_balance_export(headers: axum::http::HeaderMap) 
     let ctx = crate::auth::get_user_ctx(&headers).await;
     let mut sql = String::from(
         "SELECT p.id, p.name, 
-                COALESCE(SUM(so.final_amount), 0) as sales_total,
-                COALESCE(SUM(so.final_amount), 0) as unreceived
+                COALESCE(SUM(so.final_amount), 0.0) as sales_total,
+                COALESCE(SUM(so.final_amount), 0.0) as unreceived
          FROM purchaser p 
          LEFT JOIN sales_order so ON so.purchaser_id = p.id"
     );
@@ -9038,7 +9038,7 @@ pub async fn api_query_overview(axum::extract::Query(params): axum::extract::Que
     let month = params.get("month").map(|s| s.as_str()).unwrap_or("");
     
     let purchase_total: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(po.total_amount), 0) FROM purchase_order po WHERE strftime('%Y-%m', po.order_date) = ?"
+        "SELECT COALESCE(SUM(po.total_amount), 0.0) FROM purchase_order po WHERE strftime('%Y-%m', po.order_date) = ?"
     )
     .bind(month)
     .fetch_one(crate::db::pool())
@@ -9046,7 +9046,7 @@ pub async fn api_query_overview(axum::extract::Query(params): axum::extract::Que
     .unwrap_or(0.0);
     
     let sales_total: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(so.total_amount), 0) FROM sales_order so WHERE strftime('%Y-%m', so.order_date) = ?"
+        "SELECT COALESCE(SUM(so.total_amount), 0.0) FROM sales_order so WHERE strftime('%Y-%m', so.order_date) = ?"
     )
     .bind(month)
     .fetch_one(crate::db::pool())
@@ -9054,7 +9054,7 @@ pub async fn api_query_overview(axum::extract::Query(params): axum::extract::Que
     .unwrap_or(0.0);
     
     let stock_total: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(i.quantity * pr.selling_price), 0) FROM inventory i JOIN product pr ON i.product_id = pr.id"
+        "SELECT COALESCE(SUM(i.quantity * pr.selling_price), 0.0) FROM inventory i JOIN product pr ON i.product_id = pr.id"
     )
     .fetch_one(crate::db::pool())
     .await
@@ -9063,7 +9063,7 @@ pub async fn api_query_overview(axum::extract::Query(params): axum::extract::Que
     let profit_total = sales_total - purchase_total;
     
     let purchase_by_supplier_rows = sqlx::query(
-        "SELECT s.name, COALESCE(SUM(poi.amount), 0) as amount, COALESCE(SUM(poi.quantity), 0) as quantity
+        "SELECT s.name, COALESCE(SUM(poi.amount), 0.0) as amount, COALESCE(SUM(poi.quantity), 0.0) as quantity
          FROM purchase_order_item poi
          JOIN purchase_order po ON poi.order_id = po.id
          JOIN supplier s ON po.supplier_id = s.id
@@ -9088,7 +9088,7 @@ pub async fn api_query_overview(axum::extract::Query(params): axum::extract::Que
         .collect();
     
     let sales_by_purchaser_rows = sqlx::query(
-        "SELECT p.name, COALESCE(SUM(soi.amount), 0) as amount, COALESCE(SUM(soi.quantity), 0) as quantity
+        "SELECT p.name, COALESCE(SUM(soi.amount), 0.0) as amount, COALESCE(SUM(soi.quantity), 0.0) as quantity
          FROM sales_order_item soi
          JOIN sales_order so ON soi.order_id = so.id
          JOIN purchaser p ON so.purchaser_id = p.id
@@ -9133,21 +9133,21 @@ pub async fn api_query_category_stats(axum::extract::Query(params): axum::extrac
                 COALESCE((SELECT SUM(poi.quantity) FROM purchase_order_item poi 
                           JOIN purchase_order po ON poi.order_id = po.id
                           JOIN product pr ON poi.product_id = pr.id
-                          WHERE pr.category_id = pc.id AND po.order_date >= ? AND po.order_date <= ?), 0) as purchase_quantity,
+                          WHERE pr.category_id = pc.id AND po.order_date >= ? AND po.order_date <= ?), 0.0) as purchase_quantity,
                 COALESCE((SELECT SUM(poi.amount) FROM purchase_order_item poi 
                           JOIN purchase_order po ON poi.order_id = po.id
                           JOIN product pr ON poi.product_id = pr.id
-                          WHERE pr.category_id = pc.id AND po.order_date >= ? AND po.order_date <= ?), 0) as purchase_amount,
+                          WHERE pr.category_id = pc.id AND po.order_date >= ? AND po.order_date <= ?), 0.0) as purchase_amount,
                 COALESCE((SELECT SUM(soi.quantity) FROM sales_order_item soi 
                           JOIN sales_order so ON soi.order_id = so.id
                           JOIN product pr ON soi.product_id = pr.id
-                          WHERE pr.category_id = pc.id AND so.order_date >= ? AND so.order_date <= ?), 0) as sales_quantity,
+                          WHERE pr.category_id = pc.id AND so.order_date >= ? AND so.order_date <= ?), 0.0) as sales_quantity,
                 COALESCE((SELECT SUM(soi.amount) FROM sales_order_item soi 
                           JOIN sales_order so ON soi.order_id = so.id
                           JOIN product pr ON soi.product_id = pr.id
-                          WHERE pr.category_id = pc.id AND so.order_date >= ? AND so.order_date <= ?), 0) as sales_amount,
-                COALESCE((SELECT SUM(i.quantity) FROM inventory i JOIN product pr ON i.product_id = pr.id WHERE pr.category_id = pc.id), 0) as stock_quantity,
-                COALESCE((SELECT SUM(i.quantity * pr.selling_price) FROM inventory i JOIN product pr ON i.product_id = pr.id WHERE pr.category_id = pc.id), 0) as stock_amount
+                          WHERE pr.category_id = pc.id AND so.order_date >= ? AND so.order_date <= ?), 0.0) as sales_amount,
+                COALESCE((SELECT SUM(i.quantity) FROM inventory i JOIN product pr ON i.product_id = pr.id WHERE pr.category_id = pc.id), 0.0) as stock_quantity,
+                COALESCE((SELECT SUM(i.quantity * pr.selling_price) FROM inventory i JOIN product pr ON i.product_id = pr.id WHERE pr.category_id = pc.id), 0.0) as stock_amount
          FROM category pc
          WHERE pc.entity_type = 'product' AND pc.parent_id IS NULL
          ORDER BY pc.id"
@@ -9188,18 +9188,18 @@ pub async fn api_query_document_summary(axum::extract::Query(params): axum::extr
     let document_rows = sqlx::query(
         "SELECT strftime('%Y-%m', po.order_date) as month,
                 COUNT(DISTINCT po.id) as purchase_count,
-                COALESCE(SUM(po.total_amount), 0) as purchase_amount,
+                COALESCE(SUM(po.total_amount), 0.0) as purchase_amount,
                 COALESCE((SELECT COUNT(DISTINCT so.id) FROM sales_order so WHERE strftime('%Y-%m', so.order_date) = strftime('%Y-%m', po.order_date)), 0) as sales_count,
-                COALESCE((SELECT SUM(so.total_amount) FROM sales_order so WHERE strftime('%Y-%m', so.order_date) = strftime('%Y-%m', po.order_date)), 0) as sales_amount
+                COALESCE((SELECT SUM(so.total_amount) FROM sales_order so WHERE strftime('%Y-%m', so.order_date) = strftime('%Y-%m', po.order_date)), 0.0) as sales_amount
          FROM purchase_order po
          WHERE strftime('%Y-%m', po.order_date) = ?
          GROUP BY strftime('%Y-%m', po.order_date)
          UNION ALL
          SELECT strftime('%Y-%m', so.order_date) as month,
                 COALESCE((SELECT COUNT(DISTINCT po.id) FROM purchase_order po WHERE strftime('%Y-%m', po.order_date) = strftime('%Y-%m', so.order_date)), 0) as purchase_count,
-                COALESCE((SELECT SUM(po.total_amount) FROM purchase_order po WHERE strftime('%Y-%m', po.order_date) = strftime('%Y-%m', so.order_date)), 0) as purchase_amount,
+                COALESCE((SELECT SUM(po.total_amount) FROM purchase_order po WHERE strftime('%Y-%m', po.order_date) = strftime('%Y-%m', so.order_date)), 0.0) as purchase_amount,
                 COUNT(DISTINCT so.id) as sales_count,
-                COALESCE(SUM(so.total_amount), 0) as sales_amount
+                COALESCE(SUM(so.total_amount), 0.0) as sales_amount
          FROM sales_order so
          WHERE strftime('%Y-%m', so.order_date) = ?
          GROUP BY strftime('%Y-%m', so.order_date)"
@@ -9289,10 +9289,10 @@ pub async fn api_query_stock_balance(axum::extract::Query(params): axum::extract
         // 冲销流水 direction 与原方向相反且归属同一单据日期，自动计入。相关子查询走 idx_sm_order_date 索引。
         let inner = format!(
             "SELECT i.product_id, p.name AS product_name, p.spec, COALESCE(NULLIF(p.base_unit, ''), p.unit) AS unit, p.base_price,
-                    (i.quantity - COALESCE((SELECT SUM(CASE WHEN sm2.direction='in' THEN sm2.base_quantity ELSE -sm2.base_quantity END) FROM stock_movement sm2 WHERE sm2.product_id=i.product_id AND sm2.order_date >= ?), 0)) AS opening_qty,
-                    COALESCE((SELECT SUM(sm2.base_quantity) FROM stock_movement sm2 WHERE sm2.product_id=i.product_id AND sm2.direction='in' AND sm2.order_date >= ? AND sm2.order_date <= ?), 0) AS period_in,
-                    COALESCE((SELECT SUM(sm2.base_quantity) FROM stock_movement sm2 WHERE sm2.product_id=i.product_id AND sm2.direction='out' AND sm2.order_date >= ? AND sm2.order_date <= ?), 0) AS period_out,
-                    (i.quantity - COALESCE((SELECT SUM(CASE WHEN sm2.direction='in' THEN sm2.base_quantity ELSE -sm2.base_quantity END) FROM stock_movement sm2 WHERE sm2.product_id=i.product_id AND sm2.order_date > ?), 0)) AS closing_qty
+                    (i.quantity - COALESCE((SELECT SUM(CASE WHEN sm2.direction='in' THEN sm2.base_quantity ELSE -sm2.base_quantity END) FROM stock_movement sm2 WHERE sm2.product_id=i.product_id AND sm2.order_date >= ?), 0.0)) AS opening_qty,
+                    COALESCE((SELECT SUM(sm2.base_quantity) FROM stock_movement sm2 WHERE sm2.product_id=i.product_id AND sm2.direction='in' AND sm2.order_date >= ? AND sm2.order_date <= ?), 0.0) AS period_in,
+                    COALESCE((SELECT SUM(sm2.base_quantity) FROM stock_movement sm2 WHERE sm2.product_id=i.product_id AND sm2.direction='out' AND sm2.order_date >= ? AND sm2.order_date <= ?), 0.0) AS period_out,
+                    (i.quantity - COALESCE((SELECT SUM(CASE WHEN sm2.direction='in' THEN sm2.base_quantity ELSE -sm2.base_quantity END) FROM stock_movement sm2 WHERE sm2.product_id=i.product_id AND sm2.order_date > ?), 0.0)) AS closing_qty
              FROM inventory i JOIN product p ON i.product_id=p.id
              WHERE p.name LIKE ?{}",
             cat_cond
@@ -10294,12 +10294,12 @@ pub async fn api_query_allocation_source_export(axum::extract::Query(params): ax
 
 pub async fn api_query_overview_export(axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     let month = params.get("month").map(|s| s.as_str()).unwrap_or("");
-    let purchase_total: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(po.total_amount),0) FROM purchase_order po WHERE strftime('%Y-%m',po.order_date)=?").bind(month).fetch_one(crate::db::pool()).await.unwrap_or(0.0);
-    let sales_total: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(so.total_amount),0) FROM sales_order so WHERE strftime('%Y-%m',so.order_date)=?").bind(month).fetch_one(crate::db::pool()).await.unwrap_or(0.0);
-    let stock_total: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(i.quantity*pr.selling_price),0) FROM inventory i JOIN product pr ON i.product_id=pr.id").fetch_one(crate::db::pool()).await.unwrap_or(0.0);
+    let purchase_total: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(po.total_amount),0.0) FROM purchase_order po WHERE strftime('%Y-%m',po.order_date)=?").bind(month).fetch_one(crate::db::pool()).await.unwrap_or(0.0);
+    let sales_total: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(so.total_amount),0.0) FROM sales_order so WHERE strftime('%Y-%m',so.order_date)=?").bind(month).fetch_one(crate::db::pool()).await.unwrap_or(0.0);
+    let stock_total: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(i.quantity*pr.selling_price),0.0) FROM inventory i JOIN product pr ON i.product_id=pr.id").fetch_one(crate::db::pool()).await.unwrap_or(0.0);
     let profit_total = sales_total - purchase_total;
-    let pur_rows = sqlx::query("SELECT s.name,COALESCE(SUM(poi.amount),0) as amount,COALESCE(SUM(poi.quantity),0) as quantity FROM purchase_order_item poi JOIN purchase_order po ON poi.order_id=po.id JOIN supplier s ON po.supplier_id=s.id WHERE strftime('%Y-%m',po.order_date)=? GROUP BY s.id,s.name ORDER BY amount DESC, s.id ASC").bind(month).fetch_all(crate::db::pool()).await.unwrap_or_default();
-    let sal_rows = sqlx::query("SELECT p.name,COALESCE(SUM(soi.amount),0) as amount,COALESCE(SUM(soi.quantity),0) as quantity FROM sales_order_item soi JOIN sales_order so ON soi.order_id=so.id JOIN purchaser p ON so.purchaser_id=p.id WHERE strftime('%Y-%m',so.order_date)=? GROUP BY p.id,p.name ORDER BY amount DESC, p.id ASC").bind(month).fetch_all(crate::db::pool()).await.unwrap_or_default();
+    let pur_rows = sqlx::query("SELECT s.name,COALESCE(SUM(poi.amount),0.0) as amount,COALESCE(SUM(poi.quantity),0.0) as quantity FROM purchase_order_item poi JOIN purchase_order po ON poi.order_id=po.id JOIN supplier s ON po.supplier_id=s.id WHERE strftime('%Y-%m',po.order_date)=? GROUP BY s.id,s.name ORDER BY amount DESC, s.id ASC").bind(month).fetch_all(crate::db::pool()).await.unwrap_or_default();
+    let sal_rows = sqlx::query("SELECT p.name,COALESCE(SUM(soi.amount),0.0) as amount,COALESCE(SUM(soi.quantity),0.0) as quantity FROM sales_order_item soi JOIN sales_order so ON soi.order_id=so.id JOIN purchaser p ON so.purchaser_id=p.id WHERE strftime('%Y-%m',so.order_date)=? GROUP BY p.id,p.name ORDER BY amount DESC, p.id ASC").bind(month).fetch_all(crate::db::pool()).await.unwrap_or_default();
     let mut workbook=Workbook::new(); let hf=xlsx_header_format(0x2E75B6);
     let ws1=workbook.add_worksheet(); ws1.set_name("汇总").unwrap();
     for (c,h) in ["指标","金额"].iter().enumerate(){ws1.write_with_format(0,c as u16,*h,&hf).unwrap();} ws1.set_column_width(0,16).unwrap(); ws1.set_column_width(1,16).unwrap();
@@ -10348,10 +10348,10 @@ pub async fn api_query_stock_balance_export(axum::extract::Query(params): axum::
         // 与查询 API 同口径：时间归属按单据日期（order_date 快照）
         let inner = format!(
             "SELECT i.product_id, p.name AS product_name, p.spec, COALESCE(NULLIF(p.base_unit, ''), p.unit) AS unit, p.base_price,
-                    (i.quantity - COALESCE((SELECT SUM(CASE WHEN sm2.direction='in' THEN sm2.base_quantity ELSE -sm2.base_quantity END) FROM stock_movement sm2 WHERE sm2.product_id=i.product_id AND sm2.order_date >= ?), 0)) AS opening_qty,
-                    COALESCE((SELECT SUM(sm2.base_quantity) FROM stock_movement sm2 WHERE sm2.product_id=i.product_id AND sm2.direction='in' AND sm2.order_date >= ? AND sm2.order_date <= ?), 0) AS period_in,
-                    COALESCE((SELECT SUM(sm2.base_quantity) FROM stock_movement sm2 WHERE sm2.product_id=i.product_id AND sm2.direction='out' AND sm2.order_date >= ? AND sm2.order_date <= ?), 0) AS period_out,
-                    (i.quantity - COALESCE((SELECT SUM(CASE WHEN sm2.direction='in' THEN sm2.base_quantity ELSE -sm2.base_quantity END) FROM stock_movement sm2 WHERE sm2.product_id=i.product_id AND sm2.order_date > ?), 0)) AS closing_qty
+                    (i.quantity - COALESCE((SELECT SUM(CASE WHEN sm2.direction='in' THEN sm2.base_quantity ELSE -sm2.base_quantity END) FROM stock_movement sm2 WHERE sm2.product_id=i.product_id AND sm2.order_date >= ?), 0.0)) AS opening_qty,
+                    COALESCE((SELECT SUM(sm2.base_quantity) FROM stock_movement sm2 WHERE sm2.product_id=i.product_id AND sm2.direction='in' AND sm2.order_date >= ? AND sm2.order_date <= ?), 0.0) AS period_in,
+                    COALESCE((SELECT SUM(sm2.base_quantity) FROM stock_movement sm2 WHERE sm2.product_id=i.product_id AND sm2.direction='out' AND sm2.order_date >= ? AND sm2.order_date <= ?), 0.0) AS period_out,
+                    (i.quantity - COALESCE((SELECT SUM(CASE WHEN sm2.direction='in' THEN sm2.base_quantity ELSE -sm2.base_quantity END) FROM stock_movement sm2 WHERE sm2.product_id=i.product_id AND sm2.order_date > ?), 0.0)) AS closing_qty
              FROM inventory i JOIN product p ON i.product_id=p.id
              WHERE p.name LIKE ?{}",
             cat_cond
@@ -10908,7 +10908,7 @@ pub async fn api_query_finance_settlement(axum::extract::Query(params): axum::ex
 
 pub async fn api_query_category_stats_export(axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     let start_date=params.get("start_date").map(|s|s.as_str()).unwrap_or("");let end_date=params.get("end_date").map(|s|s.as_str()).unwrap_or("");
-    let rows=sqlx::query("SELECT pc.id,pc.name as category_name,COALESCE((SELECT SUM(poi.quantity) FROM purchase_order_item poi JOIN purchase_order po ON poi.order_id=po.id JOIN product pr ON poi.product_id=pr.id WHERE pr.category_id=pc.id AND po.order_date>=? AND po.order_date<=?),0) as purchase_quantity,COALESCE((SELECT SUM(poi.amount) FROM purchase_order_item poi JOIN purchase_order po ON poi.order_id=po.id JOIN product pr ON poi.product_id=pr.id WHERE pr.category_id=pc.id AND po.order_date>=? AND po.order_date<=?),0) as purchase_amount,COALESCE((SELECT SUM(soi.quantity) FROM sales_order_item soi JOIN sales_order so ON soi.order_id=so.id JOIN product pr ON soi.product_id=pr.id WHERE pr.category_id=pc.id AND so.order_date>=? AND so.order_date<=?),0) as sales_quantity,COALESCE((SELECT SUM(soi.amount) FROM sales_order_item soi JOIN sales_order so ON soi.order_id=so.id JOIN product pr ON soi.product_id=pr.id WHERE pr.category_id=pc.id AND so.order_date>=? AND so.order_date<=?),0) as sales_amount,COALESCE((SELECT SUM(i.quantity) FROM inventory i JOIN product pr ON i.product_id=pr.id WHERE pr.category_id=pc.id),0) as stock_quantity,COALESCE((SELECT SUM(i.quantity*pr.selling_price) FROM inventory i JOIN product pr ON i.product_id=pr.id WHERE pr.category_id=pc.id),0) as stock_amount FROM category pc WHERE pc.entity_type='product' AND pc.parent_id IS NULL ORDER BY pc.id")
+    let rows=sqlx::query("SELECT pc.id,pc.name as category_name,COALESCE((SELECT SUM(poi.quantity) FROM purchase_order_item poi JOIN purchase_order po ON poi.order_id=po.id JOIN product pr ON poi.product_id=pr.id WHERE pr.category_id=pc.id AND po.order_date>=? AND po.order_date<=?),0.0) as purchase_quantity,COALESCE((SELECT SUM(poi.amount) FROM purchase_order_item poi JOIN purchase_order po ON poi.order_id=po.id JOIN product pr ON poi.product_id=pr.id WHERE pr.category_id=pc.id AND po.order_date>=? AND po.order_date<=?),0.0) as purchase_amount,COALESCE((SELECT SUM(soi.quantity) FROM sales_order_item soi JOIN sales_order so ON soi.order_id=so.id JOIN product pr ON soi.product_id=pr.id WHERE pr.category_id=pc.id AND so.order_date>=? AND so.order_date<=?),0.0) as sales_quantity,COALESCE((SELECT SUM(soi.amount) FROM sales_order_item soi JOIN sales_order so ON soi.order_id=so.id JOIN product pr ON soi.product_id=pr.id WHERE pr.category_id=pc.id AND so.order_date>=? AND so.order_date<=?),0.0) as sales_amount,COALESCE((SELECT SUM(i.quantity) FROM inventory i JOIN product pr ON i.product_id=pr.id WHERE pr.category_id=pc.id),0.0) as stock_quantity,COALESCE((SELECT SUM(i.quantity*pr.selling_price) FROM inventory i JOIN product pr ON i.product_id=pr.id WHERE pr.category_id=pc.id),0.0) as stock_amount FROM category pc WHERE pc.entity_type='product' AND pc.parent_id IS NULL ORDER BY pc.id")
     .bind(start_date).bind(end_date).bind(start_date).bind(end_date).bind(start_date).bind(end_date).bind(start_date).bind(end_date).fetch_all(crate::db::pool()).await.unwrap_or_default();
     let mut workbook=Workbook::new();let ws=workbook.add_worksheet();ws.set_name("品类统计").unwrap();let hf=xlsx_header_format(0x2E75B6);
     for(c,h)in["品类名称","采购数量","采购金额","销售数量","销售金额","库存数量","库存金额","毛利"].iter().enumerate(){ws.write_with_format(0,c as u16,*h,&hf).unwrap();}
@@ -10919,7 +10919,7 @@ pub async fn api_query_category_stats_export(axum::extract::Query(params): axum:
 
 pub async fn api_query_document_summary_export(axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     let month=params.get("month").map(|s|s.as_str()).unwrap_or("");
-    let rows=sqlx::query("SELECT strftime('%Y-%m',po.order_date) as month,COUNT(DISTINCT po.id) as purchase_count,COALESCE(SUM(po.total_amount),0) as purchase_amount,COALESCE((SELECT COUNT(DISTINCT so.id) FROM sales_order so WHERE strftime('%Y-%m',so.order_date)=strftime('%Y-%m',po.order_date)),0) as sales_count,COALESCE((SELECT SUM(so.total_amount) FROM sales_order so WHERE strftime('%Y-%m',so.order_date)=strftime('%Y-%m',po.order_date)),0) as sales_amount FROM purchase_order po WHERE strftime('%Y-%m',po.order_date)=? GROUP BY strftime('%Y-%m',po.order_date) UNION ALL SELECT strftime('%Y-%m',so.order_date) as month,COALESCE((SELECT COUNT(DISTINCT po.id) FROM purchase_order po WHERE strftime('%Y-%m',po.order_date)=strftime('%Y-%m',so.order_date)),0) as purchase_count,COALESCE((SELECT SUM(po.total_amount) FROM purchase_order po WHERE strftime('%Y-%m',po.order_date)=strftime('%Y-%m',so.order_date)),0) as purchase_amount,COUNT(DISTINCT so.id) as sales_count,COALESCE(SUM(so.total_amount),0) as sales_amount FROM sales_order so WHERE strftime('%Y-%m',so.order_date)=? GROUP BY strftime('%Y-%m',so.order_date)").bind(month).bind(month).fetch_all(crate::db::pool()).await.unwrap_or_default();
+    let rows=sqlx::query("SELECT strftime('%Y-%m',po.order_date) as month,COUNT(DISTINCT po.id) as purchase_count,COALESCE(SUM(po.total_amount),0.0) as purchase_amount,COALESCE((SELECT COUNT(DISTINCT so.id) FROM sales_order so WHERE strftime('%Y-%m',so.order_date)=strftime('%Y-%m',po.order_date)),0) as sales_count,COALESCE((SELECT SUM(so.total_amount) FROM sales_order so WHERE strftime('%Y-%m',so.order_date)=strftime('%Y-%m',po.order_date)),0.0) as sales_amount FROM purchase_order po WHERE strftime('%Y-%m',po.order_date)=? GROUP BY strftime('%Y-%m',po.order_date) UNION ALL SELECT strftime('%Y-%m',so.order_date) as month,COALESCE((SELECT COUNT(DISTINCT po.id) FROM purchase_order po WHERE strftime('%Y-%m',po.order_date)=strftime('%Y-%m',so.order_date)),0) as purchase_count,COALESCE((SELECT SUM(po.total_amount) FROM purchase_order po WHERE strftime('%Y-%m',po.order_date)=strftime('%Y-%m',so.order_date)),0.0) as purchase_amount,COUNT(DISTINCT so.id) as sales_count,COALESCE(SUM(so.total_amount),0.0) as sales_amount FROM sales_order so WHERE strftime('%Y-%m',so.order_date)=? GROUP BY strftime('%Y-%m',so.order_date)").bind(month).bind(month).fetch_all(crate::db::pool()).await.unwrap_or_default();
     let mut mm:std::collections::HashMap<String,serde_json::Value>=std::collections::HashMap::new();
     for row in &rows{let m=row.get::<String,_>("month");let pc:i64=row.get("purchase_count");let pa:f64=row.get("purchase_amount");let sc:i64=row.get("sales_count");let sa:f64=row.get("sales_amount");if let Some(e)=mm.get_mut(&m){e["purchase_count"]=serde_json::json!(std::cmp::max(e["purchase_count"].as_i64().unwrap_or(0),pc));e["purchase_amount"]=serde_json::json!(e["purchase_amount"].as_f64().unwrap_or(0.0).max(pa));e["sales_count"]=serde_json::json!(std::cmp::max(e["sales_count"].as_i64().unwrap_or(0),sc));e["sales_amount"]=serde_json::json!(e["sales_amount"].as_f64().unwrap_or(0.0).max(sa));}else{let mj=m.clone();mm.insert(mj,serde_json::json!({"month":m,"purchase_count":pc,"purchase_amount":pa,"sales_count":sc,"sales_amount":sa}));}}
     let mut result:Vec<serde_json::Value>=mm.values().cloned().collect();result.sort_by(|a,b|a["month"].as_str().unwrap_or("").cmp(b["month"].as_str().unwrap_or("")));
@@ -11556,7 +11556,7 @@ pub async fn api_allocation_create(Json(req): Json<serde_json::Value>) -> impl I
     // 服务端按勾选明细重算分摊总额，确保金额可信
     let placeholders = item_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
     let sql = format!(
-        "SELECT COALESCE(SUM(amount), 0) FROM sales_order_item WHERE order_id = ? AND id IN ({})",
+        "SELECT COALESCE(SUM(amount), 0.0) FROM sales_order_item WHERE order_id = ? AND id IN ({})",
         placeholders
     );
     let mut q = sqlx::query_scalar::<_, f64>(AssertSqlSafe(sql.as_str())).bind(source_order_id);
@@ -11929,9 +11929,9 @@ pub async fn api_adjusted_orders(axum::extract::Query(params): axum::extract::Qu
 
     // 合计（所有匹配订单）
     let sum_sql = format!(
-        "SELECT COALESCE(SUM(sub.total_amount), 0), COALESCE(SUM(sub.adjust_amount), 0)
+        "SELECT COALESCE(SUM(sub.total_amount), 0.0), COALESCE(SUM(sub.adjust_amount), 0.0)
          FROM (
-            SELECT so.id, so.total_amount, COALESCE(SUM(osi.amount), 0) as adjust_amount
+            SELECT so.id, so.total_amount, COALESCE(SUM(osi.amount), 0.0) as adjust_amount
             FROM sales_order so
             INNER JOIN order_supplement_item osi ON osi.target_order_id = so.id
             WHERE 1=1{} GROUP BY so.id, so.total_amount
@@ -11956,7 +11956,7 @@ pub async fn api_adjusted_orders(axum::extract::Query(params): axum::extract::Qu
     let list_sql = format!(
         "SELECT so.id, so.order_no, so.order_date, so.total_amount,
                 p.name as purchaser_name, so.purchaser_id,
-                COALESCE(SUM(osi.amount), 0) as adjust_amount,
+                COALESCE(SUM(osi.amount), 0.0) as adjust_amount,
                 COUNT(osi.id) as adjust_count,
                 MAX(osi.allocate_date) as last_adjust_date
          FROM sales_order so
@@ -16688,7 +16688,7 @@ pub async fn api_price_schedule_backfill_sales_order(
         .await
         .unwrap_or(0.0);
     let total_amount: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(amount), 0) FROM sales_order_item WHERE order_id = ?"
+        "SELECT COALESCE(SUM(amount), 0.0) FROM sales_order_item WHERE order_id = ?"
     )
     .bind(sales_order_id)
     .fetch_one(crate::db::pool())
