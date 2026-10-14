@@ -5,11 +5,15 @@
 
 use application::service::basic_audit::BasicAuditService;
 use application::service::category::CategoryService;
+use application::service::purchaser::PurchaserService;
+use application::service::supplier::SupplierService;
 use application::service::user::UserService;
 use application::service::warehouse::WarehouseService;
 use database::sqlite::repo::audit::SqliteBasicAuditRepo;
 use database::sqlite::repo::category::SqliteCategoryRepo;
 use database::sqlite::repo::oplog::SqliteOperationLogRepo;
+use database::sqlite::repo::purchaser::SqlitePurchaserRepo;
+use database::sqlite::repo::supplier::SqliteSupplierRepo;
 use database::sqlite::repo::user::SqliteUserRepo;
 use database::sqlite::repo::warehouse::SqliteWarehouseRepo;
 
@@ -20,6 +24,8 @@ pub struct App {
     pub category: CategoryService<SqliteCategoryRepo>,
     pub warehouse: WarehouseService<SqliteWarehouseRepo>,
     pub audit: BasicAuditService<SqliteBasicAuditRepo, SqliteOperationLogRepo>,
+    pub supplier: SupplierService<SqliteSupplierRepo>,
+    pub purchaser: PurchaserService<SqlitePurchaserRepo>,
 }
 
 /// 初始化数据库；如有待重建的 price_schedule 时段则补跑重建，完成后升级 user_version
@@ -36,5 +42,7 @@ pub async fn bootstrap() -> App {
         category: CategoryService::new(SqliteCategoryRepo::new(database::pool().clone())),
         warehouse: WarehouseService::new(SqliteWarehouseRepo::new(database::pool().clone())),
         audit: BasicAuditService::new(SqliteBasicAuditRepo::new(database::pool().clone()), oplog),
+        supplier: SupplierService::new(SqliteSupplierRepo::new(database::pool().clone())),
+        purchaser: PurchaserService::new(SqlitePurchaserRepo::new(database::pool().clone())),
     }
 }

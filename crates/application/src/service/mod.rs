@@ -6,7 +6,9 @@ pub mod legacy_user;
 pub mod order_no;
 pub mod price;
 pub mod purchase;
+pub mod purchaser;
 pub mod stock;
+pub mod supplier;
 pub mod user;
 pub mod warehouse;
 
@@ -17,7 +19,9 @@ pub use legacy_user::*;
 pub use order_no::*;
 pub use price::*;
 pub use purchase::*;
+pub use purchaser::*;
 pub use stock::*;
+pub use supplier::*;
 pub use user::*;
 pub use warehouse::*;
 

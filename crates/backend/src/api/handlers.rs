@@ -4,6 +4,8 @@ use axum::response::IntoResponse;
 use application::error::UseCaseError;
 use application::port::audit::BasicAuditUseCase;
 use application::port::category::CategoryUseCase;
+use application::port::purchaser::PurchaserUseCase;
+use application::port::supplier::SupplierUseCase;
 use application::port::user::UserUseCase;
 use application::port::warehouse::WarehouseUseCase;
 use crate::di::App;
@@ -11,6 +13,8 @@ use bytes::Bytes;
 use calamine::{open_workbook_auto_from_rs, Data, Reader};
 use chrono::Local;
 use domain::port::audit::BasicTable;
+use domain::port::purchaser::UpsertPurchaser;
+use domain::port::supplier::UpsertSupplier;
 use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder, Workbook, XlsxError};
 use crate::utils::{xlsx_response, xlsx_header_format, parse_keyword_pattern, parse_csv, sanitize_filename_prefix, image_url_to_path, operation_action_label, sanitize_xlsx_string, round2};
 use crate::generate_order_no;
@@ -743,78 +747,8 @@ pub async fn api_clean_invalid_orders(headers: axum::http::HeaderMap) -> impl In
     (StatusCode::OK, format!("清理完成，共删除 {} 条无效订单。清理前已备份到 {}", deleted_count, backup_file))
 }
 
-pub async fn api_supplier_export() -> impl IntoResponse {
-    let rows = sqlx::query(
-        "SELECT s.id, s.name, s.contact, s.phone, s.address, s.business_scope, s.remark, c.name as category_name,
-                s.is_designated, s.designated_no, s.legal_person, s.credit_code, s.license_no, s.license_expire,
-                s.contract_no, s.contract_start, s.contract_end
-         FROM supplier s LEFT JOIN category c ON s.category_id = c.id ORDER BY s.id"
-    )
-    .fetch_all(crate::db::pool())
-    .await
-    .unwrap_or_default();
-    
-    let result: Result<Vec<u8>, XlsxError> = (|| {
-        let mut workbook = Workbook::new();
-        let worksheet = workbook.add_worksheet();
-        
-        let header_format = Format::new()
-            .set_bold()
-            .set_align(FormatAlign::Center)
-            .set_align(FormatAlign::VerticalCenter);
-        
-        // 前 8 列顺序固定不可调整（Excel 导入按列索引解析）；档案扩展列只能追加在其后
-        let headers = ["ID", "名称", "联系人", "电话", "地址", "经营范围", "备注", "分类",
-                       "定点供应商", "定点编号", "负责人", "统一社会信用代码", "许可证号", "许可证有效期至",
-                       "供货合同编号", "合同开始日期", "合同结束日期"];
-        for (i, &header) in headers.iter().enumerate() {
-            worksheet.write_with_format(0, i as u16, header, &header_format)?;
-        }
-        
-        let mut row_idx = 1;
-        for row in rows {
-            worksheet.write(row_idx, 0, row.get::<i64, _>("id"))?;
-            worksheet.write(row_idx, 1, row.get::<String, _>("name"))?;
-            worksheet.write(row_idx, 2, row.get::<Option<String>, _>("contact").unwrap_or_default())?;
-            worksheet.write(row_idx, 3, row.get::<Option<String>, _>("phone").unwrap_or_default())?;
-            worksheet.write(row_idx, 4, row.get::<Option<String>, _>("address").unwrap_or_default())?;
-            worksheet.write(row_idx, 5, row.get::<Option<String>, _>("business_scope").unwrap_or_default())?;
-            worksheet.write(row_idx, 6, row.get::<Option<String>, _>("remark").unwrap_or_default())?;
-            worksheet.write(row_idx, 7, row.get::<Option<String>, _>("category_name").unwrap_or_default())?;
-            worksheet.write(row_idx, 8, if row.get::<i64, _>("is_designated") == 1 { "是" } else { "否" })?;
-            worksheet.write(row_idx, 9, row.get::<Option<String>, _>("designated_no").unwrap_or_default())?;
-            worksheet.write(row_idx, 10, row.get::<Option<String>, _>("legal_person").unwrap_or_default())?;
-            worksheet.write(row_idx, 11, row.get::<Option<String>, _>("credit_code").unwrap_or_default())?;
-            worksheet.write(row_idx, 12, row.get::<Option<String>, _>("license_no").unwrap_or_default())?;
-            worksheet.write(row_idx, 13, row.get::<Option<String>, _>("license_expire").unwrap_or_default())?;
-            worksheet.write(row_idx, 14, row.get::<Option<String>, _>("contract_no").unwrap_or_default())?;
-            worksheet.write(row_idx, 15, row.get::<Option<String>, _>("contract_start").unwrap_or_default())?;
-            worksheet.write(row_idx, 16, row.get::<Option<String>, _>("contract_end").unwrap_or_default())?;
-            row_idx += 1;
-        }
-        
-        worksheet.set_column_width(0, 8)?;
-        worksheet.set_column_width(1, 18)?;
-        worksheet.set_column_width(2, 12)?;
-        worksheet.set_column_width(3, 15)?;
-        worksheet.set_column_width(4, 25)?;
-        worksheet.set_column_width(5, 20)?;
-        worksheet.set_column_width(6, 20)?;
-        worksheet.set_column_width(7, 12)?;
-        worksheet.set_column_width(8, 10)?;
-        worksheet.set_column_width(9, 14)?;
-        worksheet.set_column_width(10, 10)?;
-        worksheet.set_column_width(11, 22)?;
-        worksheet.set_column_width(12, 20)?;
-        worksheet.set_column_width(13, 14)?;
-        worksheet.set_column_width(14, 16)?;
-        worksheet.set_column_width(15, 14)?;
-        worksheet.set_column_width(16, 14)?;
-        
-        workbook.save_to_buffer()
-    })();
-    
-    match result {
+pub async fn api_supplier_export(State(app): State<App>) -> impl IntoResponse {
+    match app.supplier.export_excel().await {
         Ok(data) => (
             StatusCode::OK,
             [
@@ -823,112 +757,55 @@ pub async fn api_supplier_export() -> impl IntoResponse {
             ],
             data,
         ).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("导出失败: {}", e)).into_response(),
+        Err(e) => text_error_response(e).into_response(),
     }
 }
 
-pub async fn api_supplier_import(content: Bytes) -> impl IntoResponse {
-    let rows: Vec<Vec<String>>;
-    
+/// Excel/CSV 字节流解析为二维表（传输适配逻辑，保留在 backend 层）
+async fn parse_import_rows(content: &Bytes) -> Result<Vec<Vec<String>>, (StatusCode, String)> {
     if content.starts_with(&[0x50, 0x4B, 0x03, 0x04]) {
         let content_vec = content.to_vec();
-        match open_workbook_auto_from_rs(std::io::Cursor::new(content_vec)) {
-            Ok(mut workbook) => {
-                let sheets = workbook.sheet_names().to_vec();
-                if sheets.is_empty() {
-                    return (StatusCode::BAD_REQUEST, "Excel文件中没有工作表".to_string()).into_response();
-                }
-                
-                let range = match workbook.worksheet_range(&sheets[0]) {
-                    Ok(r) => r,
-                    Err(e) => return (StatusCode::BAD_REQUEST, format!("无法读取Excel文件内容: {}", e)).into_response(),
-                };
-                
-                rows = range.rows()
-                    .map(|row| {
-                        row.iter()
-                            .map(|cell| match cell {
-                                Data::Empty => "".to_string(),
-                                Data::Int(v) => v.to_string(),
-                                Data::Float(v) => v.to_string(),
-                                Data::String(v) => v.to_string(),
-                                Data::Bool(v) => v.to_string(),
-                                _ => "".to_string(),
-                            })
-                            .collect()
-                    })
-                    .collect();
-            }
-            Err(e) => {
-                return (StatusCode::BAD_REQUEST, format!("读取Excel文件失败: {}", e)).into_response();
-            }
-        }
-    } else {
-        let content_str = String::from_utf8_lossy(&content).to_string();
-        rows = parse_csv(&content_str);
-    }
-    
-    if rows.len() < 2 {
-        return (StatusCode::BAD_REQUEST, "文件至少需要包含标题行和一行数据".to_string()).into_response();
-    }
-    
-    let mut success = 0;
-    let mut failed = 0;
-    
-    for (_i, row) in rows.iter().enumerate().skip(1) {
-        if row.len() < 2 {
-            failed += 1;
-            continue;
-        }
-        
-        let name = row[1].trim();
-        if name.is_empty() {
-            failed += 1;
-            continue;
-        }
-        
-        let category_name = if row.len() > 7 { row[7].trim() } else { "" };
-        let category_id = if !category_name.is_empty() {
-            let cid: Option<i64> = sqlx::query("SELECT id FROM category WHERE name = ? AND entity_type = 'supplier'")
-                .bind(category_name)
-                .fetch_optional(crate::db::pool())
-                .await
-                .ok()
-                .flatten()
-                .map(|r| r.get::<i64, _>("id"));
-            cid
-        } else {
-            None
+        let mut workbook = match open_workbook_auto_from_rs(std::io::Cursor::new(content_vec)) {
+            Ok(w) => w,
+            Err(e) => return Err((StatusCode::BAD_REQUEST, format!("读取Excel文件失败: {}", e))),
         };
-        
-        let result = sqlx::query(
-            "INSERT OR IGNORE INTO supplier(name, contact, phone, address, business_scope, remark, category_id) VALUES (?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind(name)
-        .bind(if row.len() > 2 { row[2].trim() } else { "" })
-        .bind(if row.len() > 3 { row[3].trim() } else { "" })
-        .bind(if row.len() > 4 { row[4].trim() } else { "" })
-        .bind(if row.len() > 5 { row[5].trim() } else { "" })
-        .bind(if row.len() > 6 { row[6].trim() } else { "" })
-        .bind(category_id)
-        .execute(crate::db::pool())
-        .await;
-        
-        match result {
-            Ok(res) => {
-                if res.rows_affected() > 0 {
-                    success += 1;
-                } else {
-                    failed += 1;
-                }
-            }
-            Err(_) => {
-                failed += 1;
-            }
+        let sheets = workbook.sheet_names().to_vec();
+        if sheets.is_empty() {
+            return Err((StatusCode::BAD_REQUEST, "Excel文件中没有工作表".to_string()));
         }
+        let range = match workbook.worksheet_range(&sheets[0]) {
+            Ok(r) => r,
+            Err(e) => return Err((StatusCode::BAD_REQUEST, format!("无法读取Excel文件内容: {}", e))),
+        };
+        Ok(range.rows()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| match cell {
+                        Data::Empty => "".to_string(),
+                        Data::Int(v) => v.to_string(),
+                        Data::Float(v) => v.to_string(),
+                        Data::String(v) => v.to_string(),
+                        Data::Bool(v) => v.to_string(),
+                        _ => "".to_string(),
+                    })
+                    .collect()
+            })
+            .collect())
+    } else {
+        let content_str = String::from_utf8_lossy(content).to_string();
+        Ok(parse_csv(&content_str))
     }
-    
-    (StatusCode::OK, format!("导入完成：成功 {} 条，失败 {} 条", success, failed)).into_response()
+}
+
+pub async fn api_supplier_import(State(app): State<App>, content: Bytes) -> impl IntoResponse {
+    let rows = match parse_import_rows(&content).await {
+        Ok(r) => r,
+        Err((code, msg)) => return (code, msg).into_response(),
+    };
+    match app.supplier.import(rows).await {
+        Ok(msg) => (StatusCode::OK, msg).into_response(),
+        Err(e) => text_error_response(e).into_response(),
+    }
 }
 
 pub async fn api_login(State(app): State<App>, Json(data): Json<LoginReq>) -> impl IntoResponse {
@@ -994,168 +871,79 @@ pub async fn api_login_check(State(app): State<App>, headers: axum::http::Header
     ok_or_err(app.user.login_check(user_id).await)
 }
 
-pub async fn api_supplier_list(axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+pub async fn api_supplier_list(State(app): State<App>, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     let category_id = params.get("category_id").and_then(|v| v.parse::<i64>().ok());
     let keyword_pattern = parse_keyword_pattern(&params);
-    
-    let rows = if let Some(cid) = category_id {
-        sqlx::query(
-            "SELECT s.id, s.name, s.contact, s.phone, s.address, s.business_scope, s.remark, s.category_id, s.audit_status, c.name as category_name,
-                    s.is_designated, s.designated_no, s.legal_person, s.credit_code, s.license_no, s.license_expire,
-                    s.contract_no, s.contract_start, s.contract_end
-             FROM supplier s LEFT JOIN category c ON s.category_id = c.id
-             WHERE s.category_id IN (
-                 WITH RECURSIVE cat_tree(id) AS (
-                     SELECT id FROM category WHERE id = ?
-                     UNION ALL
-                     SELECT c.id FROM category c 
-                     JOIN cat_tree ct ON c.parent_id = ct.id
-                 )
-                 SELECT id FROM cat_tree
-             )
-             AND s.name LIKE ?
-             ORDER BY s.id DESC"
-        )
-        .bind(cid)
-        .bind(&keyword_pattern)
-        .fetch_all(crate::db::pool())
-        .await
-        .unwrap_or_default()
-    } else {
-        sqlx::query(
-            "SELECT s.id, s.name, s.contact, s.phone, s.address, s.business_scope, s.remark, s.category_id, s.audit_status, c.name as category_name,
-                    s.is_designated, s.designated_no, s.legal_person, s.credit_code, s.license_no, s.license_expire,
-                    s.contract_no, s.contract_start, s.contract_end
-             FROM supplier s LEFT JOIN category c ON s.category_id = c.id
-             WHERE s.name LIKE ?
-             ORDER BY s.id DESC"
-        )
-        .bind(&keyword_pattern)
-        .fetch_all(crate::db::pool())
-        .await
-        .unwrap_or_default()
-    };
-    
-    let suppliers: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|row| serde_json::json!({
-            "id": row.get::<i64, _>("id"),
-            "name": row.get::<String, _>("name"),
-            "contact": row.get::<Option<String>, _>("contact"),
-            "phone": row.get::<Option<String>, _>("phone"),
-            "address": row.get::<Option<String>, _>("address"),
-            "business_scope": row.get::<Option<String>, _>("business_scope"),
-            "remark": row.get::<Option<String>, _>("remark"),
-            "category_id": row.get::<Option<i64>, _>("category_id"),
-            "category_name": row.get::<Option<String>, _>("category_name"),
-            "audit_status": row.get::<Option<String>, _>("audit_status"),
-            "is_designated": row.get::<Option<i64>, _>("is_designated").unwrap_or(0),
-            "designated_no": row.get::<Option<String>, _>("designated_no"),
-            "legal_person": row.get::<Option<String>, _>("legal_person"),
-            "credit_code": row.get::<Option<String>, _>("credit_code"),
-            "license_no": row.get::<Option<String>, _>("license_no"),
-            "license_expire": row.get::<Option<String>, _>("license_expire"),
-            "contract_no": row.get::<Option<String>, _>("contract_no"),
-            "contract_start": row.get::<Option<String>, _>("contract_start"),
-            "contract_end": row.get::<Option<String>, _>("contract_end"),
-        }))
-        .collect();
-    
-    (StatusCode::OK, serde_json::to_string(&suppliers).unwrap())
+    let rows = app.supplier.list(category_id, keyword_pattern).await;
+    (StatusCode::OK, serde_json::to_string(&rows).unwrap())
 }
 
-pub async fn api_supplier_create(headers: axum::http::HeaderMap, Json(req): Json<SupplierReq>) -> impl IntoResponse {
+pub async fn api_supplier_create(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<SupplierReq>) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/supplier/create").await {
-        Err(e) => return e,
+        Err(e) => return e.into_response(),
         Ok(_) => {}
     }
-    
-    let result = sqlx::query(
-        "INSERT INTO supplier(name, contact, phone, address, business_scope, remark, category_id,
-                              is_designated, designated_no, legal_person, credit_code, license_no, license_expire,
-                              contract_no, contract_start, contract_end)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    )
-    .bind(&req.name)
-    .bind(&req.contact)
-    .bind(&req.phone)
-    .bind(&req.address)
-    .bind(&req.business_scope)
-    .bind(&req.remark)
-    .bind(&req.category_id)
-    .bind(req.is_designated.unwrap_or(0))
-    .bind(&req.designated_no)
-    .bind(&req.legal_person)
-    .bind(&req.credit_code)
-    .bind(&req.license_no)
-    .bind(&req.license_expire)
-    .bind(&req.contract_no)
-    .bind(&req.contract_start)
-    .bind(&req.contract_end)
-    .execute(crate::db::pool())
-    .await;
-    
-    match result {
-        Ok(_) => (StatusCode::OK, "创建成功".to_string()),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "创建失败".to_string()),
+    let cmd = UpsertSupplier {
+        name: req.name,
+        contact: req.contact,
+        phone: req.phone,
+        address: req.address,
+        business_scope: req.business_scope,
+        remark: req.remark,
+        category_id: req.category_id,
+        is_designated: req.is_designated.unwrap_or(0),
+        designated_no: req.designated_no,
+        legal_person: req.legal_person,
+        credit_code: req.credit_code,
+        license_no: req.license_no,
+        license_expire: req.license_expire,
+        contract_no: req.contract_no,
+        contract_start: req.contract_start,
+        contract_end: req.contract_end,
+    };
+    match app.supplier.create(cmd).await {
+        Ok(msg) => (StatusCode::OK, msg).into_response(),
+        Err(e) => text_error_response(e).into_response(),
     }
 }
 
-pub async fn api_supplier_update(headers: axum::http::HeaderMap, Json(req): Json<SupplierReq>) -> impl IntoResponse {
+pub async fn api_supplier_update(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<SupplierReq>) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/supplier/update").await {
-        Err(e) => return e,
+        Err(e) => return e.into_response(),
         Ok(_) => {}
     }
-    if let Err((code, msg)) = check_basic_not_confirmed("supplier", req.id.unwrap_or(0)).await {
-        return (code, msg);
-    }
-    let result = sqlx::query(
-        "UPDATE supplier SET name=?, contact=?, phone=?, address=?, business_scope=?, remark=?, category_id=?,
-                              is_designated=?, designated_no=?, legal_person=?, credit_code=?, license_no=?, license_expire=?,
-                              contract_no=?, contract_start=?, contract_end=?, audit_status='pending' WHERE id=?"
-    )
-    .bind(&req.name)
-    .bind(&req.contact)
-    .bind(&req.phone)
-    .bind(&req.address)
-    .bind(&req.business_scope)
-    .bind(&req.remark)
-    .bind(&req.category_id)
-    .bind(req.is_designated.unwrap_or(0))
-    .bind(&req.designated_no)
-    .bind(&req.legal_person)
-    .bind(&req.credit_code)
-    .bind(&req.license_no)
-    .bind(&req.license_expire)
-    .bind(&req.contract_no)
-    .bind(&req.contract_start)
-    .bind(&req.contract_end)
-    .bind(req.id.unwrap_or(0))
-    .execute(crate::db::pool())
-    .await;
-    
-    match result {
-        Ok(_) => (StatusCode::OK, "更新成功".to_string()),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "更新失败".to_string()),
+    let cmd = UpsertSupplier {
+        name: req.name,
+        contact: req.contact,
+        phone: req.phone,
+        address: req.address,
+        business_scope: req.business_scope,
+        remark: req.remark,
+        category_id: req.category_id,
+        is_designated: req.is_designated.unwrap_or(0),
+        designated_no: req.designated_no,
+        legal_person: req.legal_person,
+        credit_code: req.credit_code,
+        license_no: req.license_no,
+        license_expire: req.license_expire,
+        contract_no: req.contract_no,
+        contract_start: req.contract_start,
+        contract_end: req.contract_end,
+    };
+    match app.supplier.update(req.id.unwrap_or(0), cmd).await {
+        Ok(msg) => (StatusCode::OK, msg).into_response(),
+        Err(e) => text_error_response(e).into_response(),
     }
 }
 
-pub async fn api_supplier_delete(headers: axum::http::HeaderMap, Json(req): Json<DeleteReq>) -> impl IntoResponse {
+pub async fn api_supplier_delete(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<DeleteReq>) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/supplier/delete").await {
-        Err(e) => return e,
+        Err(e) => return e.into_response(),
         Ok(_) => {}
     }
-    if let Err((code, msg)) = check_basic_not_confirmed("supplier", req.id).await {
-        return (code, msg);
-    }
-    let result = sqlx::query("DELETE FROM supplier WHERE id=?")
-        .bind(req.id)
-        .execute(crate::db::pool())
-        .await;
-    
-    match result {
-        Ok(_) => (StatusCode::OK, "删除成功".to_string()),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "删除失败".to_string()),
+    match app.supplier.delete(req.id).await {
+        Ok(msg) => (StatusCode::OK, msg).into_response(),
+        Err(e) => text_error_response(e).into_response(),
     }
 }
 
@@ -1224,32 +1012,36 @@ async fn is_audit_confirmed(table: &str, id: i64) -> bool {
         == Some("confirmed")
 }
 
-pub async fn api_supplier_approve(headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn api_supplier_approve(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
     let id = req["id"].as_i64().unwrap_or(0);
-    match set_basic_audit_status(&headers, "supplier", id, "confirmed", "supplier.approve").await {
+    let ctx = crate::auth::get_user_ctx(&headers).await;
+    match app.audit.set_audit_status(&ctx, BasicTable::Supplier, id, "confirmed", "supplier.approve").await {
         Ok(()) => (StatusCode::OK, "审核成功".to_string()).into_response(),
-        Err((code, msg)) => (code, msg).into_response(),
+        Err(e) => text_error_response(e).into_response(),
     }
 }
-pub async fn api_supplier_unapprove(headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn api_supplier_unapprove(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
     let id = req["id"].as_i64().unwrap_or(0);
-    match set_basic_audit_status(&headers, "supplier", id, "pending", "supplier.unapprove").await {
+    let ctx = crate::auth::get_user_ctx(&headers).await;
+    match app.audit.set_audit_status(&ctx, BasicTable::Supplier, id, "pending", "supplier.unapprove").await {
         Ok(()) => (StatusCode::OK, "反审核成功".to_string()).into_response(),
-        Err((code, msg)) => (code, msg).into_response(),
+        Err(e) => text_error_response(e).into_response(),
     }
 }
-pub async fn api_purchaser_approve(headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn api_purchaser_approve(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
     let id = req["id"].as_i64().unwrap_or(0);
-    match set_basic_audit_status(&headers, "purchaser", id, "confirmed", "purchaser.approve").await {
+    let ctx = crate::auth::get_user_ctx(&headers).await;
+    match app.audit.set_audit_status(&ctx, BasicTable::Purchaser, id, "confirmed", "purchaser.approve").await {
         Ok(()) => (StatusCode::OK, "审核成功".to_string()).into_response(),
-        Err((code, msg)) => (code, msg).into_response(),
+        Err(e) => text_error_response(e).into_response(),
     }
 }
-pub async fn api_purchaser_unapprove(headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn api_purchaser_unapprove(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
     let id = req["id"].as_i64().unwrap_or(0);
-    match set_basic_audit_status(&headers, "purchaser", id, "pending", "purchaser.unapprove").await {
+    let ctx = crate::auth::get_user_ctx(&headers).await;
+    match app.audit.set_audit_status(&ctx, BasicTable::Purchaser, id, "pending", "purchaser.unapprove").await {
         Ok(()) => (StatusCode::OK, "反审核成功".to_string()).into_response(),
-        Err((code, msg)) => (code, msg).into_response(),
+        Err(e) => text_error_response(e).into_response(),
     }
 }
 pub async fn api_product_approve(headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
@@ -1283,55 +1075,8 @@ pub async fn api_warehouse_unapprove(State(app): State<App>, headers: axum::http
     }
 }
 
-pub async fn api_purchaser_export() -> impl IntoResponse {
-    let rows = sqlx::query(
-        "SELECT p.id, p.name, p.contact, p.phone, p.address, p.business_scope, p.remark, c.name as category_name 
-         FROM purchaser p LEFT JOIN category c ON p.category_id = c.id ORDER BY p.id"
-    )
-    .fetch_all(crate::db::pool())
-    .await
-    .unwrap_or_default();
-    
-    let result: Result<Vec<u8>, XlsxError> = (|| {
-        let mut workbook = Workbook::new();
-        let worksheet = workbook.add_worksheet();
-        
-        let header_format = Format::new()
-            .set_bold()
-            .set_align(FormatAlign::Center)
-            .set_align(FormatAlign::VerticalCenter);
-        
-        let headers = ["ID", "名称", "联系人", "电话", "地址", "经营范围", "备注", "分类"];
-        for (i, &header) in headers.iter().enumerate() {
-            worksheet.write_with_format(0, i as u16, header, &header_format)?;
-        }
-        
-        let mut row_idx = 1;
-        for row in rows {
-            worksheet.write(row_idx, 0, row.get::<i64, _>("id"))?;
-            worksheet.write(row_idx, 1, row.get::<String, _>("name"))?;
-            worksheet.write(row_idx, 2, row.get::<Option<String>, _>("contact").unwrap_or_default())?;
-            worksheet.write(row_idx, 3, row.get::<Option<String>, _>("phone").unwrap_or_default())?;
-            worksheet.write(row_idx, 4, row.get::<Option<String>, _>("address").unwrap_or_default())?;
-            worksheet.write(row_idx, 5, row.get::<Option<String>, _>("business_scope").unwrap_or_default())?;
-            worksheet.write(row_idx, 6, row.get::<Option<String>, _>("remark").unwrap_or_default())?;
-            worksheet.write(row_idx, 7, row.get::<Option<String>, _>("category_name").unwrap_or_default())?;
-            row_idx += 1;
-        }
-        
-        worksheet.set_column_width(0, 8)?;
-        worksheet.set_column_width(1, 18)?;
-        worksheet.set_column_width(2, 12)?;
-        worksheet.set_column_width(3, 15)?;
-        worksheet.set_column_width(4, 25)?;
-        worksheet.set_column_width(5, 20)?;
-        worksheet.set_column_width(6, 20)?;
-        worksheet.set_column_width(7, 12)?;
-        
-        workbook.save_to_buffer()
-    })();
-    
-    match result {
+pub async fn api_purchaser_export(State(app): State<App>) -> impl IntoResponse {
+    match app.purchaser.export_excel().await {
         Ok(data) => (
             StatusCode::OK,
             [
@@ -1340,239 +1085,76 @@ pub async fn api_purchaser_export() -> impl IntoResponse {
             ],
             data,
         ).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("导出失败: {}", e)).into_response(),
+        Err(e) => text_error_response(e).into_response(),
     }
 }
 
-pub async fn api_purchaser_import(content: Bytes) -> impl IntoResponse {
-    let rows: Vec<Vec<String>>;
-    
-    if content.starts_with(&[0x50, 0x4B, 0x03, 0x04]) {
-        let content_vec = content.to_vec();
-        match open_workbook_auto_from_rs(std::io::Cursor::new(content_vec)) {
-            Ok(mut workbook) => {
-                let sheets = workbook.sheet_names().to_vec();
-                if sheets.is_empty() {
-                    return (StatusCode::BAD_REQUEST, "Excel文件中没有工作表".to_string()).into_response();
-                }
-                
-                let range = match workbook.worksheet_range(&sheets[0]) {
-                    Ok(r) => r,
-                    Err(e) => return (StatusCode::BAD_REQUEST, format!("无法读取Excel文件内容: {}", e)).into_response(),
-                };
-                
-                rows = range.rows()
-                    .map(|row| {
-                        row.iter()
-                            .map(|cell| match cell {
-                                Data::Empty => "".to_string(),
-                                Data::Int(v) => v.to_string(),
-                                Data::Float(v) => v.to_string(),
-                                Data::String(v) => v.to_string(),
-                                Data::Bool(v) => v.to_string(),
-                                _ => "".to_string(),
-                            })
-                            .collect()
-                    })
-                    .collect();
-            }
-            Err(e) => {
-                return (StatusCode::BAD_REQUEST, format!("读取Excel文件失败: {}", e)).into_response();
-            }
-        }
-    } else {
-        let content_str = String::from_utf8_lossy(&content).to_string();
-        rows = parse_csv(&content_str);
+pub async fn api_purchaser_import(State(app): State<App>, content: Bytes) -> impl IntoResponse {
+    let rows = match parse_import_rows(&content).await {
+        Ok(r) => r,
+        Err((code, msg)) => return (code, msg).into_response(),
+    };
+    match app.purchaser.import(rows).await {
+        Ok(msg) => (StatusCode::OK, msg).into_response(),
+        Err(e) => text_error_response(e).into_response(),
     }
-    
-    if rows.len() < 2 {
-        return (StatusCode::BAD_REQUEST, "文件至少需要包含标题行和一行数据".to_string()).into_response();
-    }
-    
-    let mut success = 0;
-    let mut failed = 0;
-    
-    for (_i, row) in rows.iter().enumerate().skip(1) {
-        if row.len() < 2 {
-            failed += 1;
-            continue;
-        }
-        
-        let name = row[1].trim();
-        if name.is_empty() {
-            failed += 1;
-            continue;
-        }
-        
-        let category_name = if row.len() > 7 { row[7].trim() } else { "" };
-        let category_id = if !category_name.is_empty() {
-            let cid: Option<i64> = sqlx::query("SELECT id FROM category WHERE name = ? AND entity_type = 'purchaser'")
-                .bind(category_name)
-                .fetch_optional(crate::db::pool())
-                .await
-                .ok()
-                .flatten()
-                .map(|r| r.get::<i64, _>("id"));
-            cid
-        } else {
-            None
-        };
-        
-        let result = sqlx::query(
-            "INSERT OR IGNORE INTO purchaser(name, contact, phone, address, business_scope, remark, category_id) VALUES (?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind(name)
-        .bind(if row.len() > 2 { row[2].trim() } else { "" })
-        .bind(if row.len() > 3 { row[3].trim() } else { "" })
-        .bind(if row.len() > 4 { row[4].trim() } else { "" })
-        .bind(if row.len() > 5 { row[5].trim() } else { "" })
-        .bind(if row.len() > 6 { row[6].trim() } else { "" })
-        .bind(category_id)
-        .execute(crate::db::pool())
-        .await;
-        
-        match result {
-            Ok(res) => {
-                if res.rows_affected() > 0 {
-                    success += 1;
-                } else {
-                    failed += 1;
-                }
-            }
-            Err(_) => {
-                failed += 1;
-            }
-        }
-    }
-    
-    (StatusCode::OK, format!("导入完成：成功 {} 条，失败 {} 条", success, failed)).into_response()
 }
 
-pub async fn api_purchaser_list(axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+pub async fn api_purchaser_list(State(app): State<App>, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     let category_id = params.get("category_id").and_then(|v| v.parse::<i64>().ok());
     let keyword_pattern = parse_keyword_pattern(&params);
-    
-    let rows = if let Some(cid) = category_id {
-        sqlx::query(
-            "SELECT p.id, p.name, p.contact, p.phone, p.address, p.business_scope, p.remark, p.category_id, p.audit_status, c.name as category_name
-             FROM purchaser p LEFT JOIN category c ON p.category_id = c.id
-             WHERE p.category_id IN (
-                 WITH RECURSIVE cat_tree(id) AS (
-                     SELECT id FROM category WHERE id = ?
-                     UNION ALL
-                     SELECT c.id FROM category c
-                     JOIN cat_tree ct ON c.parent_id = ct.id
-                 )
-                 SELECT id FROM cat_tree
-             )
-             AND p.name LIKE ?
-             ORDER BY p.id DESC"
-        )
-        .bind(cid)
-        .bind(&keyword_pattern)
-        .fetch_all(crate::db::pool())
-        .await
-        .unwrap_or_default()
-    } else {
-        sqlx::query(
-            "SELECT p.id, p.name, p.contact, p.phone, p.address, p.business_scope, p.remark, p.category_id, p.audit_status, c.name as category_name
-             FROM purchaser p LEFT JOIN category c ON p.category_id = c.id
-             WHERE p.name LIKE ?
-             ORDER BY p.id DESC"
-        )
-        .bind(&keyword_pattern)
-        .fetch_all(crate::db::pool())
-        .await
-        .unwrap_or_default()
-    };
-
-    let purchasers: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|row| serde_json::json!({
-            "id": row.get::<i64, _>("id"),
-            "name": row.get::<String, _>("name"),
-            "contact": row.get::<Option<String>, _>("contact"),
-            "phone": row.get::<Option<String>, _>("phone"),
-            "address": row.get::<Option<String>, _>("address"),
-            "business_scope": row.get::<Option<String>, _>("business_scope"),
-            "remark": row.get::<Option<String>, _>("remark"),
-            "category_id": row.get::<Option<i64>, _>("category_id"),
-            "category_name": row.get::<Option<String>, _>("category_name"),
-            "audit_status": row.get::<Option<String>, _>("audit_status"),
-        }))
-        .collect();
-    
-    (StatusCode::OK, serde_json::to_string(&purchasers).unwrap())
+    let rows = app.purchaser.list(category_id, keyword_pattern).await;
+    (StatusCode::OK, serde_json::to_string(&rows).unwrap())
 }
 
-pub async fn api_purchaser_create(headers: axum::http::HeaderMap, Json(req): Json<PurchaserReq>) -> impl IntoResponse {
+pub async fn api_purchaser_create(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<PurchaserReq>) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/purchaser/create").await {
-        Err(e) => return e,
+        Err(e) => return e.into_response(),
         Ok(_) => {}
     }
-    let result = sqlx::query(
-        "INSERT INTO purchaser(name, contact, phone, address, business_scope, remark, category_id) VALUES (?, ?, ?, ?, ?, ?, ?)"
-    )
-    .bind(&req.name)
-    .bind(&req.contact)
-    .bind(&req.phone)
-    .bind(&req.address)
-    .bind(&req.business_scope)
-    .bind(&req.remark)
-    .bind(&req.category_id)
-    .execute(crate::db::pool())
-    .await;
-    
-    match result {
-        Ok(_) => (StatusCode::OK, "创建成功".to_string()),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "创建失败".to_string()),
+    let cmd = UpsertPurchaser {
+        name: req.name,
+        contact: req.contact,
+        phone: req.phone,
+        address: req.address,
+        business_scope: req.business_scope,
+        remark: req.remark,
+        category_id: req.category_id,
+    };
+    match app.purchaser.create(cmd).await {
+        Ok(msg) => (StatusCode::OK, msg).into_response(),
+        Err(e) => text_error_response(e).into_response(),
     }
 }
 
-pub async fn api_purchaser_update(headers: axum::http::HeaderMap, Json(req): Json<PurchaserReq>) -> impl IntoResponse {
+pub async fn api_purchaser_update(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<PurchaserReq>) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/purchaser/update").await {
-        Err(e) => return e,
+        Err(e) => return e.into_response(),
         Ok(_) => {}
     }
-    if let Err((code, msg)) = check_basic_not_confirmed("purchaser", req.id.unwrap_or(0)).await {
-        return (code, msg);
-    }
-    let result = sqlx::query(
-        "UPDATE purchaser SET name=?, contact=?, phone=?, address=?, business_scope=?, remark=?, category_id=?, audit_status='pending' WHERE id=?"
-    )
-    .bind(&req.name)
-    .bind(&req.contact)
-    .bind(&req.phone)
-    .bind(&req.address)
-    .bind(&req.business_scope)
-    .bind(&req.remark)
-    .bind(&req.category_id)
-    .bind(req.id.unwrap_or(0))
-    .execute(crate::db::pool())
-    .await;
-    
-    match result {
-        Ok(_) => (StatusCode::OK, "更新成功".to_string()),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "更新失败".to_string()),
+    let cmd = UpsertPurchaser {
+        name: req.name,
+        contact: req.contact,
+        phone: req.phone,
+        address: req.address,
+        business_scope: req.business_scope,
+        remark: req.remark,
+        category_id: req.category_id,
+    };
+    match app.purchaser.update(req.id.unwrap_or(0), cmd).await {
+        Ok(msg) => (StatusCode::OK, msg).into_response(),
+        Err(e) => text_error_response(e).into_response(),
     }
 }
 
-pub async fn api_purchaser_delete(headers: axum::http::HeaderMap, Json(req): Json<DeleteReq>) -> impl IntoResponse {
+pub async fn api_purchaser_delete(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<DeleteReq>) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/purchaser/delete").await {
-        Err(e) => return e,
+        Err(e) => return e.into_response(),
         Ok(_) => {}
     }
-    if let Err((code, msg)) = check_basic_not_confirmed("purchaser", req.id).await {
-        return (code, msg);
-    }
-    let result = sqlx::query("DELETE FROM purchaser WHERE id=?")
-        .bind(req.id)
-        .execute(crate::db::pool())
-        .await;
-    
-    match result {
-        Ok(_) => (StatusCode::OK, "删除成功".to_string()),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "删除失败".to_string()),
+    match app.purchaser.delete(req.id).await {
+        Ok(msg) => (StatusCode::OK, msg).into_response(),
+        Err(e) => text_error_response(e).into_response(),
     }
 }
 
