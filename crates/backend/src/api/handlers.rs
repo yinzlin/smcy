@@ -1,9 +1,10 @@
-use axum::extract::{Json, Path, Query, Multipart, State};
+﻿use axum::extract::{Json, Path, Query, Multipart, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use application::error::UseCaseError;
 use application::port::audit::BasicAuditUseCase;
 use application::port::category::CategoryUseCase;
+use application::port::product::ProductUseCase;
 use application::port::purchaser::PurchaserUseCase;
 use application::port::supplier::SupplierUseCase;
 use application::port::user::UserUseCase;
@@ -950,52 +951,7 @@ pub async fn api_supplier_delete(State(app): State<App>, headers: axum::http::He
 // ===== 基础数据审核状态管理 =====
 // audit_status：pending=待审核，confirmed=已审核
 // 审核/反审核仅超级管理员可执行（超级用户始终拥有最高权限），操作记入审计日志
-async fn set_basic_audit_status(
-    headers: &axum::http::HeaderMap,
-    table: &str,
-    id: i64,
-    to_status: &str,
-    action: &str,
-) -> Result<(), (StatusCode, String)> {
-    let ctx = crate::auth::get_user_ctx(headers).await;
-    if ctx.role != "super_admin" {
-        return Err((StatusCode::FORBIDDEN, "仅超级管理员可执行审核/反审核操作".to_string()));
-    }
-    let sql = format!("UPDATE {} SET audit_status = ? WHERE id = ?", table);
-    let result = sqlx::query(AssertSqlSafe(sql.as_str()))
-        .bind(to_status)
-        .bind(id)
-        .execute(crate::db::pool())
-        .await;
-    match result {
-        Ok(r) if r.rows_affected() > 0 => {
-            let status_text = if to_status == "confirmed" { "已审核" } else { "待审核" };
-            crate::auth::log_operation(&ctx, action, table, &id.to_string(), &format!("{} ID={} 审核状态 → {}", table, id, status_text)).await;
-            Ok(())
-        }
-        Ok(_) => Err((StatusCode::NOT_FOUND, "记录不存在".to_string())),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("操作失败: {}", e))),
-    }
-}
-
-/// 已审核记录锁定校验：记录已审核（confirmed）时禁止修改/删除，需先反审核。
-/// 用于基础数据及其子资源（商品单位/价格）的写操作。
-async fn check_basic_not_confirmed(table: &str, id: i64) -> Result<(), (StatusCode, String)> {
-    if id <= 0 {
-        return Err((StatusCode::BAD_REQUEST, "缺少记录ID".to_string()));
-    }
-    let sql = format!("SELECT audit_status FROM {} WHERE id = ?", table);
-    let status: Option<String> = sqlx::query_scalar(AssertSqlSafe(sql.as_str()))
-        .bind(id)
-        .fetch_optional(crate::db::pool())
-        .await
-        .unwrap_or(None);
-    match status.as_deref() {
-        Some("confirmed") => Err((StatusCode::BAD_REQUEST, "该记录已审核，如需修改/删除请先反审核".to_string())),
-        Some(_) => Ok(()),
-        None => Err((StatusCode::NOT_FOUND, "记录不存在".to_string())),
-    }
-}
+// （set_basic_audit_status / check_basic_not_confirmed 已随六边形化迁移至 application 用例层）
 
 /// 基础数据是否已审核（下单校验用；id<=0 视为通过，避免误伤无关联的零值）
 async fn is_audit_confirmed(table: &str, id: i64) -> bool {
@@ -1044,18 +1000,20 @@ pub async fn api_purchaser_unapprove(State(app): State<App>, headers: axum::http
         Err(e) => text_error_response(e).into_response(),
     }
 }
-pub async fn api_product_approve(headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn api_product_approve(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
     let id = req["id"].as_i64().unwrap_or(0);
-    match set_basic_audit_status(&headers, "product", id, "confirmed", "product.approve").await {
+    let ctx = crate::auth::get_user_ctx(&headers).await;
+    match app.audit.set_audit_status(&ctx, BasicTable::Product, id, "confirmed", "product.approve").await {
         Ok(()) => (StatusCode::OK, "审核成功".to_string()).into_response(),
-        Err((code, msg)) => (code, msg).into_response(),
+        Err(e) => text_error_response(e).into_response(),
     }
 }
-pub async fn api_product_unapprove(headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn api_product_unapprove(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
     let id = req["id"].as_i64().unwrap_or(0);
-    match set_basic_audit_status(&headers, "product", id, "pending", "product.unapprove").await {
+    let ctx = crate::auth::get_user_ctx(&headers).await;
+    match app.audit.set_audit_status(&ctx, BasicTable::Product, id, "pending", "product.unapprove").await {
         Ok(()) => (StatusCode::OK, "反审核成功".to_string()).into_response(),
-        Err((code, msg)) => (code, msg).into_response(),
+        Err(e) => text_error_response(e).into_response(),
     }
 }
 pub async fn api_warehouse_approve(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
@@ -1158,596 +1116,80 @@ pub async fn api_purchaser_delete(State(app): State<App>, headers: axum::http::H
     }
 }
 
-pub async fn api_product_toggle_status(Path(id): Path<i64>) -> impl IntoResponse {
-    if let Err((code, msg)) = check_basic_not_confirmed("product", id).await {
-        return (code, msg);
-    }
-    let row = sqlx::query("SELECT status FROM product WHERE id = ?")
-        .bind(id)
-        .fetch_optional(crate::db::pool())
-        .await
-        .unwrap_or(None);
-    
-    if row.is_none() {
-        return (StatusCode::NOT_FOUND, "商品不存在".to_string());
-    }
-    
-    let current_status: i64 = row.unwrap().get("status");
-    let new_status = if current_status == 1 { 0 } else { 1 };
-    
-    let result = sqlx::query("UPDATE product SET status = ? WHERE id = ?")
-        .bind(new_status)
-        .bind(id)
-        .execute(crate::db::pool())
-        .await;
-    
-    match result {
-        Ok(_) => {
-            let msg = if new_status == 1 { "商品已启用" } else { "商品已停用" };
-            (StatusCode::OK, msg.to_string())
-        },
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "操作失败".to_string()),
+pub async fn api_product_toggle_status(State(app): State<App>, Path(id): Path<i64>) -> (StatusCode, String) {
+    match app.product.toggle_status(id).await {
+        Ok(msg) => (StatusCode::OK, msg),
+        Err(e) => text_error_response(e),
     }
 }
 
-pub async fn api_product_list(headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+pub async fn api_product_list(State(app): State<App>, headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     // 进价仅超级管理员可见：非 super_admin 返回的进价字段置 0
     let is_super_admin = crate::auth::get_user_ctx(&headers).await.role == "super_admin";
-    let category_id = params.get("category_id").and_then(|v| v.parse::<i64>().ok());
-    let product_id = params.get("id").and_then(|v| v.parse::<i64>().ok());
-    let keyword_pattern = parse_keyword_pattern(&params);
     let page: i64 = params.get("page").and_then(|s| s.parse().ok()).unwrap_or(1);
     let page_size: i64 = params.get("page_size").and_then(|s| s.parse().ok()).unwrap_or(20);
-    let offset = (page - 1) * page_size;
-    // thumbs=1 返回 image_url 字段(默认);thumbs=0 精简返回,前端按需懒加载,适合远程大量商品场景
-    let include_thumbs = params.get("thumbs").map(|s| s != "0").unwrap_or(true);
-
-    // 构造 WHERE 条件、绑定参数和 COUNT 基础 SQL
-    #[derive(Debug)]
-    struct QueryParts {
-        where_sql: String,
-        binds: Vec<String>,
-        category_bind: Option<i64>,
-        id_bind: Option<i64>,
-    }
-
-    let mut query_parts = if let Some(pid) = product_id {
-        // 按 id 精确查询(用于前端按需加载单条商品图片)
-        QueryParts {
-            where_sql: "WHERE p.id = ?".to_string(),
-            binds: vec![],
-            category_bind: None,
-            id_bind: Some(pid),
-        }
-    } else if let Some(cid) = category_id {
-        QueryParts {
-            where_sql: format!(
-                "WHERE p.category_id IN (
-                    WITH RECURSIVE cat_tree(id) AS (
-                        SELECT id FROM category WHERE id = ?
-                        UNION ALL
-                        SELECT c.id FROM category c
-                        JOIN cat_tree ct ON c.parent_id = ct.id
-                    )
-                    SELECT id FROM cat_tree
-                )
-                AND (p.name LIKE ? OR p.alias1 LIKE ? OR p.alias2 LIKE ?)"
-            ),
-            binds: vec![keyword_pattern.clone(), keyword_pattern.clone(), keyword_pattern.clone()],
-            category_bind: Some(cid),
-            id_bind: None,
-        }
-    } else {
-        QueryParts {
-            where_sql: "WHERE (p.name LIKE ? OR p.alias1 LIKE ? OR p.alias2 LIKE ?)".to_string(),
-            binds: vec![keyword_pattern.clone(), keyword_pattern.clone(), keyword_pattern.clone()],
-            category_bind: None,
-            id_bind: None,
-        }
+    let filter = domain::port::product::ProductListFilter {
+        product_id: params.get("id").and_then(|v| v.parse::<i64>().ok()),
+        category_id: params.get("category_id").and_then(|v| v.parse::<i64>().ok()),
+        keyword_pattern: parse_keyword_pattern(&params),
+        gov_status: params.get("gov_status").and_then(|v| v.parse::<i64>().ok()),
+        include_thumbs: params.get("thumbs").map(|s| s != "0").unwrap_or(true),
+        page,
+        page_size,
+        offset: (page - 1) * page_size,
     };
-
-    // 政采状态筛选：0=非政采 1=政采有指导价 2=政采无指导价
-    if let Some(gs) = params.get("gov_status").and_then(|v| v.parse::<i64>().ok()) {
-        if (0..=2).contains(&gs) {
-            query_parts.where_sql.push_str(" AND p.gov_status = ?");
-            query_parts.binds.push(gs.to_string());
-        }
-    }
-
-    // 总数查询
-    let count_sql = format!(
-        "SELECT COUNT(*) as count FROM product p LEFT JOIN category c ON p.category_id = c.id {}",
-        query_parts.where_sql
-    );
-    let mut count_q = sqlx::query(AssertSqlSafe(count_sql.as_str()));
-    if let Some(pid) = query_parts.id_bind {
-        count_q = count_q.bind(pid);
-    }
-    if let Some(cid) = query_parts.category_bind {
-        count_q = count_q.bind(cid);
-    }
-    for b in &query_parts.binds {
-        count_q = count_q.bind(b);
-    }
-    let total_row = count_q.fetch_one(crate::db::pool()).await.unwrap();
-    let total: i64 = total_row.get("count");
-
-    // 分页数据查询
-    let select_cols = if include_thumbs {
-        "p.id, p.name, p.spec, p.alias1, p.alias2, p.unit, p.base_unit, p.base_price, p.purchase_price, p.max_purchase_price, p.min_purchase_price, p.markup_rate, p.auto_update_price, p.image_url, p.category_id, p.status, p.audit_status, p.shelf_life, p.gov_status, c.name as category_name"
-    } else {
-        // thumbs=0 模式: 省 image_url 列,流量更小;前端按需单独请求 ?thumbs=1
-        "p.id, p.name, p.spec, p.alias1, p.alias2, p.unit, p.base_unit, p.base_price, p.purchase_price, p.max_purchase_price, p.min_purchase_price, p.markup_rate, p.auto_update_price, p.category_id, p.status, p.audit_status, p.shelf_life, p.gov_status, c.name as category_name"
-    };
-    let data_sql = format!(
-        "SELECT {} 
-         FROM product p LEFT JOIN category c ON p.category_id = c.id
-         {}
-         ORDER BY p.id DESC LIMIT ? OFFSET ?",
-        select_cols,
-        query_parts.where_sql
-    );
-    let mut data_q = sqlx::query(AssertSqlSafe(data_sql.as_str()));
-    if let Some(pid) = query_parts.id_bind {
-        data_q = data_q.bind(pid);
-    }
-    if let Some(cid) = query_parts.category_bind {
-        data_q = data_q.bind(cid);
-    }
-    for b in &query_parts.binds {
-        data_q = data_q.bind(b);
-    }
-    data_q = data_q.bind(page_size).bind(offset);
-    let rows = data_q.fetch_all(crate::db::pool()).await.unwrap_or_default();
-    
-    let mut products: Vec<serde_json::Value> = Vec::new();
-    for row in rows {
-        let product_id: i64 = row.get("id");
-        let unit_rows = sqlx::query(
-            "SELECT id, unit_name, ratio, unit_price, purchase_price, sort_order FROM product_unit 
-             WHERE product_id = ? ORDER BY sort_order, id"
-        )
-        .bind(product_id)
-        .fetch_all(crate::db::pool())
-        .await
-        .unwrap_or_default();
-        
-        let units: Vec<serde_json::Value> = unit_rows
-            .iter()
-            .map(|ur| serde_json::json!({
-                "id": ur.get::<i64, _>("id"),
-                "unit_name": ur.get::<String, _>("unit_name"),
-                "ratio": ur.get::<f64, _>("ratio"),
-                "unit_price": ur.get::<f64, _>("unit_price"),
-                "purchase_price": if is_super_admin { ur.get::<f64, _>("purchase_price") } else { 0.0 },
-                "sort_order": ur.get::<i32, _>("sort_order"),
-            }))
-            .collect();
-        
-        let price_rows = sqlx::query(
-            "SELECT price_type, price FROM product_price WHERE product_id = ?"
-        )
-        .bind(product_id)
-        .fetch_all(crate::db::pool())
-        .await
-        .unwrap_or_default();
-        
-        let mut prices: Vec<serde_json::Value> = Vec::new();
-        let mut gov_price: Option<f64> = None;
-        let mut other_prices: Vec<f64> = Vec::new();
-        
-        for pr in price_rows {
-            let price_type: String = pr.get("price_type");
-            let price: f64 = pr.get("price");
-            prices.push(serde_json::json!({
-                "price_type": price_type.clone(),
-                "price": price,
-            }));
-            
-            if price_type == "gov_procurement" {
-                gov_price = Some(price);
-            } else if price_type == "supermarket_1" || price_type == "supermarket_2"
-                    || price_type == "supermarket_3" || price_type == "ai_realtime" {
-                if price > 0.0 {
-                    other_prices.push(price);
-                }
-            }
-        }
-        
-        let selling_price = if let Some(gp) = gov_price {
-            if gp > 0.0 {
-                gp
-            } else if !other_prices.is_empty() {
-                // 商超1/2/3/AI 非零价的平均（四舍五入保留 2 位，与前端 calcSellingPrice 一致）
-                (other_prices.iter().sum::<f64>() / other_prices.len() as f64 * 100.0).round() / 100.0
-            } else {
-                row.get::<f64, _>("base_price")
-            }
-        } else if !other_prices.is_empty() {
-            (other_prices.iter().sum::<f64>() / other_prices.len() as f64 * 100.0).round() / 100.0
-        } else {
-            row.get::<f64, _>("base_price")
-        };
-        
-        products.push(serde_json::json!({
-            "id": product_id,
-            "name": row.get::<String, _>("name"),
-            "spec": row.get::<Option<String>, _>("spec"),
-            "alias1": row.get::<Option<String>, _>("alias1"),
-            "alias2": row.get::<Option<String>, _>("alias2"),
-            "unit": row.get::<String, _>("unit"),
-            "base_unit": row.get::<String, _>("base_unit"),
-            "base_price": row.get::<f64, _>("base_price"),
-            "purchase_price": if is_super_admin { row.get::<f64, _>("purchase_price") } else { 0.0 },
-            "max_purchase_price": if is_super_admin { row.get::<f64, _>("max_purchase_price") } else { 0.0 },
-            "min_purchase_price": if is_super_admin { row.get::<f64, _>("min_purchase_price") } else { 0.0 },
-            "markup_rate": row.get::<f64, _>("markup_rate"),
-            "auto_update_price": row.get::<i64, _>("auto_update_price"),
-            "image_url": if include_thumbs { row.get::<Option<String>, _>("image_url") } else { None },
-            "category_id": row.get::<Option<i64>, _>("category_id"),
-            "status": row.get::<i64, _>("status"),
-            "audit_status": row.get::<Option<String>, _>("audit_status"),
-            "shelf_life": row.get::<Option<String>, _>("shelf_life"),
-            "gov_status": row.try_get::<i64, _>("gov_status").unwrap_or(0),
-            "category_name": row.get::<Option<String>, _>("category_name"),
-            "units": units,
-            "prices": prices,
-            "selling_price": selling_price,
-        }));
-    }
-    
-    let total_pages = if page_size > 0 { (total + page_size - 1) / page_size } else { 0 };
-    let result = serde_json::json!({
-        "data": products,
-        "page": page,
-        "page_size": page_size,
-        "total": total,
-        "total_pages": total_pages
-    });
-
-    (StatusCode::OK, serde_json::to_string(&result).unwrap())
+    ok_or_err(app.product.list(is_super_admin, filter).await)
 }
 
-pub async fn api_product_create(headers: axum::http::HeaderMap, Json(req): Json<ProductReq>) -> impl IntoResponse {
+pub async fn api_product_create(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<ProductReq>) -> impl IntoResponse {
     // 进价仅超级管理员可设置：非 super_admin 创建商品时进价强制为 0
-    let role = crate::auth::get_user_ctx(&headers).await.role;
-    let base_unit = req.base_unit.clone().unwrap_or_else(|| req.unit.clone().unwrap_or_else(|| "斤".to_string()));
-    let unit = req.unit.clone().unwrap_or_else(|| "".to_string());
-    // 价格统一四舍五入保留两位小数
-    let base_price = ((req.base_price.unwrap_or(0.0)) * 100.0).round() / 100.0;
-    
-    let purchase_price = if role == "super_admin" { ((req.purchase_price.unwrap_or(0.0)) * 100.0).round() / 100.0 } else { 0.0 };
-    
-    let result = sqlx::query(
-        "INSERT INTO product(name, spec, alias1, alias2, unit, base_unit, base_price, purchase_price, category_id, shelf_life, gov_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    )
-    .bind(&req.name)
-    .bind(&req.spec)
-    .bind(&req.alias1)
-    .bind(&req.alias2)
-    .bind(&unit)
-    .bind(&base_unit)
-    .bind(base_price)
-    .bind(purchase_price)
-    .bind(&req.category_id)
-    .bind(&req.shelf_life)
-    .bind(req.gov_status.unwrap_or(0))
-    .execute(crate::db::pool())
-    .await;
-
-    match result {
-        Ok(_) => StatusCode::OK,
-        Err(e) => {
-            eprintln!("创建商品失败: {:?}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        },
+    let is_super_admin = crate::auth::get_user_ctx(&headers).await.role == "super_admin";
+    match app.product.create(is_super_admin, req).await {
+        Ok(()) => StatusCode::OK,
+        Err(e) => text_error_response(e).0,
     }
 }
 
-pub async fn api_product_check_name(axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
-    let name = params.get("name").filter(|s| !s.is_empty());
-    if name.is_none() {
-        return (StatusCode::OK, serde_json::to_string(&Vec::<serde_json::Value>::new()).unwrap());
-    }
-    
-    let rows = sqlx::query(
-        "SELECT p.id, p.name, p.spec, p.unit, p.base_unit, p.base_price, p.category_id, c.name as category_name 
-         FROM product p LEFT JOIN category c ON p.category_id = c.id
-         WHERE p.name = ?"
-    )
-    .bind(name.unwrap())
-    .fetch_all(crate::db::pool())
-    .await
-    .unwrap_or_default();
-    
-    let products: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|row| serde_json::json!({
-            "id": row.get::<i64, _>("id"),
-            "name": row.get::<String, _>("name"),
-            "spec": row.get::<Option<String>, _>("spec"),
-            "unit": row.get::<String, _>("unit"),
-            "base_unit": row.get::<String, _>("base_unit"),
-            "base_price": row.get::<f64, _>("base_price"),
-            "category_id": row.get::<Option<i64>, _>("category_id"),
-            "category_name": row.get::<Option<String>, _>("category_name"),
-        }))
-        .collect();
-    
-    (StatusCode::OK, serde_json::to_string(&products).unwrap())
+pub async fn api_product_check_name(State(app): State<App>, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+    let name = params.get("name").filter(|s| !s.is_empty()).cloned();
+    (StatusCode::OK, app.product.check_name(name).await)
 }
 
-pub async fn api_product_by_id(headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+pub async fn api_product_by_id(State(app): State<App>, headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     let is_super_admin = crate::auth::get_user_ctx(&headers).await.role == "super_admin";
     let product_id = params.get("id").and_then(|s| s.parse::<i64>().ok());
-    if product_id.is_none() {
-        return (StatusCode::OK, serde_json::to_string(&serde_json::json!({})).unwrap());
-    }
-    
-    let row = sqlx::query(
-        "SELECT p.id, p.name, p.alias1, p.alias2, p.spec, p.unit, p.base_unit, p.base_price, p.purchase_price, p.shelf_life,
-                COALESCE(NULLIF((SELECT price FROM product_price WHERE product_id = p.id AND price_type = 'gov_procurement'), 0),
-                         (SELECT AVG(price) FROM product_price WHERE product_id = p.id AND price_type IN ('supermarket_1','supermarket_2','supermarket_3','ai_realtime') AND price > 0),
-                         p.base_price) as selling_price,
-                c.name as category_name
-         FROM product p LEFT JOIN category c ON p.category_id = c.id
-         WHERE p.id = ?"
-    )
-    .bind(product_id.unwrap())
-    .fetch_one(crate::db::pool())
-    .await;
-    
-    match row {
-        Ok(r) => {
-            let product = serde_json::json!({
-                "id": r.get::<i64, _>("id"),
-                "name": r.get::<String, _>("name"),
-                "alias1": r.get::<Option<String>, _>("alias1").unwrap_or_default(),
-                "alias2": r.get::<Option<String>, _>("alias2").unwrap_or_default(),
-                "spec": r.get::<Option<String>, _>("spec").unwrap_or_default(),
-                "unit": r.get::<Option<String>, _>("unit").unwrap_or_default(),
-                "base_unit": r.get::<Option<String>, _>("base_unit").unwrap_or_default(),
-                "base_price": r.get::<f64, _>("base_price"),
-                "purchase_price": if is_super_admin { r.get::<f64, _>("purchase_price") } else { 0.0 },
-                "selling_price": r.get::<f64, _>("selling_price"),
-                "shelf_life": r.get::<Option<String>, _>("shelf_life").unwrap_or_default(),
-                "category_name": r.get::<Option<String>, _>("category_name").unwrap_or_default(),
-            });
-            (StatusCode::OK, serde_json::to_string(&product).unwrap())
-        },
-        Err(_) => (StatusCode::OK, serde_json::to_string(&serde_json::json!({})).unwrap()),
-    }
+    (StatusCode::OK, app.product.by_id(is_super_admin, product_id).await)
 }
 
-pub async fn api_product_search(headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+pub async fn api_product_search(State(app): State<App>, headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     let is_super_admin = crate::auth::get_user_ctx(&headers).await.role == "super_admin";
-    let keyword = params.get("keyword").filter(|s| !s.is_empty());
-    if keyword.is_none() {
-        return (StatusCode::OK, serde_json::to_string(&Vec::<serde_json::Value>::new()).unwrap());
-    }
+    let keyword = params.get("keyword").filter(|s| !s.is_empty()).cloned();
     // audited=1：仅返回已审核商品（开单商品选择用）
     let only_audited = params.get("audited").map(|s| s == "1").unwrap_or(false);
-    
-    let pattern = format!("%{}%", keyword.unwrap());
-    
-    let where_clause = if only_audited {
-        "WHERE p.status = 1 AND p.audit_status = 'confirmed' AND (p.name LIKE ? OR p.alias1 LIKE ? OR p.alias2 LIKE ?)"
-    } else {
-        "WHERE p.status = 1 AND (p.name LIKE ? OR p.alias1 LIKE ? OR p.alias2 LIKE ?)"
-    };
-    let sql = format!(
-        "SELECT p.id, p.name, p.alias1, p.alias2, p.spec, p.unit, p.base_unit, p.base_price, p.purchase_price,
-                COALESCE(NULLIF((SELECT price FROM product_price WHERE product_id = p.id AND price_type = 'gov_procurement'), 0),
-                         (SELECT AVG(price) FROM product_price WHERE product_id = p.id AND price_type IN ('supermarket_1','supermarket_2','supermarket_3','ai_realtime') AND price > 0),
-                         p.base_price) as selling_price,
-                c.name as category_name
-         FROM product p LEFT JOIN category c ON p.category_id = c.id
-         {}
-         ORDER BY p.name",
-        where_clause
-    );
-    let rows = sqlx::query(AssertSqlSafe(sql.as_str()))
-        .bind(&pattern)
-        .bind(&pattern)
-        .bind(&pattern)
-        .fetch_all(crate::db::pool())
-        .await
-        .unwrap_or_default();
-    
-    let products: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|row| serde_json::json!({
-            "id": row.get::<i64, _>("id"),
-            "name": row.get::<String, _>("name"),
-            "alias1": row.get::<Option<String>, _>("alias1"),
-            "alias2": row.get::<Option<String>, _>("alias2"),
-            "spec": row.get::<Option<String>, _>("spec"),
-            "unit": row.get::<String, _>("unit"),
-            "base_unit": row.get::<String, _>("base_unit"),
-            "base_price": row.get::<f64, _>("base_price"),
-            "purchase_price": if is_super_admin { row.get::<f64, _>("purchase_price") } else { 0.0 },
-            "selling_price": row.get::<f64, _>("selling_price"),
-            "category_name": row.get::<Option<String>, _>("category_name"),
-        }))
-        .collect();
-    
-    (StatusCode::OK, serde_json::to_string(&products).unwrap())
+    (StatusCode::OK, app.product.search(is_super_admin, keyword, only_audited).await)
 }
 
-pub async fn api_product_update(headers: axum::http::HeaderMap, Json(mut req): Json<ProductUpdateReq>) -> impl IntoResponse {
+pub async fn api_product_update(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<ProductUpdateReq>) -> impl IntoResponse {
     let role = match crate::auth::check_api_permission(&headers, "/api/product/update").await {
         Err(e) => return e,
         Ok(role) => role,
     };
-    if let Err((code, msg)) = check_basic_not_confirmed("product", req.id).await {
-        return (code, msg);
-    }
-    // 读取旧值用于日志
-    let old_row = sqlx::query(
-        "SELECT base_price, purchase_price, markup_rate, auto_update_price FROM product WHERE id = ?"
-    )
-    .bind(req.id)
-    .fetch_optional(crate::db::pool())
-    .await
-    .ok()
-    .flatten();
-    let (old_base, old_purchase, old_markup, old_auto): (f64, f64, f64, i64) = if let Some(r) = &old_row {
-        (
-            r.get::<f64, _>("base_price"),
-            r.get::<f64, _>("purchase_price"),
-            r.get::<f64, _>("markup_rate"),
-            r.get::<i64, _>("auto_update_price"),
-        )
-    } else {
-        (0.0, 0.0, 0.5, 0)
-    };
-    // 进价仅超级管理员可修改：非 super_admin 忽略前端传入的进价，保持原值
-    if role != "super_admin" {
-        req.purchase_price = Some(old_purchase);
-    }
-
-    let result = sqlx::query(
-        "UPDATE product SET name = ?, spec = ?, alias1 = ?, alias2 = ?, unit = ?, base_unit = ?, base_price = ?, purchase_price = ?, image_url = ?, category_id = ?, markup_rate = ?, auto_update_price = ?, shelf_life = ?, gov_status = ?, audit_status='pending' WHERE id = ?"
-    )
-    .bind(&req.name)
-    .bind(&req.spec)
-    .bind(&req.alias1)
-    .bind(&req.alias2)
-    .bind(&req.unit)
-    .bind(&req.base_unit)
-    .bind(&req.base_price)
-    .bind(&req.purchase_price)
-    .bind(&req.image_url)
-    .bind(&req.category_id)
-    .bind(&req.markup_rate)
-    .bind(&req.auto_update_price)
-    .bind(&req.shelf_life)
-    .bind(req.gov_status.unwrap_or(0))
-    .bind(req.id)
-    .execute(crate::db::pool())
-    .await;
-
-    match result {
-        Ok(_) => {
-            let new_purchase = req.purchase_price.unwrap_or(old_purchase);
-            let new_base = req.base_price.unwrap_or(old_base);
-            // 记录进价变更
-            if (old_purchase - new_purchase).abs() >= 0.001 {
-                log_price_change(
-                    req.id,
-                    "purchase_price",
-                    old_purchase,
-                    new_purchase,
-                    "product_update",
-                    None,
-                    Some("商品编辑修改进价"),
-                ).await;
-            }
-            // 记录售价变更
-            if (old_base - new_base).abs() >= 0.001 {
-                log_price_change(
-                    req.id,
-                    "base_price",
-                    old_base,
-                    new_base,
-                    "product_update",
-                    None,
-                    Some("商品编辑修改售价"),
-                ).await;
-            }
-            // 若加成率或 auto_update_price 改变，触发重算
-            let new_markup = req.markup_rate.unwrap_or(old_markup);
-            let new_auto = req.auto_update_price.unwrap_or(old_auto);
-            if (old_markup - new_markup).abs() >= 0.001 || old_auto != new_auto {
-                eprintln!(
-                    "[商品编辑] 商品ID={} 加成率/开关变更 旧加成率={:.4} 新加成率={:.4} 旧开关={} 新开关={} 触发售价重算",
-                    req.id, old_markup, new_markup, old_auto, new_auto
-                );
-                recalc_base_price_by_markup(req.id, "product_update", None).await;
-            }
-            (StatusCode::OK, "更新成功".to_string())
-        }
-        Err(e) => {
-            eprintln!("更新商品失败: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "更新失败".to_string())
-        }
+    match app.product.update(role == "super_admin", req).await {
+        Ok(msg) => (StatusCode::OK, msg),
+        Err(e) => text_error_response(e),
     }
 }
 
-pub async fn api_product_delete(headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn api_product_delete(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/product/delete").await {
         Err(e) => return e,
         Ok(_) => {}
     }
 
     let id = req["id"].as_i64().unwrap_or(0);
-    if let Err((code, msg)) = check_basic_not_confirmed("product", id).await {
-        return (code, msg);
-    }
-
-    let check_tables = vec![
-        ("库存", "SELECT COUNT(*) FROM inventory WHERE product_id = ?"),
-        ("采购订单明细", "SELECT COUNT(*) FROM purchase_order_item WHERE product_id = ?"),
-        ("销售订单明细", "SELECT COUNT(*) FROM sales_order_item WHERE product_id = ?"),
-        ("补货/订单调整明细", "SELECT COUNT(*) FROM order_supplement_item WHERE product_id = ?"),
-    ];
-
-    for (name, sql) in check_tables {
-        // 查询本身出错（如表结构变更导致列不存在）必须显式报错，不能静默当作 0 放行
-        let count: i64 = match sqlx::query(sql).bind(id).fetch_one(crate::db::pool()).await {
-            Ok(r) => r.get(0),
-            Err(e) => {
-                eprintln!("校验商品关联数据失败({}): {}", name, e);
-                return (StatusCode::INTERNAL_SERVER_ERROR, format!("校验{}时出错，删除已中止", name));
-            }
-        };
-        if count > 0 {
-            return (StatusCode::BAD_REQUEST, format!("该商品存在{}记录（{}条），无法删除，请先处理关联数据", name, count));
-        }
-    }
-
-    // product 被多张表以外键引用，且数据库开启了 foreign_keys 约束，
-    // 必须先清理附属数据再删商品，否则 DELETE 会因 FOREIGN KEY constraint failed 而失败
-    let mut tx = match crate::db::pool().begin().await {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("删除商品开启事务失败: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "删除失败".to_string());
-        }
-    };
-
-    for sql in [
-        "DELETE FROM product_unit WHERE product_id = ?",
-        "DELETE FROM product_price WHERE product_id = ?",
-        "DELETE FROM product_price_schedule WHERE product_id = ?",
-        "DELETE FROM product_price_log WHERE product_id = ?",
-    ] {
-        if let Err(e) = sqlx::query(sql).bind(id).execute(&mut *tx).await {
-            eprintln!("清理商品附属数据失败: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "删除失败：清理关联数据出错".to_string());
-        }
-    }
-
-    let result = sqlx::query("DELETE FROM product WHERE id = ?")
-        .bind(id)
-        .execute(&mut *tx)
-        .await;
-    match result {
-        Ok(r) => {
-            if r.rows_affected() > 0 {
-                if let Err(e) = tx.commit().await {
-                    eprintln!("删除商品提交事务失败: {}", e);
-                    return (StatusCode::INTERNAL_SERVER_ERROR, "删除失败".to_string());
-                }
-                (StatusCode::OK, "删除成功".to_string())
-            } else {
-                (StatusCode::NOT_FOUND, "商品不存在".to_string())
-            }
-        }
-        Err(e) => {
-            eprintln!("删除商品失败: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("删除失败：{}", e))
-        }
+    match app.product.delete(id).await {
+        Ok(msg) => (StatusCode::OK, msg),
+        Err(e) => text_error_response(e),
     }
 }
 

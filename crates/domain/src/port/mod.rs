@@ -9,6 +9,7 @@
 pub mod audit;
 pub mod category;
 pub mod oplog;
+pub mod product;
 pub mod purchaser;
 pub mod supplier;
 pub mod user;
@@ -17,6 +18,7 @@ pub mod warehouse;
 pub use audit::*;
 pub use category::*;
 pub use oplog::*;
+pub use product::*;
 pub use purchaser::*;
 pub use supplier::*;
 pub use user::*;
