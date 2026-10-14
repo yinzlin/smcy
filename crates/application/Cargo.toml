@@ -16,3 +16,5 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+bcrypt = { workspace = true }
+rand = { workspace = true }

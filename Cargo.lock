@@ -35,10 +35,12 @@ version = "3.7.0"
 dependencies = [
  "anyhow",
  "axum",
+ "bcrypt",
  "chrono",
  "common",
  "database",
  "domain",
+ "rand 0.8.6",
  "rust_xlsxwriter",
  "serde",
  "serde_json",
@@ -575,6 +577,7 @@ version = "3.7.0"
 dependencies = [
  "anyhow",
  "bcrypt",
+ "domain",
  "sqlx",
  "tokio",
 ]

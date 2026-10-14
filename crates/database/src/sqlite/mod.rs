@@ -3,6 +3,8 @@ use sqlx::AssertSqlSafe;
 use sqlx::SqlitePool;
 use std::sync::OnceLock;
 
+pub mod repo;
+
 pub static DB_POOL: OnceLock<SqlitePool> = OnceLock::new();
 
 /// 库存流水重放 SQL：从已审核采购单（confirmed）与已验收/已结算销售单（accepted/settled）

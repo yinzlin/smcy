@@ -1,6 +1,9 @@
-use axum::extract::{Json, Path, Query, Multipart};
+use axum::extract::{Json, Path, Query, Multipart, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
+use application::error::UseCaseError;
+use application::port::user::UserUseCase;
+use crate::di::App;
 use bytes::Bytes;
 use calamine::{open_workbook_auto_from_rs, Data, Reader};
 use chrono::Local;
@@ -22,6 +25,29 @@ use crate::check_sales_order_access;
 use crate::build_accept_excel;
 use serde_json;
 use sqlx::{AssertSqlSafe, Row};
+
+// ---- 用例响应统一映射（六边形 HTTP 适配器侧） ----
+
+fn api_message_json(success: bool, message: &str) -> String {
+    serde_json::to_string(&application::dto::user::ApiMessage { success, message: message.to_string() }).unwrap()
+}
+
+/// UseCaseError → HTTP 响应：Business=200、Unauthorized=401、Storage=500（中文文案逐字节保持）
+fn usecase_error_response(e: UseCaseError) -> (StatusCode, String) {
+    match e {
+        UseCaseError::Business(m) => (StatusCode::OK, api_message_json(false, &m)),
+        UseCaseError::Unauthorized(m) => (StatusCode::UNAUTHORIZED, api_message_json(false, &m)),
+        UseCaseError::Storage(_) => (StatusCode::INTERNAL_SERVER_ERROR, api_message_json(false, "服务器内部错误")),
+    }
+}
+
+/// 用例 Ok(T) 序列化为 200 响应体，Err 走统一错误映射
+fn ok_or_err<T: serde::Serialize>(r: Result<T, UseCaseError>) -> (StatusCode, String) {
+    match r {
+        Ok(v) => (StatusCode::OK, serde_json::to_string(&v).unwrap()),
+        Err(e) => usecase_error_response(e),
+    }
+}
 
 pub async fn api_system_config(Json(data): Json<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     for (key, value) in data {
@@ -244,232 +270,58 @@ pub async fn api_operation_log_export(
     xlsx_response(workbook.save_to_buffer().unwrap(), &filename)
 }
 
-pub async fn api_user_list() -> impl IntoResponse {
-    let rows = sqlx::query("SELECT id, username, nickname, phone, role, status, COALESCE(supplier_id,0) as supplier_id, COALESCE(purchaser_id,0) as purchaser_id FROM user_account WHERE status = 1 ORDER BY id")
-        .fetch_all(crate::db::pool())
-        .await
-        .unwrap_or_default();
-    let list: Vec<serde_json::Value> = rows.iter().map(|r| {
-        serde_json::json!({
-            "id": r.get::<i64, _>("id"),
-            "username": r.get::<String, _>("username"),
-            "nickname": r.get::<Option<String>, _>("nickname").unwrap_or_default(),
-            "phone": r.get::<Option<String>, _>("phone").unwrap_or_default(),
-            "role": r.get::<String, _>("role"),
-            "supplier_id": r.get::<i64, _>("supplier_id"),
-            "purchaser_id": r.get::<i64, _>("purchaser_id"),
-        })
-    }).collect();
-    (StatusCode::OK, serde_json::to_string(&list).unwrap())
+pub async fn api_user_list(State(app): State<App>) -> impl IntoResponse {
+    ok_or_err(app.user.list_active().await)
 }
 
-pub async fn api_user_get(Path(id): Path<i64>) -> impl IntoResponse {
-    let rows = sqlx::query("SELECT id, username, nickname, role, status, COALESCE(supplier_id,0) as supplier_id, COALESCE(purchaser_id,0) as purchaser_id FROM user_account WHERE id = ?")
-        .bind(id)
-        .fetch_all(crate::db::pool())
-        .await
-        .unwrap_or_default();
-    
-    if rows.is_empty() {
-        return (StatusCode::OK, serde_json::to_string(&serde_json::json!({
-            "success": false,
-            "message": "用户不存在"
-        })).unwrap());
-    }
-    
-    let row = &rows[0];
-    (StatusCode::OK, serde_json::to_string(&serde_json::json!({
-        "success": true,
-        "user": {
-            "id": row.get::<i64, _>("id"),
-            "username": row.get::<String, _>("username"),
-            "nickname": row.get::<String, _>("nickname"),
-            "role": row.get::<String, _>("role"),
-            "status": row.get::<i32, _>("status"),
-            "supplier_id": row.get::<i64, _>("supplier_id"),
-            "purchaser_id": row.get::<i64, _>("purchaser_id")
-        }
-    })).unwrap())
+pub async fn api_user_get(State(app): State<App>, Path(id): Path<i64>) -> impl IntoResponse {
+    ok_or_err(app.user.get_detail(id).await)
 }
 
 // 获取当前登录用户最近保存的"联系方式"（销售订单主表单输入框的回填值）
-pub async fn api_user_get_contact_phone(headers: axum::http::HeaderMap) -> impl IntoResponse {
+pub async fn api_user_get_contact_phone(State(app): State<App>, headers: axum::http::HeaderMap) -> impl IntoResponse {
     let ctx = crate::auth::get_user_ctx(&headers).await;
-    let user_id = ctx.user_id;
-    let row = sqlx::query("SELECT COALESCE(contact_phone, '') as contact_phone FROM user_account WHERE id = ?")
-        .bind(user_id)
-        .fetch_optional(crate::db::pool())
-        .await
-        .unwrap_or(None);
-    let phone: String = match row {
-        Some(r) => r.try_get("contact_phone").unwrap_or_default(),
-        None => String::new(),
-    };
-    (StatusCode::OK, serde_json::to_string(&serde_json::json!({
-        "success": true,
-        "contact_phone": phone
-    })).unwrap())
+    ok_or_err(app.user.get_contact_phone(ctx.user_id).await)
 }
 
 // 更新当前登录用户最近保存的"联系方式"。
 // 销售订单保存时同步调用：把用户在主表单输入框填的联系方式持久化，
 // 下次打开销售订单页 / 新建时由前端 GET 拉回作为默认值。
-pub async fn api_user_set_contact_phone(headers: axum::http::HeaderMap, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn api_user_set_contact_phone(State(app): State<App>, headers: axum::http::HeaderMap, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
     let ctx = crate::auth::get_user_ctx(&headers).await;
-    let user_id = ctx.user_id;
-    if user_id <= 0 {
-        return (StatusCode::UNAUTHORIZED, serde_json::to_string(&serde_json::json!({
-            "success": false,
-            "message": "未登录"
-        })).unwrap());
-    }
     let phone = data["contact_phone"].as_str().unwrap_or("").trim().to_string();
-    let _ = sqlx::query("UPDATE user_account SET contact_phone = ? WHERE id = ?")
-        .bind(&phone)
-        .bind(user_id)
-        .execute(crate::db::pool())
-        .await;
-    (StatusCode::OK, serde_json::to_string(&serde_json::json!({
-        "success": true,
-        "contact_phone": phone
-    })).unwrap())
+    ok_or_err(app.user.set_contact_phone(ctx.user_id, phone).await)
 }
 
-pub async fn api_user_create(Json(data): Json<serde_json::Value>) -> impl IntoResponse {
-    let username = data["username"].as_str().unwrap_or("");
-    let password = data["password"].as_str().unwrap_or("");
-    let nickname = data["nickname"].as_str().unwrap_or("");
-    let role = data["role"].as_str().unwrap_or("user");
-    let supplier_id = data["supplier_id"].as_i64().unwrap_or(0);
-    let purchaser_id = data["purchaser_id"].as_i64().unwrap_or(0);
-    
-    if username.is_empty() {
-        return (StatusCode::OK, serde_json::to_string(&serde_json::json!({
-            "success": false,
-            "message": "用户名不能为空"
-        })).unwrap());
-    }
-    
-    if password.is_empty() {
-        return (StatusCode::OK, serde_json::to_string(&serde_json::json!({
-            "success": false,
-            "message": "密码不能为空"
-        })).unwrap());
-    }
-    
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_account WHERE username = ?)")
-        .bind(username)
-        .fetch_one(crate::db::pool())
-        .await
-        .unwrap_or(false);
-    
-    if exists {
-        return (StatusCode::OK, serde_json::to_string(&serde_json::json!({
-            "success": false,
-            "message": "用户名已存在"
-        })).unwrap());
-    }
-    
-    let hashed_pwd = bcrypt::hash(password, bcrypt::DEFAULT_COST).unwrap();
-    
-    sqlx::query("INSERT INTO user_account (username, password, nickname, role, supplier_id, purchaser_id) VALUES (?, ?, ?, ?, ?, ?)")
-        .bind(username)
-        .bind(hashed_pwd)
-        .bind(nickname)
-        .bind(role)
-        .bind(supplier_id)
-        .bind(purchaser_id)
-        .execute(crate::db::pool())
-        .await
-        .ok();
-    
-    (StatusCode::OK, serde_json::to_string(&serde_json::json!({
-        "success": true,
-        "message": "用户创建成功"
-    })).unwrap())
+pub async fn api_user_create(State(app): State<App>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
+    ok_or_err(app.user.create(application::dto::user::CreateUserCmd {
+        username: data["username"].as_str().unwrap_or("").to_string(),
+        password: data["password"].as_str().unwrap_or("").to_string(),
+        nickname: data["nickname"].as_str().unwrap_or("").to_string(),
+        role: data["role"].as_str().unwrap_or("user").to_string(),
+        supplier_id: data["supplier_id"].as_i64().unwrap_or(0),
+        purchaser_id: data["purchaser_id"].as_i64().unwrap_or(0),
+    }).await)
 }
 
-pub async fn api_user_update(Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
-    let username = data["username"].as_str().unwrap_or("");
-    let password = data["password"].as_str().unwrap_or("");
-    let nickname = data["nickname"].as_str().unwrap_or("");
-    let role = data["role"].as_str().unwrap_or("");
-    let supplier_id = data["supplier_id"].as_i64().unwrap_or(0);
-    let purchaser_id = data["purchaser_id"].as_i64().unwrap_or(0);
-    
-    if username.is_empty() {
-        return (StatusCode::OK, serde_json::to_string(&serde_json::json!({
-            "success": false,
-            "message": "用户名不能为空"
-        })).unwrap());
-    }
-    
-    if !password.is_empty() {
-        let hashed_pwd = bcrypt::hash(password, bcrypt::DEFAULT_COST).unwrap();
-        sqlx::query("UPDATE user_account SET password = ? WHERE id = ?")
-            .bind(hashed_pwd)
-            .bind(id)
-            .execute(crate::db::pool())
-            .await
-            .ok();
-    }
-    
-    if role.is_empty() {
-        sqlx::query("UPDATE user_account SET username = ?, nickname = ?, supplier_id = ?, purchaser_id = ?, update_at = datetime('now','localtime') WHERE id = ?")
-            .bind(username)
-            .bind(nickname)
-            .bind(supplier_id)
-            .bind(purchaser_id)
-            .bind(id)
-            .execute(crate::db::pool())
-            .await
-            .ok();
-    } else {
-        sqlx::query("UPDATE user_account SET username = ?, nickname = ?, role = ?, supplier_id = ?, purchaser_id = ?, update_at = datetime('now','localtime') WHERE id = ?")
-            .bind(username)
-            .bind(nickname)
-            .bind(role)
-            .bind(supplier_id)
-            .bind(purchaser_id)
-            .bind(id)
-            .execute(crate::db::pool())
-            .await
-            .ok();
-    }
-    
-    (StatusCode::OK, serde_json::to_string(&serde_json::json!({
-        "success": true,
-        "message": "用户更新成功"
-    })).unwrap())
+pub async fn api_user_update(State(app): State<App>, Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
+    ok_or_err(app.user.update(application::dto::user::UpdateUserCmd {
+        id,
+        username: data["username"].as_str().unwrap_or("").to_string(),
+        password: data["password"].as_str().unwrap_or("").to_string(),
+        nickname: data["nickname"].as_str().unwrap_or("").to_string(),
+        role: data["role"].as_str().unwrap_or("").to_string(),
+        supplier_id: data["supplier_id"].as_i64().unwrap_or(0),
+        purchaser_id: data["purchaser_id"].as_i64().unwrap_or(0),
+    }).await)
 }
 
-pub async fn api_user_delete(Path(id): Path<i64>) -> impl IntoResponse {
-    sqlx::query("DELETE FROM user_account WHERE id = ?")
-        .bind(id)
-        .execute(crate::db::pool())
-        .await
-        .ok();
-    
-    (StatusCode::OK, serde_json::to_string(&serde_json::json!({
-        "success": true,
-        "message": "用户删除成功"
-    })).unwrap())
+pub async fn api_user_delete(State(app): State<App>, Path(id): Path<i64>) -> impl IntoResponse {
+    ok_or_err(app.user.delete(id).await)
 }
 
-pub async fn api_user_status(Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
-    let status = data["status"].as_i64().unwrap_or(0);
-    
-    sqlx::query("UPDATE user_account SET status = ?, update_at = datetime('now','localtime') WHERE id = ?")
-        .bind(status)
-        .bind(id)
-        .execute(crate::db::pool())
-        .await
-        .ok();
-    
-    (StatusCode::OK, serde_json::to_string(&serde_json::json!({
-        "success": true,
-        "message": "状态更新成功"
-    })).unwrap())
+pub async fn api_user_status(State(app): State<App>, Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
+    ok_or_err(app.user.set_status(id, data["status"].as_i64().unwrap_or(0)).await)
 }
 
 pub async fn api_backup() -> impl IntoResponse {
@@ -1060,69 +912,19 @@ pub async fn api_supplier_import(content: Bytes) -> impl IntoResponse {
     (StatusCode::OK, format!("导入完成：成功 {} 条，失败 {} 条", success, failed)).into_response()
 }
 
-pub async fn api_login(Json(data): Json<LoginReq>) -> impl IntoResponse {
-    let rows = sqlx::query(
-        "SELECT id, username, password, nickname, role, status FROM user_account WHERE username = ?"
-    )
-    .bind(&data.username)
-    .fetch_all(crate::db::pool())
-    .await
-    .unwrap_or_default();
-    
-    if rows.is_empty() {
-        return (StatusCode::OK, serde_json::to_string(&serde_json::json!({
-            "success": false,
-            "message": "用户名不存在"
-        })).unwrap()).into_response();
-    }
-    
-    let row = &rows[0];
-    let password_hash: String = row.get("password");
-    let status: i32 = row.get("status");
-    
-    if status != 1 {
-        return (StatusCode::OK, serde_json::to_string(&serde_json::json!({
-            "success": false,
-            "message": "账号已被禁用"
-        })).unwrap()).into_response();
-    }
-    
-    if !bcrypt::verify(&data.password, &password_hash).unwrap_or(false) {
-        return (StatusCode::OK, serde_json::to_string(&serde_json::json!({
-            "success": false,
-            "message": "密码错误"
-        })).unwrap()).into_response();
-    }
-    
-    let user_id: i64 = row.get("id");
-    let nickname: String = row.get("nickname");
-    let role: String = row.get("role");
-    
-    let session_token = format!("{}:{:x}", user_id, rand::random::<u128>());
-    
-    sqlx::query("UPDATE user_account SET last_login_time = datetime('now','localtime') WHERE id = ?")
-        .bind(user_id)
-        .execute(crate::db::pool())
-        .await
-        .ok();
-    
-    let body = serde_json::to_string(&serde_json::json!({
-        "success": true,
-        "message": "登录成功",
-        "user": {
-            "id": user_id,
-            "username": data.username,
-            "nickname": nickname,
-            "role": role
+pub async fn api_login(State(app): State<App>, Json(data): Json<LoginReq>) -> impl IntoResponse {
+    match app.user.login(data.username.clone(), data.password.clone()).await {
+        Ok(outcome) => {
+            let body = serde_json::to_string(&outcome.body).unwrap();
+            axum::response::Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/json")
+                .header("Set-Cookie", format!("session={}; HttpOnly; Path=/", outcome.session_token))
+                .body(axum::body::Body::from(body))
+                .unwrap()
         }
-    })).unwrap();
-    
-    axum::response::Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "application/json")
-        .header("Set-Cookie", format!("session={}; HttpOnly; Path=/", session_token))
-        .body(axum::body::Body::from(body))
-        .unwrap()
+        Err(e) => usecase_error_response(e).into_response(),
+    }
 }
 
 pub async fn api_logout() -> impl IntoResponse {
@@ -1139,7 +941,7 @@ pub async fn api_logout() -> impl IntoResponse {
         .unwrap()
 }
 
-pub async fn api_login_check(headers: axum::http::HeaderMap) -> impl IntoResponse {
+pub async fn api_login_check(State(app): State<App>, headers: axum::http::HeaderMap) -> impl IntoResponse {
     let session_token = headers.get("cookie")
         .and_then(|v| v.to_str().ok())
         .and_then(|cookies| {
@@ -1147,20 +949,20 @@ pub async fn api_login_check(headers: axum::http::HeaderMap) -> impl IntoRespons
                 .map(|s| s.trim().strip_prefix("session=").unwrap_or(""))
         })
         .unwrap_or("");
-    
+
     if session_token.is_empty() {
         return (StatusCode::OK, serde_json::to_string(&serde_json::json!({
             "logged_in": false
         })).unwrap());
     }
-    
+
     let parts: Vec<&str> = session_token.split(':').collect();
     if parts.len() < 2 {
         return (StatusCode::OK, serde_json::to_string(&serde_json::json!({
             "logged_in": false
         })).unwrap());
     }
-    
+
     let user_id = match parts[0].parse::<i64>() {
         Ok(id) => id,
         Err(_) => {
@@ -1169,35 +971,8 @@ pub async fn api_login_check(headers: axum::http::HeaderMap) -> impl IntoRespons
             })).unwrap());
         }
     };
-    
-    let rows = sqlx::query(
-        "SELECT id, username, nickname, role FROM user_account WHERE id = ? AND status = 1"
-    )
-    .bind(user_id)
-    .fetch_all(crate::db::pool())
-    .await
-    .unwrap_or_default();
-    
-    if rows.is_empty() {
-        return (StatusCode::OK, serde_json::to_string(&serde_json::json!({
-            "logged_in": false
-        })).unwrap());
-    }
-    
-    let row = &rows[0];
-    let username: String = row.get("username");
-    let nickname: String = row.get("nickname");
-    let role: String = row.get("role");
-    
-    (StatusCode::OK, serde_json::to_string(&serde_json::json!({
-        "logged_in": true,
-        "user": {
-            "id": user_id,
-            "username": username,
-            "nickname": nickname,
-            "role": role
-        }
-    })).unwrap())
+
+    ok_or_err(app.user.login_check(user_id).await)
 }
 
 pub async fn api_supplier_list(axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {

@@ -27,8 +27,8 @@ fn main() {
             .build()
             .expect("创建 runtime 失败");
         rt.block_on(async {
-            di::bootstrap().await;
-            let app = api::routes::build_router();
+            let state = di::bootstrap().await;
+            let app = api::routes::build_router().with_state(state);
             let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 80));
             let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
             axum::serve(listener, app).await.unwrap();

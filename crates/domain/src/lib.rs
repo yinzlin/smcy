@@ -1,3 +1,6 @@
+pub mod error;
+pub mod port;
+
 use serde::{Deserialize, Serialize};
 
 /// 当前登录用户的上下文（角色 + 用户ID + 行级数据权限关联）

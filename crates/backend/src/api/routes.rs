@@ -8,8 +8,9 @@ use axum::{
 
 use crate::api::handlers::*;
 use crate::app_assets::*;
+use crate::di::App;
 
-pub fn build_router() -> Router {
+pub fn build_router() -> Router<App> {
     Router::new()
         .route("/", get(redirect_app_index))
         .route("/supplier", get(redirect_app_supplier))
