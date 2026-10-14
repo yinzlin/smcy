@@ -10,6 +10,7 @@ use application::service::price_schedule::PriceScheduleService;
 use application::service::product::ProductService;
 use application::service::purchase_order::PurchaseOrderService;
 use application::service::purchaser::PurchaserService;
+use application::service::sales_order::SalesOrderService;
 use application::service::supplier::SupplierService;
 use application::service::today_price::TodayPriceService;
 use application::service::user::UserService;
@@ -22,6 +23,7 @@ use database::sqlite::repo::price_schedule::SqlitePriceScheduleRepo;
 use database::sqlite::repo::product::SqliteProductRepo;
 use database::sqlite::repo::purchase_order::SqlitePurchaseOrderRepo;
 use database::sqlite::repo::purchaser::SqlitePurchaserRepo;
+use database::sqlite::repo::sales_order::SqliteSalesOrderRepo;
 use database::sqlite::repo::supplier::SqliteSupplierRepo;
 use database::sqlite::repo::today_price::SqliteTodayPriceRepo;
 use database::sqlite::repo::user::SqliteUserRepo;
@@ -78,6 +80,7 @@ pub struct App {
     pub price_schedule: PriceScheduleService<SqlitePriceScheduleRepo>,
     pub inventory: InventoryService<SqliteInventoryRepo>,
     pub purchase_order: PurchaseOrderService<SqlitePurchaseOrderRepo>,
+    pub sales_order: SalesOrderService<SqliteSalesOrderRepo>,
 }
 
 /// 初始化数据库；如有待重建的 price_schedule 时段则补跑重建，完成后升级 user_version
@@ -104,5 +107,6 @@ pub async fn bootstrap() -> App {
         price_schedule: PriceScheduleService::new(SqlitePriceScheduleRepo::new(database::pool().clone())),
         inventory: InventoryService::new(SqliteInventoryRepo::new(database::pool().clone())),
         purchase_order: PurchaseOrderService::new(SqlitePurchaseOrderRepo::new(database::pool().clone())),
+        sales_order: SalesOrderService::new(SqliteSalesOrderRepo::new(database::pool().clone())),
     }
 }

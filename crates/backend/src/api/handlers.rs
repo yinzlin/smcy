@@ -9,19 +9,20 @@ use application::port::price_schedule::PriceScheduleUseCase;
 use application::port::product::ProductUseCase;
 use application::port::purchase_order::PurchaseOrderUseCase;
 use application::port::purchaser::PurchaserUseCase;
+use application::port::sales_order::SalesOrderUseCase;
 use application::port::supplier::SupplierUseCase;
 use application::port::today_price::TodayPriceUseCase;
 use application::port::user::UserUseCase;
 use application::port::warehouse::WarehouseUseCase;
 use crate::di::App;
 use bytes::Bytes;
-use database::sqlite::repo::stock_writer;
 use calamine::{open_workbook_auto_from_rs, Data, Reader};
 use chrono::Local;
 use domain::port::audit::BasicTable;
 use domain::port::price_schedule::ScheduleFilter;
 use domain::port::purchase_order::PurchaseOrderListFilter;
 use domain::port::purchaser::UpsertPurchaser;
+use domain::port::sales_order::SalesOrderListFilter;
 use domain::port::supplier::UpsertSupplier;
 use domain::port::today_price::TodayPriceSaveItem;
 use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder, Workbook, XlsxError};
@@ -957,21 +958,6 @@ pub async fn api_supplier_delete(State(app): State<App>, headers: axum::http::He
 // audit_status：pending=待审核，confirmed=已审核
 // 审核/反审核仅超级管理员可执行（超级用户始终拥有最高权限），操作记入审计日志
 // （set_basic_audit_status / check_basic_not_confirmed 已随六边形化迁移至 application 用例层）
-
-/// 基础数据是否已审核（下单校验用；id<=0 视为通过，避免误伤无关联的零值）
-async fn is_audit_confirmed(table: &str, id: i64) -> bool {
-    if id <= 0 {
-        return true;
-    }
-    let sql = format!("SELECT audit_status FROM {} WHERE id = ?", table);
-    sqlx::query_scalar::<_, String>(AssertSqlSafe(sql.as_str()))
-        .bind(id)
-        .fetch_optional(crate::db::pool())
-        .await
-        .unwrap_or(None)
-        .as_deref()
-        == Some("confirmed")
-}
 
 pub async fn api_supplier_approve(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
     let id = req["id"].as_i64().unwrap_or(0);
@@ -2135,55 +2121,6 @@ pub async fn api_purchase_order_settle(State(app): State<App>, headers: axum::ht
 ///   已消耗 = stock_movement 销售净出库（out 为正、撤销冲销 in 为负）；
 ///   按队列顺序抵扣消耗后，第一个剩余量 > 0 的批次即为最早批次。
 /// 返回 (production_date, batch_no)；无批次数据（无采购明细/全部消耗完）返回 (None, None)。
-pub(crate) async fn fifo_earliest_batch(product_id: i64) -> (Option<String>, Option<String>) {
-    // 批次队列：入库口径与 write_stock_movements_for_audit 一致（审核及之后状态的采购单）
-    // 注意：历史数据 production_date 可能是空串而非 NULL，必须 NULLIF 归一，否则 COALESCE 不生效、
-    // 空串排序键反而排在真实日期之前，FIFO 指针会错误落在无批次采购行上
-    let rows = sqlx::query(
-        "SELECT poi.id,
-                CASE WHEN poi.base_quantity > 0 THEN poi.base_quantity
-                     ELSE poi.quantity * COALESCE(
-                         (SELECT pu.ratio FROM product_unit pu
-                          WHERE pu.product_id = poi.product_id AND pu.unit_name = poi.unit), 1)
-                END AS eff_base,
-                NULLIF(poi.production_date, '') AS production_date,
-                NULLIF(poi.batch_no, '') AS batch_no
-         FROM purchase_order_item poi
-         JOIN purchase_order po ON poi.order_id = po.id
-         WHERE poi.product_id = ?
-           AND po.status IN ('confirmed','sorting','sorted','delivering','delivered','accepted','settled')
-         ORDER BY COALESCE(NULLIF(poi.production_date, ''), po.order_date) ASC, poi.id ASC"
-    )
-    .bind(product_id)
-    .fetch_all(crate::db::pool())
-    .await
-    .unwrap_or_default();
-
-    // 净出库：销售出库 out 为正，撤销验收冲销 in 为负（撤销后批次自动"退回"队列）
-    let net_out: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(CASE WHEN direction='out' THEN base_quantity ELSE -base_quantity END), 0.0)
-         FROM stock_movement WHERE product_id = ? AND movement_type = 'sales'"
-    )
-    .bind(product_id)
-    .fetch_one(crate::db::pool())
-    .await
-    .unwrap_or(0.0);
-
-    let mut remaining = net_out;
-    for r in rows {
-        let qty: f64 = r.get("eff_base");
-        let prod: Option<String> = r.get("production_date");
-        let batch: Option<String> = r.get("batch_no");
-        if qty <= 0.0 { continue; }
-        if remaining >= qty {
-            remaining -= qty;
-            continue;
-        }
-        // 该批次仍有剩余 → 即最早未消耗完的批次（NULLIF 已把空串归一为 None）
-        return (prod, batch);
-    }
-    (None, None)
-}
 
 pub async fn api_purchase_order_approve(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/purchase_order/approve").await {
@@ -2273,483 +2210,62 @@ pub async fn api_purchase_order_import(State(app): State<App>, headers: axum::ht
     }
 }
 
-pub async fn api_sales_order_detail(headers: axum::http::HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
+pub async fn api_sales_order_detail(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
     let ctx = crate::auth::get_user_ctx(&headers).await;
-
-    // 行级数据权限：先确认订单存在并校验归属
-    let exists_row: Option<(i64,)> = sqlx::query_as("SELECT purchaser_id FROM sales_order WHERE id = ?")
-        .bind(id)
-        .fetch_optional(crate::db::pool())
-        .await
-        .unwrap_or(None);
-
-    let exists = match exists_row {
-        Some((pid,)) => {
-            if !crate::auth::can_access_sales_order(&ctx, pid) {
-                return (StatusCode::FORBIDDEN, "您没有权限查看此订单".to_string());
-            }
-            true
-        }
-        None => false,
-    };
-
-    if !exists {
-        return (StatusCode::NOT_FOUND, format!("订单不存在 (ID: {})", id).to_string());
-    }
-
-    let order_row = sqlx::query(
-        "SELECT so.id, so.purchaser_id, so.order_no, so.order_date, so.total_amount, so.discount_rate, so.amount_reduction, so.final_amount, so.status, so.version, so.remark, so.warehouse_id, so.warehouse_name, so.customer_order_image, so.signed_order_image, so.supplier_company, so.truck_plate, so.is_settled, COALESCE(p.name, '') as purchaser_name
-         FROM sales_order so LEFT JOIN purchaser p ON so.purchaser_id = p.id WHERE so.id = ?"
-    )
-    .bind(id)
-    .fetch_optional(crate::db::pool())
-    .await;
-
-    let row = match order_row {
-        Ok(Some(r)) => r,
-        Ok(None) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("订单存在但JOIN查询失败 (ID: {})", id).to_string());
-        }
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("查询失败：{}", e).to_string());
-        }
-    };
-    
-    let item_rows = match sqlx::query(
-        "SELECT id, product_id, product_name, alias1, alias2, spec, unit, unit_price, quantity, base_quantity, amount, pre_sale_quantity, supplier_id, supplier_name, production_date, batch_no, remark FROM sales_order_item WHERE order_id = ?"
-    )
-    .bind(id)
-    .fetch_all(crate::db::pool())
-    .await {
-        Ok(rows) => rows,
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("查询订单明细失败：{}", e).to_string());
-        }
-    };
-    
-    let items: Vec<serde_json::Value> = item_rows
-        .iter()
-        .map(|r| serde_json::json!({
-            "id": r.get::<i64, _>("id"),
-            "product_id": r.get::<i64, _>("product_id"),
-            "product_name": r.get::<String, _>("product_name"),
-            "alias1": r.get::<Option<String>, _>("alias1"),
-            "alias2": r.get::<Option<String>, _>("alias2"),
-            "spec": r.get::<Option<String>, _>("spec"),
-            "unit": r.get::<Option<String>, _>("unit"),
-            "unit_price": r.get::<f64, _>("unit_price"),
-            "quantity": r.get::<f64, _>("quantity"),
-            "base_quantity": r.get::<Option<f64>, _>("base_quantity"),
-            "amount": r.get::<f64, _>("amount"),
-            "pre_sale_quantity": r.get::<Option<f64>, _>("pre_sale_quantity"),
-            "supplier_id": r.get::<Option<i64>, _>("supplier_id"),
-            "supplier_name": r.get::<Option<String>, _>("supplier_name"),
-            "production_date": r.get::<Option<String>, _>("production_date"),
-            "batch_no": r.get::<Option<String>, _>("batch_no"),
-            "remark": r.get::<Option<String>, _>("remark"),
-        }))
-        .collect();
-    
-    let order = serde_json::json!({
-        "id": row.get::<i64, _>("id"),
-        "purchaser_id": row.get::<i64, _>("purchaser_id"),
-        "order_no": row.get::<String, _>("order_no"),
-        "order_date": row.get::<String, _>("order_date"),
-        "total_amount": row.get::<f64, _>("total_amount"),
-        "discount_rate": row.get::<f64, _>("discount_rate"),
-        "amount_reduction": row.get::<f64, _>("amount_reduction"),
-        "final_amount": row.get::<f64, _>("final_amount"),
-        "warehouse_id": row.get::<Option<i64>, _>("warehouse_id"),
-        "warehouse_name": row.get::<Option<String>, _>("warehouse_name"),
-        "status": row.get::<String, _>("status"),
-        "version": row.get::<i64, _>("version"),
-        "remark": row.get::<Option<String>, _>("remark"),
-        "customer_order_image": row.get::<Option<String>, _>("customer_order_image"),
-        "signed_order_image": row.get::<Option<String>, _>("signed_order_image"),
-        "supplier_company": row.get::<Option<String>, _>("supplier_company"),
-        "truck_plate": row.get::<Option<String>, _>("truck_plate"),
-        "is_settled": row.get::<i64, _>("is_settled"),
-        "purchaser_name": row.get::<String, _>("purchaser_name"),
-        "items": items,
-    });
-    
-    match serde_json::to_string(&order) {
-        Ok(json_str) => (StatusCode::OK, json_str),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("序列化订单JSON失败：{}", e).to_string()),
+    match app.sales_order.detail(id, &ctx).await {
+        Ok(json) => (StatusCode::OK, json),
+        Err(e) => text_error_response(e),
     }
 }
 
-pub async fn api_sales_order_update(headers: axum::http::HeaderMap, Json(req): Json<SalesOrderReq>) -> impl IntoResponse {
+pub async fn api_sales_order_update(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<SalesOrderReq>) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/sales_order/update").await {
         Err(e) => return e,
         Ok(_) => {}
     }
     let ctx = crate::auth::get_user_ctx(&headers).await;
-
-    // 行级数据权限：先查订单所属采购单位
-    let order = sqlx::query("SELECT purchaser_id, status, order_date FROM sales_order WHERE id = ?")
-        .bind(req.id)
-        .fetch_optional(crate::db::pool())
-        .await
-        .ok()
-        .flatten();
-    let order = match order {
-        Some(o) => o,
-        None => return (StatusCode::NOT_FOUND, "订单不存在".to_string()),
-    };
-    let order_purchaser_id: i64 = order.get("purchaser_id");
-    let order_status: String = order.get("status");
-    if !crate::auth::can_access_sales_order(&ctx, order_purchaser_id) {
-        return (StatusCode::FORBIDDEN, "您没有权限操作此订单".to_string());
-    }
-    // 仅待审核（pending）状态允许修改；已审核/已流转的订单必须反审核后才能修改（防篡改）
-    if order_status != "pending" {
-        return (StatusCode::BAD_REQUEST, format!("当前订单状态为「{}」，仅待审核状态的订单允许修改；已审核订单需管理员反审核后才能修改", order_status));
-    }
-    // 价格策略时段补价：编辑时若修改了 order_date 为历史日期，对 unit_price=0 的明细
-    // 仍按当前 req.order_date 自动补价。
-    let mut req = req; // shadow mutable for补价
-    if !req.items.is_empty() {
-        let order_date_short = if req.order_date.len() >= 10 { req.order_date[..10].to_string() } else { req.order_date.clone() };
-        if !order_date_short.is_empty() && crate::is_valid_date_str(&order_date_short) {
-            let mut product_ids: Vec<i64> = Vec::new();
-            for it in &req.items {
-                if it.product_id > 0 && it.unit_price <= 0.0 {
-                    product_ids.push(it.product_id);
-                }
+    match app.sales_order.update(req, &ctx).await {
+        Ok(outcome) => {
+            for log in &outcome.logs {
+                crate::auth::log_operation(&ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
             }
-            if !product_ids.is_empty() {
-                let gov_map = crate::batch_lookup_effective_prices(&product_ids, "gov_procurement", &order_date_short).await;
-                let sup1_map = crate::batch_lookup_effective_prices(&product_ids, "supermarket_1", &order_date_short).await;
-                let sup2_map = crate::batch_lookup_effective_prices(&product_ids, "supermarket_2", &order_date_short).await;
-                let sup3_map = crate::batch_lookup_effective_prices(&product_ids, "supermarket_3", &order_date_short).await;
-                let ai_map = crate::batch_lookup_effective_prices(&product_ids, "ai_realtime", &order_date_short).await;
-                let mut auto_filled = 0;
-                for it in req.items.iter_mut() {
-                    if it.product_id > 0 && it.unit_price <= 0.0 {
-                        // 政采价(>0) 优先，否则商超1/2/3/AI 非零平均价
-                        let gov = gov_map.get(&it.product_id).copied().filter(|p| *p > 0.0);
-                        let new_price = if let Some(g) = gov {
-                            g
-                        } else {
-                            let vals: Vec<f64> = [
-                                sup1_map.get(&it.product_id).copied().unwrap_or(0.0),
-                                sup2_map.get(&it.product_id).copied().unwrap_or(0.0),
-                                sup3_map.get(&it.product_id).copied().unwrap_or(0.0),
-                                ai_map.get(&it.product_id).copied().unwrap_or(0.0),
-                            ].into_iter().filter(|v| *v > 0.0).collect();
-                            if vals.is_empty() {
-                                0.0
-                            } else {
-                                (vals.iter().sum::<f64>() / vals.len() as f64 * 100.0).round() / 100.0
-                            }
-                        };
-                        if new_price > 0.0 {
-                            it.unit_price = new_price;
-                            if it.quantity > 0.0 && it.amount <= 0.0 {
-                                it.amount = new_price * it.quantity;
-                            }
-                            auto_filled += 1;
-                        }
-                    }
-                }
-                if auto_filled > 0 {
-                    crate::auth::log_operation(&ctx, "价格策略自动补价", "sales_order", &req.id.unwrap_or(0).to_string(),
-                        &format!("销售单编辑按 order_date={} 自动补价 {} 条", order_date_short, auto_filled)).await;
-                }
-            }
+            (StatusCode::OK, outcome.body)
         }
+        Err(e) => text_error_response(e),
     }
-    // 强制乐观锁：req.version 必须传入且 > 0
-    let ver = match req.version {
-        Some(v) if v > 0 => v,
-        _ => return (StatusCode::BAD_REQUEST, "保存失败：缺少订单版本号，请刷新页面后重试".to_string()),
-    };
-    // 安全护栏：更新时明细不允许为空（防止并发覆盖导致明细被清空）
-    if req.items.is_empty() {
-        return (StatusCode::BAD_REQUEST, "保存失败：订单明细不能为空".to_string());
-    }
-
-    // 用 BEGIN IMMEDIATE 启动写事务，立即获得 SQLite 写锁（RESERVED）。
-    // 作用：把"主表 UPDATE + 明细全量重写"整体串行化，
-    // 杜绝连点两次保存时两个事务都读到同一 version、都通过乐观锁、然后后提交的事务用全量 items
-    // 把先提交的事务的明细覆盖/丢失。
-    let mut tx = match crate::db::pool().begin_with("BEGIN IMMEDIATE").await {
-        Ok(t) => t,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "更新失败：事务启动失败".to_string()),
-    };
-
-    // 事务内做"主表 UPDATE + version 自增"：WHERE 同时校验 id 和 version。
-    let upd = sqlx::query(
-        "UPDATE sales_order SET purchaser_id = ?, order_no = ?, order_date = ?, total_amount = ?, discount_rate = ?, amount_reduction = ?, final_amount = ?, warehouse_id = ?, warehouse_name = ?, remark = ?, supplier_company = ?, truck_plate = ?, is_settled = ?, version = version + 1 WHERE id = ? AND version = ?"
-    )
-    .bind(req.purchaser_id)
-    .bind(&req.order_no)
-    .bind(&req.order_date)
-    .bind(req.total_amount)
-    .bind(req.discount_rate)
-    .bind(req.amount_reduction)
-    .bind(req.final_amount)
-    .bind(req.warehouse_id)
-    .bind(&req.warehouse_name)
-    .bind(&req.remark)
-    .bind(req.supplier_company.as_deref().unwrap_or(""))
-    .bind(req.truck_plate.as_deref().unwrap_or(""))
-    .bind(req.is_settled.unwrap_or(0))
-    .bind(req.id)
-    .bind(ver)
-    .execute(&mut *tx)
-    .await;
-
-    let upd_res = match upd {
-        Ok(r) => r,
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("更新失败: {}", e));
-        }
-    };
-    if upd_res.rows_affected() == 0 {
-        return (StatusCode::CONFLICT, format!("订单已被其他用户修改（版本 {} 已被覆盖），请刷新后重试", ver));
-    }
-    let new_version = ver + 1;
-    let old_order_no = req.order_no.clone();
-    let old_total = req.total_amount;
-    let old_final = req.final_amount;
-
-    sqlx::query("DELETE FROM sales_order_item WHERE order_id = ?")
-        .bind(req.id)
-        .execute(&mut *tx)
-        .await
-        .ok();
-
-    if !req.items.is_empty() {
-        let placeholders: Vec<String> = req.items.iter()
-            .map(|_| "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)".to_string())
-            .collect();
-        let sql = format!(
-            "INSERT INTO sales_order_item(order_id, product_id, product_name, alias1, alias2, spec, unit, unit_price, quantity, base_quantity, amount, pre_sale_quantity, supplier_id, supplier_name, remark) VALUES {}",
-            placeholders.join(", ")
-        );
-
-        let order_id = req.id;
-        // 服务端按当前单位换算比例统一计算基础数量，不信任前端值
-        let base_inputs: Vec<(i64, String, f64, f64)> = req.items
-            .iter()
-            .map(|item| {
-                let quantity = if item.quantity <= 0.0 && item.pre_sale_quantity.unwrap_or(0.0) > 0.0 {
-                    item.pre_sale_quantity.unwrap()
-                } else {
-                    item.quantity
-                };
-                (
-                    item.product_id,
-                    item.unit.clone().unwrap_or_default(),
-                    quantity,
-                    item.base_quantity.unwrap_or(0.0),
-                )
-            })
-            .collect();
-        let base_qtys = stock_writer::compute_base_quantities(crate::db::pool(), &base_inputs).await;
-
-        let mut query = sqlx::query(AssertSqlSafe(sql.as_str()));
-        for (idx, mut item) in req.items.into_iter().enumerate() {
-            // 数量同步：保存时若销售数量为 0 而预售数量 > 0，
-            // 用预售数量兜底，避免后续生成采购时数量为 0 的空明细
-            if item.quantity <= 0.0 && item.pre_sale_quantity.unwrap_or(0.0) > 0.0 {
-                item.quantity = item.pre_sale_quantity.unwrap();
-            }
-            query = query
-                .bind(order_id)
-                .bind(item.product_id)
-                .bind(&item.product_name)
-                .bind(&item.alias1)
-                .bind(&item.alias2)
-                .bind(&item.spec)
-                .bind(&item.unit)
-                .bind(item.unit_price)
-                .bind(item.quantity)
-                .bind(base_qtys[idx])
-                .bind(item.amount)
-                .bind(item.pre_sale_quantity.unwrap_or(0.0))
-                .bind(item.supplier_id)
-                .bind(&item.supplier_name)
-                .bind(&item.remark);
-        }
-        let _ = query.execute(&mut *tx).await;
-    }
-    if let Err(_) = tx.commit().await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "更新失败：事务提交失败".to_string());
-    }
-    crate::auth::log_operation(&ctx, "sales_order.update", "sales_order", &req.id.unwrap_or(0).to_string(),
-        &format!("更新销售单 {}（原单号 {}）：金额 {:.2}→{:.2}，下浮后合计 {:.2}→{:.2}，版本 {}→{}",
-            req.order_no, old_order_no, old_total, req.total_amount, old_final, req.final_amount, ver, new_version)).await;
-    (StatusCode::OK, "更新成功".to_string())
 }
 
-pub async fn api_sales_order_update_prices(headers: axum::http::HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
+pub async fn api_sales_order_update_prices(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/sales_order/update_prices").await {
         Err(e) => return e,
         Ok(_) => {}
     }
     let ctx = crate::auth::get_user_ctx(&headers).await;
-
-    // 状态约束 + 行级数据权限：调价仅限待配单且归属自己的订单
-    let order = sqlx::query("SELECT purchaser_id, status FROM sales_order WHERE id = ?")
-        .bind(id)
-        .fetch_optional(crate::db::pool())
-        .await
-        .ok()
-        .flatten();
-    let order = match order {
-        Some(o) => o,
-        None => return (StatusCode::NOT_FOUND, "订单不存在".to_string()),
-    };
-    let order_purchaser_id: i64 = order.get("purchaser_id");
-    let order_status: String = order.get("status");
-    if !crate::auth::can_access_sales_order(&ctx, order_purchaser_id) {
-        return (StatusCode::FORBIDDEN, "您没有权限操作此订单".to_string());
-    }
-    if order_status != "pending" {
-        return (StatusCode::BAD_REQUEST, format!("当前订单状态为「{}」，仅待配单状态的订单允许调整价格", order_status));
-    }
-
-    let items = sqlx::query(
-        "SELECT id, product_id, quantity, base_quantity FROM sales_order_item WHERE order_id = ?"
-    )
-    .bind(id)
-    .fetch_all(crate::db::pool())
-    .await
-    .unwrap_or_default();
-
-    if items.is_empty() {
-        return (StatusCode::NOT_FOUND, "订单不存在或无明细".to_string());
-    }
-
-    let mut result_items = Vec::new();
-    let mut errors = Vec::new();
-    let mut new_total = 0.0;
-
-    for item in &items {
-        let item_id: i64 = item.get("id");
-        let product_id: i64 = item.get("product_id");
-        let quantity: f64 = item.get("quantity");
-
-        let price_row: Option<(f64,)> = sqlx::query_as(
-            "SELECT COALESCE(base_price, 0) FROM product WHERE id = ?"
-        )
-        .bind(product_id)
-        .fetch_optional(crate::db::pool())
-        .await
-        .unwrap_or(None);
-
-        match price_row {
-            Some((new_price,)) if new_price > 0.0 => {
-                let new_amount = new_price * quantity;
-                new_total += new_amount;
-                result_items.push(serde_json::json!({
-                    "item_id": item_id,
-                    "product_id": product_id,
-                    "unit_price": new_price,
-                    "amount": new_amount,
-                }));
+    match app.sales_order.update_prices(id, &ctx).await {
+        Ok(outcome) => {
+            for log in &outcome.logs {
+                crate::auth::log_operation(&ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
             }
-            Some((_,)) => {
-                errors.push(format!("商品ID {} 售价为0，跳过", product_id));
-            }
-            None => {
-                errors.push(format!("商品ID {} 未找到", product_id));
-            }
+            (StatusCode::OK, outcome.body)
         }
+        Err(e) => text_error_response(e),
     }
-
-    let discount_rate: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(discount_rate, 0) FROM sales_order WHERE id = ?"
-    )
-    .bind(id)
-    .fetch_one(crate::db::pool())
-    .await
-    .unwrap_or(0.0);
-
-    let amount_reduction: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(amount_reduction, 0) FROM sales_order WHERE id = ?"
-    )
-    .bind(id)
-    .fetch_one(crate::db::pool())
-    .await
-    .unwrap_or(0.0);
-
-    let discount_amount = ((new_total * (1.0 - discount_rate / 100.0)) * 100.0).round() / 100.0;
-    let new_final = ((discount_amount - amount_reduction) * 100.0).round() / 100.0;
-
-    let resp = serde_json::json!({
-        "items": result_items,
-        "total_amount": new_total,
-        "final_amount": new_final.max(0.0),
-        "errors": errors,
-    });
-    crate::auth::log_operation(&ctx, "sales_order.adjust_price", "sales_order", &id.to_string(),
-        &format!("一键获取销售单 {} 最新售价，新合计={}，错误数={}", id, new_total, errors.len())).await;
-    (StatusCode::OK, serde_json::to_string(&resp).unwrap())
 }
 
-pub async fn api_sales_order_delete(headers: axum::http::HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
+pub async fn api_sales_order_delete(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/sales_order/delete").await {
         Err(e) => return e,
         Ok(_) => {}
     }
     let ctx = crate::auth::get_user_ctx(&headers).await;
-
-    // 行级数据权限 + 状态约束
-    let order = sqlx::query("SELECT purchaser_id, status FROM sales_order WHERE id = ?")
-        .bind(id)
-        .fetch_optional(crate::db::pool())
-        .await
-        .ok()
-        .flatten();
-    let order = match order {
-        Some(o) => o,
-        None => return (StatusCode::NOT_FOUND, "订单不存在".to_string()),
-    };
-    let order_purchaser_id: i64 = order.get("purchaser_id");
-    let order_status: String = order.get("status");
-    if !crate::auth::can_access_sales_order(&ctx, order_purchaser_id) {
-        return (StatusCode::FORBIDDEN, "您没有权限操作此订单".to_string());
-    }
-    if order_status != "pending" {
-        return (StatusCode::BAD_REQUEST, format!("当前订单状态为「{}」，仅待配单状态的订单允许删除", order_status));
-    }
-
-    let delete_items_result = sqlx::query("DELETE FROM sales_order_item WHERE order_id = ?")
-        .bind(id)
-        .execute(crate::db::pool())
-        .await;
-
-    if let Err(e) = delete_items_result {
-        let err_str = e.to_string();
-        if err_str.contains("foreign key constraint") || err_str.contains("FOREIGN KEY") {
-            return (StatusCode::BAD_REQUEST, format!("删除失败：订单明细存在外键约束冲突，请检查关联数据"));
-        }
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("删除订单明细失败：{}", e));
-    }
-
-    let result = sqlx::query("DELETE FROM sales_order WHERE id = ?")
-        .bind(id)
-        .execute(crate::db::pool())
-        .await;
-    
-    match result {
-        Ok(_) => {
-            crate::auth::log_operation(&ctx, "sales_order.delete", "sales_order", &id.to_string(),
-                &format!("删除销售单 ID={}", id)).await;
-            (StatusCode::OK, "删除成功".to_string())
-        }
-        Err(e) => {
-            let err_str = e.to_string();
-            if err_str.contains("foreign key constraint") || err_str.contains("FOREIGN KEY") {
-                (StatusCode::BAD_REQUEST, format!("删除失败：存在外键约束冲突，请检查关联数据"))
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("删除失败：{}", e))
+    match app.sales_order.delete(id, &ctx).await {
+        Ok(outcome) => {
+            for log in &outcome.logs {
+                crate::auth::log_operation(&ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
             }
+            (StatusCode::OK, outcome.body)
         }
+        Err(e) => text_error_response(e),
     }
 }
 
@@ -7363,321 +6879,38 @@ pub async fn api_purchase_document_list_export(headers: axum::http::HeaderMap, a
     xlsx_response(workbook.save_to_buffer().unwrap(), "采购单据列表.xlsx")
 }
 
-pub async fn api_sales_order_create(headers: axum::http::HeaderMap, Json(req): Json<SalesOrderReq>) -> impl IntoResponse {
+pub async fn api_sales_order_create(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<SalesOrderReq>) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/sales_order/create").await {
         Err(e) => return e,
         Ok(_) => {}
     }
     let ctx = crate::auth::get_user_ctx(&headers).await;
-
-    // 仅已审核的采购方与商品允许下单
-    if !is_audit_confirmed("purchaser", req.purchaser_id).await {
-        return (StatusCode::BAD_REQUEST, "该采购方尚未审核通过，暂不能下单".to_string());
-    }
-    for item in &req.items {
-        if !is_audit_confirmed("product", item.product_id).await {
-            return (StatusCode::BAD_REQUEST, format!("商品「{}」尚未审核通过，暂不能下单", item.product_name));
-        }
-    }
-
-    // 行级数据权限：purchaser 只能为自己绑定的采购单位创建销售单
-    if ctx.role == "purchaser" {
-        let effective_purchaser_id = if req.purchaser_id != 0 { req.purchaser_id } else { ctx.purchaser_id };
-        if ctx.purchaser_id == 0 || effective_purchaser_id != ctx.purchaser_id {
-            return (StatusCode::FORBIDDEN, "采购单位账号只能为自己创建销售单".to_string());
-        }
-    }
-
-    // 价格策略时段补价：补录历史销售单时，前端可能传 unit_price=0
-    // 此处按 req.order_date 自动从 product_price_schedule 查 (gov_procurement, supermarket_*) 价
-    // 仅补 unit_price <= 0 的明细；前端已手工填价的保留原值不被覆盖。
-    // 支持补录：order_date 为任意过去日期，自动匹配对应时段价。
-    let mut req = req; // shadow mutable
-    if !req.items.is_empty() {
-        let order_date_short = if req.order_date.len() >= 10 { req.order_date[..10].to_string() } else { req.order_date.clone() };
-        if !order_date_short.is_empty() && crate::is_valid_date_str(&order_date_short) {
-            let mut product_ids: Vec<i64> = Vec::new();
-            for it in &req.items {
-                if it.product_id > 0 && it.unit_price <= 0.0 {
-                    product_ids.push(it.product_id);
-                }
+    match app.sales_order.create(req, &ctx).await {
+        Ok(outcome) => {
+            for log in &outcome.logs {
+                crate::auth::log_operation(&ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
             }
-            if !product_ids.is_empty() {
-                // 按 (gov_procurement, supermarket_*/ai_realtime) 时段价补价
-                // 规则与商品管理一致：政采价(>0) 优先，否则商超1/2/3/AI 非零平均价
-                let gov_map = crate::batch_lookup_effective_prices(&product_ids, "gov_procurement", &order_date_short).await;
-                let sup1_map = crate::batch_lookup_effective_prices(&product_ids, "supermarket_1", &order_date_short).await;
-                let sup2_map = crate::batch_lookup_effective_prices(&product_ids, "supermarket_2", &order_date_short).await;
-                let sup3_map = crate::batch_lookup_effective_prices(&product_ids, "supermarket_3", &order_date_short).await;
-                let ai_map = crate::batch_lookup_effective_prices(&product_ids, "ai_realtime", &order_date_short).await;
-
-                let mut auto_filled = 0;
-                for it in req.items.iter_mut() {
-                    if it.product_id > 0 && it.unit_price <= 0.0 {
-                        let gov = gov_map.get(&it.product_id).copied().filter(|p| *p > 0.0);
-                        let new_price = if let Some(g) = gov {
-                            g
-                        } else {
-                            let vals: Vec<f64> = [
-                                sup1_map.get(&it.product_id).copied().unwrap_or(0.0),
-                                sup2_map.get(&it.product_id).copied().unwrap_or(0.0),
-                                sup3_map.get(&it.product_id).copied().unwrap_or(0.0),
-                                ai_map.get(&it.product_id).copied().unwrap_or(0.0),
-                            ].into_iter().filter(|v| *v > 0.0).collect();
-                            if vals.is_empty() {
-                                0.0
-                            } else {
-                                (vals.iter().sum::<f64>() / vals.len() as f64 * 100.0).round() / 100.0
-                            }
-                        };
-                        if new_price > 0.0 {
-                            it.unit_price = new_price;
-                            // amount 同步：使用现 quantity 重新计算（避免前端传的 0 金额）
-                            if it.quantity > 0.0 && it.amount <= 0.0 {
-                                it.amount = new_price * it.quantity;
-                            }
-                            auto_filled += 1;
-                        }
-                    }
-                }
-                if auto_filled > 0 {
-                    crate::auth::log_operation(&ctx, "价格策略自动补价", "sales_order", "0",
-                        &format!("销售单创建按 order_date={} 自动补价 {} 条", order_date_short, auto_filled)).await;
-                }
-            }
+            (StatusCode::OK, outcome.body)
         }
-    }
-
-    let result = sqlx::query(
-        "INSERT INTO sales_order(purchaser_id, order_no, order_date, total_amount, discount_rate, amount_reduction, final_amount, warehouse_id, warehouse_name, remark, supplier_company, truck_plate, is_settled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    )
-    .bind(req.purchaser_id)
-    .bind(&req.order_no)
-    .bind(&req.order_date)
-    .bind(req.total_amount)
-    .bind(req.discount_rate)
-    .bind(req.amount_reduction)
-    .bind(req.final_amount)
-    .bind(req.warehouse_id)
-    .bind(&req.warehouse_name)
-    .bind(&req.remark)
-    .bind(req.supplier_company.as_deref().unwrap_or(""))
-    .bind(req.truck_plate.as_deref().unwrap_or(""))
-    .bind(req.is_settled.unwrap_or(0))
-    .execute(crate::db::pool())
-    .await;
-    
-    match result {
-        Ok(res) => {
-            let order_id = res.last_insert_rowid();
-            if !req.items.is_empty() {
-                let placeholders: Vec<String> = req.items.iter()
-                    .map(|_| "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)".to_string())
-                    .collect();
-                let sql = format!(
-                    "INSERT INTO sales_order_item(order_id, product_id, product_name, alias1, alias2, spec, unit, unit_price, quantity, base_quantity, amount, pre_sale_quantity, supplier_id, supplier_name, remark) VALUES {}",
-                    placeholders.join(", ")
-                );
-                
-                // 服务端按当前单位换算比例统一计算基础数量，不信任前端值
-                let base_inputs: Vec<(i64, String, f64, f64)> = req.items
-                    .iter()
-                    .map(|item| {
-                        let quantity = if item.quantity <= 0.0 && item.pre_sale_quantity.unwrap_or(0.0) > 0.0 {
-                            item.pre_sale_quantity.unwrap()
-                        } else {
-                            item.quantity
-                        };
-                        (
-                            item.product_id,
-                            item.unit.clone().unwrap_or_default(),
-                            quantity,
-                            item.base_quantity.unwrap_or(0.0),
-                        )
-                    })
-                    .collect();
-                let base_qtys = stock_writer::compute_base_quantities(crate::db::pool(), &base_inputs).await;
-
-                let mut query = sqlx::query(AssertSqlSafe(sql.as_str()));
-                for (idx, item) in req.items.iter().enumerate() {
-                    // 数量同步：保存时若销售数量为 0 而预售数量 > 0，
-                    // 用预售数量兜底，避免后续生成采购时数量为 0 的空明细
-                    let quantity = if item.quantity <= 0.0 && item.pre_sale_quantity.unwrap_or(0.0) > 0.0 {
-                        item.pre_sale_quantity.unwrap()
-                    } else {
-                        item.quantity
-                    };
-                    query = query
-                        .bind(order_id)
-                        .bind(item.product_id)
-                        .bind(&item.product_name)
-                        .bind(&item.alias1)
-                        .bind(&item.alias2)
-                        .bind(&item.spec)
-                        .bind(&item.unit)
-                        .bind(item.unit_price)
-                        .bind(quantity)
-                        .bind(base_qtys[idx])
-                        .bind(item.amount)
-                        .bind(item.pre_sale_quantity.unwrap_or(0.0))
-                        .bind(item.supplier_id)
-                        .bind(&item.supplier_name)
-                        .bind(&item.remark);
-                }
-                let _ = query.execute(crate::db::pool()).await;
-            }
-            crate::auth::log_operation(&ctx, "sales_order.create", "sales_order", &order_id.to_string(),
-                &format!("创建销售单 {}（采购单位ID={}）", req.order_no, req.purchaser_id)).await;
-            (StatusCode::OK, "创建成功".to_string())
-        }
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "创建失败".to_string()),
+        Err(e) => text_error_response(e),
     }
 }
 
-pub async fn api_sales_order_list(headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
-    let keyword_pattern = parse_keyword_pattern(&params);
-    
-    let page: i64 = params.get("page").and_then(|s| s.parse().ok()).unwrap_or(1);
-    let page_size: i64 = params.get("page_size").and_then(|s| s.parse().ok()).unwrap_or(20);
-    let offset = (page - 1) * page_size;
-    
-    // 行级数据权限：purchaser 角色强制只看自己绑定的采购单位
+pub async fn api_sales_order_list(State(app): State<App>, headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     let ctx = crate::auth::get_user_ctx(&headers).await;
-    let purchaser_id: Option<i64> = if ctx.role == "purchaser" {
-        if ctx.purchaser_id > 0 { Some(ctx.purchaser_id) } else { Some(-1) /* 未绑定则查不到任何数据 */ }
-    } else {
-        params.get("purchaser_id").and_then(|s| s.parse().ok())
+    let filter = SalesOrderListFilter {
+        keyword_pattern: parse_keyword_pattern(&params),
+        purchaser_id: params.get("purchaser_id").and_then(|s| s.parse().ok()),
+        is_settled: params.get("is_settled").cloned(),
+        sort_field: params.get("sort_field").cloned().unwrap_or_else(|| "id".to_string()),
+        sort_order: params.get("sort_order").cloned().unwrap_or_else(|| "desc".to_string()),
+        page: params.get("page").and_then(|s| s.parse().ok()).unwrap_or(1),
+        page_size: params.get("page_size").and_then(|s| s.parse().ok()).unwrap_or(20),
     };
-    
-    // 排序处理
-    let sort_field = params.get("sort_field").map(|s| s.as_str()).unwrap_or("id");
-    let sort_order = params.get("sort_order").map(|s| s.as_str()).unwrap_or("desc");
-    let order_clause = match sort_field {
-        "order_no" => format!("so.order_no {}", sort_order),
-        "order_date" => format!("so.order_date {}", sort_order),
-        "unit_name" => format!("p.name {}", sort_order),
-        "status" => format!("so.status {}", sort_order),
-        _ => format!("so.id {}", sort_order),
-    };
-    
-    let is_settled_filter: Option<String> = match params.get("is_settled").map(|s| s.as_str()) {
-        Some("0") | Some("1") => params.get("is_settled").cloned(),
-        _ => None,
-    };
-
-    let (total_sql, total_params) = match (purchaser_id, is_settled_filter.as_ref()) {
-        (Some(pid), Some(isf)) => (
-            "SELECT COUNT(*) as count FROM sales_order so JOIN purchaser p ON so.purchaser_id = p.id
-             WHERE so.purchaser_id = ? AND so.is_settled = ? AND (so.order_no LIKE ? OR p.name LIKE ? OR so.order_date LIKE ?)",
-            vec![pid.to_string(), isf.clone(), keyword_pattern.clone(), keyword_pattern.clone(), keyword_pattern.clone()]
-        ),
-        (Some(pid), None) => (
-            "SELECT COUNT(*) as count FROM sales_order so JOIN purchaser p ON so.purchaser_id = p.id
-             WHERE so.purchaser_id = ? AND (so.order_no LIKE ? OR p.name LIKE ? OR so.order_date LIKE ?)",
-            vec![pid.to_string(), keyword_pattern.clone(), keyword_pattern.clone(), keyword_pattern.clone()]
-        ),
-        (None, Some(isf)) => (
-            "SELECT COUNT(*) as count FROM sales_order so JOIN purchaser p ON so.purchaser_id = p.id
-             WHERE so.is_settled = ? AND (so.order_no LIKE ? OR p.name LIKE ? OR so.order_date LIKE ?)",
-            vec![isf.clone(), keyword_pattern.clone(), keyword_pattern.clone(), keyword_pattern.clone()]
-        ),
-        (None, None) => (
-            "SELECT COUNT(*) as count FROM sales_order so JOIN purchaser p ON so.purchaser_id = p.id
-             WHERE so.order_no LIKE ? OR p.name LIKE ? OR so.order_date LIKE ?",
-            vec![keyword_pattern.clone(), keyword_pattern.clone(), keyword_pattern.clone()]
-        ),
-    };
-
-    let mut total_query = sqlx::query(total_sql);
-    for p in &total_params {
-        total_query = total_query.bind(p);
+    match app.sales_order.list(&ctx, filter).await {
+        Ok(json) => (StatusCode::OK, json),
+        Err(e) => text_error_response(e),
     }
-    let total_rows = total_query.fetch_one(crate::db::pool()).await.unwrap();
-    let total: i64 = total_rows.get("count");
-
-    let (sql, query_params) = match (purchaser_id, is_settled_filter.as_ref()) {
-        (Some(pid), Some(isf)) => (
-            format!(
-                "SELECT so.id, so.order_no, so.order_date, so.total_amount, so.discount_rate, so.amount_reduction, so.final_amount, so.status, so.remark, so.warehouse_id, so.warehouse_name, so.is_settled, p.name as purchaser_name,
-                        (SELECT COUNT(*) FROM order_supplement_item osi WHERE osi.target_order_id = so.id) as supplement_count
-                 FROM sales_order so JOIN purchaser p ON so.purchaser_id = p.id
-                 WHERE so.purchaser_id = ? AND so.is_settled = ? AND (so.order_no LIKE ? OR p.name LIKE ? OR so.order_date LIKE ?)
-                 ORDER BY {} LIMIT ? OFFSET ?",
-                order_clause
-            ),
-            vec![pid.to_string(), isf.clone(), keyword_pattern.clone(), keyword_pattern.clone(), keyword_pattern.clone()]
-        ),
-        (Some(pid), None) => (
-            format!(
-                "SELECT so.id, so.order_no, so.order_date, so.total_amount, so.discount_rate, so.amount_reduction, so.final_amount, so.status, so.remark, so.warehouse_id, so.warehouse_name, so.is_settled, p.name as purchaser_name,
-                        (SELECT COUNT(*) FROM order_supplement_item osi WHERE osi.target_order_id = so.id) as supplement_count
-                 FROM sales_order so JOIN purchaser p ON so.purchaser_id = p.id
-                 WHERE so.purchaser_id = ? AND (so.order_no LIKE ? OR p.name LIKE ? OR so.order_date LIKE ?)
-                 ORDER BY {} LIMIT ? OFFSET ?",
-                order_clause
-            ),
-            vec![pid.to_string(), keyword_pattern.clone(), keyword_pattern.clone(), keyword_pattern.clone()]
-        ),
-        (None, Some(isf)) => (
-            format!(
-                "SELECT so.id, so.order_no, so.order_date, so.total_amount, so.discount_rate, so.amount_reduction, so.final_amount, so.status, so.remark, so.warehouse_id, so.warehouse_name, so.is_settled, p.name as purchaser_name,
-                        (SELECT COUNT(*) FROM order_supplement_item osi WHERE osi.target_order_id = so.id) as supplement_count
-                 FROM sales_order so JOIN purchaser p ON so.purchaser_id = p.id
-                 WHERE so.is_settled = ? AND (so.order_no LIKE ? OR p.name LIKE ? OR so.order_date LIKE ?)
-                 ORDER BY {} LIMIT ? OFFSET ?",
-                order_clause
-            ),
-            vec![isf.clone(), keyword_pattern.clone(), keyword_pattern.clone(), keyword_pattern.clone()]
-        ),
-        (None, None) => (
-            format!(
-                "SELECT so.id, so.order_no, so.order_date, so.total_amount, so.discount_rate, so.amount_reduction, so.final_amount, so.status, so.remark, so.warehouse_id, so.warehouse_name, so.is_settled, p.name as purchaser_name,
-                        (SELECT COUNT(*) FROM order_supplement_item osi WHERE osi.target_order_id = so.id) as supplement_count
-                 FROM sales_order so JOIN purchaser p ON so.purchaser_id = p.id
-                 WHERE so.order_no LIKE ? OR p.name LIKE ? OR so.order_date LIKE ?
-                 ORDER BY {} LIMIT ? OFFSET ?",
-                order_clause
-            ),
-            vec![keyword_pattern.clone(), keyword_pattern.clone(), keyword_pattern.clone()]
-        ),
-    };
-    
-    let mut query = sqlx::query(AssertSqlSafe(sql.as_str()));
-    for p in &query_params {
-        query = query.bind(p);
-    }
-    query = query.bind(page_size).bind(offset);
-    let rows = query.fetch_all(crate::db::pool()).await.unwrap_or_default();
-    
-    let orders: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|row| serde_json::json!({
-            "id": row.get::<i64, _>("id"),
-            "order_no": row.get::<String, _>("order_no"),
-            "order_date": row.get::<String, _>("order_date"),
-            "total_amount": row.get::<f64, _>("total_amount"),
-            "discount_rate": row.get::<f64, _>("discount_rate"),
-            "amount_reduction": row.get::<f64, _>("amount_reduction"),
-            "final_amount": row.get::<f64, _>("final_amount"),
-            "warehouse_id": row.get::<i64, _>("warehouse_id"),
-            "warehouse_name": row.get::<Option<String>, _>("warehouse_name"),
-            "status": row.get::<String, _>("status"),
-            "remark": row.get::<Option<String>, _>("remark"),
-            "purchaser_name": row.get::<String, _>("purchaser_name"),
-            "is_reimburse": row.get::<i64, _>("supplement_count") > 0,
-            "is_settled": row.get::<i64, _>("is_settled"),
-        }))
-        .collect();
-    
-    let result = serde_json::json!({
-        "data": orders,
-        "page": page,
-        "page_size": page_size,
-        "total": total,
-        "total_pages": (total + page_size - 1) / page_size
-    });
-    
-    (StatusCode::OK, serde_json::to_string(&result).unwrap())
 }
 
 pub async fn api_sales_order_accept(headers: axum::http::HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
@@ -7880,66 +7113,12 @@ pub async fn api_sales_order_accept(headers: axum::http::HeaderMap, Path(id): Pa
     (StatusCode::OK, serde_json::to_string(&accept_data).unwrap())
 }
 
-pub async fn api_sales_order_by_purchaser(headers: axum::http::HeaderMap, Path(purchaser_id): Path<i64>) -> impl IntoResponse {
-    // 行级数据权限：purchaser 角色只能查自己绑定的采购单位
+pub async fn api_sales_order_by_purchaser(State(app): State<App>, headers: axum::http::HeaderMap, Path(purchaser_id): Path<i64>) -> impl IntoResponse {
     let ctx = crate::auth::get_user_ctx(&headers).await;
-    let effective_purchaser_id = if ctx.role == "purchaser" {
-        if ctx.purchaser_id > 0 { ctx.purchaser_id } else { -1 }
-    } else {
-        purchaser_id
-    };
-
-    let orders = sqlx::query(
-        "SELECT so.id, so.order_no, so.order_date, so.total_amount, so.discount_rate, so.final_amount as discount_total, so.status,
-                p.name as purchaser_name, so.purchaser_id
-         FROM sales_order so LEFT JOIN purchaser p ON so.purchaser_id = p.id
-         WHERE so.purchaser_id = ? ORDER BY so.order_date DESC"
-    )
-    .bind(effective_purchaser_id)
-    .fetch_all(crate::db::pool())
-    .await
-    .unwrap_or_default();
-
-    let order_ids: Vec<i64> = orders.iter().map(|row| row.get::<i64, _>("id")).collect();
-
-    let mut allocation_status_map: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
-    if !order_ids.is_empty() {
-        let placeholders = order_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-        let sql = format!(
-            "SELECT source_order_id, status FROM consumable_allocation WHERE source_order_id IN ({}) ORDER BY id ASC",
-            placeholders
-        );
-        let mut query = sqlx::query(AssertSqlSafe(sql.as_str()));
-        for id in &order_ids {
-            query = query.bind(*id);
-        }
-        let rows = query.fetch_all(crate::db::pool()).await.unwrap_or_default();
-        for row in rows {
-            let source_id = row.get::<i64, _>("source_order_id");
-            let status = row.get::<i64, _>("status");
-            // 与 summary 保持一致：仅保留最早一条记录
-            allocation_status_map.entry(source_id).or_insert(status);
-        }
+    match app.sales_order.by_purchaser(purchaser_id, &ctx).await {
+        Ok(json) => (StatusCode::OK, json),
+        Err(e) => text_error_response(e),
     }
-
-    let result: Vec<serde_json::Value> = orders.iter().map(|row| {
-        let order_id = row.get::<i64, _>("id");
-        let allocation_status = allocation_status_map.get(&order_id).copied().unwrap_or(-1);
-        serde_json::json!({
-            "id": order_id,
-            "order_no": row.get::<String, _>("order_no"),
-            "order_date": row.get::<String, _>("order_date"),
-            "total_amount": row.get::<f64, _>("total_amount"),
-            "discount_rate": row.get::<f64, _>("discount_rate"),
-            "discount_total": row.get::<f64, _>("discount_total"),
-            "status": row.get::<String, _>("status"),
-            "allocation_status": allocation_status,
-            "purchaser_name": row.get::<Option<String>, _>("purchaser_name").unwrap_or_default(),
-            "purchaser_id": row.get::<i64, _>("purchaser_id"),
-        })
-    }).collect();
-
-    (StatusCode::OK, serde_json::to_string(&result).unwrap())
 }
 
 pub async fn api_allocation_create(Json(req): Json<serde_json::Value>) -> impl IntoResponse {
@@ -10672,320 +9851,75 @@ pub async fn api_sales_order_sort_comprehensive_excel(
 }
 
 /// 设置销售订单结算状态（0=未结 1=已结），操作列直接调用
-pub async fn api_sales_order_settle(headers: axum::http::HeaderMap, Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn api_sales_order_settle(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/sales_order/settle").await {
         Err(e) => return e,
         Ok(_) => {}
     }
     let ctx = crate::auth::get_user_ctx(&headers).await;
-
-    let order = sqlx::query("SELECT purchaser_id, status FROM sales_order WHERE id = ?")
-        .bind(id)
-        .fetch_optional(crate::db::pool())
-        .await
-        .ok()
-        .flatten();
-    let order = match order {
-        Some(o) => o,
-        None => return (StatusCode::NOT_FOUND, "订单不存在".to_string()),
-    };
-    let order_purchaser_id: i64 = order.get("purchaser_id");
-    let order_status: String = order.get("status");
-    if !crate::auth::can_access_sales_order(&ctx, order_purchaser_id) {
-        return (StatusCode::FORBIDDEN, "您没有权限操作此订单".to_string());
-    }
-    // 审核后需先反审核
-    if order_status != "pending" {
-        return (StatusCode::CONFLICT, "该单据已审核，需先反审核后才能修改结算状态".to_string());
-    }
-
-    let is_settled: i64 = data["is_settled"].as_i64().unwrap_or(0);
-    if is_settled != 0 && is_settled != 1 {
-        return (StatusCode::BAD_REQUEST, "参数无效".to_string());
-    }
-
-    let result = sqlx::query("UPDATE sales_order SET is_settled = ? WHERE id = ?")
-        .bind(is_settled)
-        .bind(id)
-        .execute(crate::db::pool())
-        .await;
-
-    match result {
-        Ok(res) if res.rows_affected() > 0 => {
-            let label = if is_settled == 1 { "已结" } else { "未结" };
-            crate::auth::log_operation(&ctx, "sales_order.settle", "sales_order", &id.to_string(),
-                &format!("设置销售单结算状态为「{}」", label)).await;
-            (StatusCode::OK, "操作成功".to_string())
+    match app.sales_order.settle(id, data["is_settled"].as_i64(), &ctx).await {
+        Ok(outcome) => {
+            for log in &outcome.logs {
+                crate::auth::log_operation(&ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
+            }
+            (StatusCode::OK, outcome.body)
         }
-        _ => (StatusCode::CONFLICT, "订单不存在或状态已变化".to_string()),
+        Err(e) => text_error_response(e),
     }
 }
 
-pub async fn api_sales_order_update_status(headers: axum::http::HeaderMap, Json(req): Json<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+pub async fn api_sales_order_update_status(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/sales_order/update_status").await {
         Err(e) => return e,
         Ok(_) => {}
     }
     let ctx = crate::auth::get_user_ctx(&headers).await;
-
     let id = req.get("id").and_then(|s| s.parse::<i64>().ok());
-    let new_status = req.get("status");
-    
-    if id.is_none() || new_status.is_none() {
-        return (StatusCode::BAD_REQUEST, "缺少参数".to_string());
-    }
-    
-    let id = id.unwrap();
-    let new_status = new_status.unwrap();
-    
-    let valid_statuses = vec!["pending", "confirmed", "sorting", "sorted", "delivering", "delivered", "accepted"];
-    if !valid_statuses.contains(&new_status.as_str()) {
-        return (StatusCode::BAD_REQUEST, "无效状态".to_string());
-    }
-    
-    let current_status: Option<String> = sqlx::query_scalar("SELECT status FROM sales_order WHERE id = ?")
-        .bind(id)
-        .fetch_one(crate::db::pool())
-        .await
-        .ok();
-    
-    let current_status = current_status.unwrap_or_else(|| "pending".to_string());
-
-    // 行级数据权限：仅可操作归属自己的销售单
-    let order_purchaser_id: i64 = sqlx::query_scalar("SELECT purchaser_id FROM sales_order WHERE id = ?")
-        .bind(id)
-        .fetch_one(crate::db::pool())
-        .await
-        .unwrap_or(-1);
-    if !crate::auth::can_access_sales_order(&ctx, order_purchaser_id) {
-        return (StatusCode::FORBIDDEN, "您没有权限操作此订单".to_string());
-    }
-    
-    // 状态机：待审核 → 已审核 → 已验收（审核后直接确认验收，分拣/配送/送达节点合并）
-    let allowed_transitions = match current_status.as_str() {
-        "pending" => vec!["confirmed", "sorting"],
-        "confirmed" => vec!["pending", "accepted"],
-        "sorting" => vec!["pending", "sorted"],
-        "sorted" => vec!["sorting", "delivering"],
-        "delivering" => vec!["sorted", "delivered"],
-        "delivered" => vec!["delivering", "accepted"],
-        "accepted" => vec!["delivered"],
-        _ => vec![],
-    };
-    
-    if !allowed_transitions.contains(&new_status.as_str()) {
-        return (StatusCode::BAD_REQUEST, format!("状态不允许从 {} 转换到 {}", current_status, new_status));
-    }
-    
-    // 原子状态转换 + 版本递增：WHERE 校验当前状态，防止并发重复流转。
-    // 用 BEGIN IMMEDIATE 事务，在「审核/反审核」这两个真正影响库存的节点同步写流水+更新库存。
-    let mut tx = match crate::db::pool().begin_with("BEGIN IMMEDIATE").await {
-        Ok(t) => t,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "状态更新失败：事务启动失败".to_string()),
-    };
-    let result = sqlx::query("UPDATE sales_order SET status = ?, version = version + 1 WHERE id = ? AND status = ?")
-        .bind(&new_status)
-        .bind(id)
-        .bind(&current_status)
-        .execute(&mut *tx)
-        .await;
-
-    let updated = match result {
-        Ok(res) => res.rows_affected() > 0,
-        Err(_) => {
-            let _ = tx.rollback().await;
-            return (StatusCode::INTERNAL_SERVER_ERROR, "状态更新失败".to_string());
+    let new_status = req.get("status").cloned();
+    match app.sales_order.update_status(id, new_status, &ctx).await {
+        Ok(outcome) => {
+            for log in &outcome.logs {
+                crate::auth::log_operation(&ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
+            }
+            (StatusCode::OK, outcome.body)
         }
-    };
-    if !updated {
-        let _ = tx.rollback().await;
-        return (StatusCode::CONFLICT, "订单状态已变化，请刷新后重试".to_string());
-    }
-
-    // 出库时点口径：库存变动发生在「确认验收」而非「审核」：
-    //   进入 accepted（confirmed/delivered -> accepted）：写销售出库（out）
-    //   离开 accepted（accepted -> delivered，撤销验收）  ：写冲销（in）
-    // pending -> confirmed（审核）、confirmed -> pending（反审核）均不动库存。
-
-    // FIFO 快照必须在写出库流水之前完成：流水行要携带本次出库实际消耗批次（销售明细快照）。
-    // 撤销验收时快照在冲销流水之后才清空（冲销行沿用原批次，保证与原出库行配对抵消）。
-    if new_status == "accepted" {
-        let items: Vec<(i64, i64)> = sqlx::query_as(
-            "SELECT id, COALESCE(product_id, 0) FROM sales_order_item WHERE order_id = ?"
-        )
-        .bind(id)
-        .fetch_all(&mut *tx)
-        .await
-        .unwrap_or_default();
-        for (item_id, product_id) in items {
-            if product_id <= 0 { continue; }
-            let (prod, batch) = crate::api::fifo_earliest_batch(product_id).await;
-            let _ = sqlx::query(
-                "UPDATE sales_order_item SET production_date = ?, batch_no = ? WHERE id = ?"
-            )
-            .bind(&prod)
-            .bind(&batch)
-            .bind(item_id)
-            .execute(&mut *tx)
-            .await;
-        }
-    }
-
-    let mv_res: Result<(), sqlx::Error> = if new_status == "accepted" {
-        stock_writer::write_stock_movements_for_audit(
-            &mut tx, id, "sales_order_item", "out", "sales", "sales", "销售出库", "确认验收"
-        ).await
-    } else if current_status == "accepted" {
-        stock_writer::write_stock_movements_for_unaudit(
-            &mut tx, id, "sales_order_item", "out", "sales", "sales", "销售出库", "撤销验收冲销"
-        ).await
-    } else {
-        Ok(())
-    };
-    if let Err(e) = mv_res {
-        let _ = tx.rollback().await;
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("状态更新失败：写库存流水失败 {}", e));
-    }
-
-    // 撤销验收清空批次快照（重新验收会重算）
-    if current_status == "accepted" && new_status != "accepted" {
-        let _ = sqlx::query(
-            "UPDATE sales_order_item SET production_date = NULL, batch_no = NULL WHERE order_id = ?"
-        )
-        .bind(id)
-        .execute(&mut *tx)
-        .await;
-    }
-
-    match tx.commit().await {
-        Ok(_) => {
-            crate::auth::log_operation(&ctx, "sales_order.update_status", "sales_order", &id.to_string(),
-                &format!("销售单 {} 状态 {} -> {}", id, current_status, new_status)).await;
-            (StatusCode::OK, "状态更新成功".to_string())
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("状态更新失败：提交事务失败 {}", e)),
+        Err(e) => text_error_response(e),
     }
 }
 
-pub async fn api_sales_order_approve(headers: axum::http::HeaderMap, Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn api_sales_order_approve(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/sales_order/approve").await {
         Err(e) => return e,
         Ok(_) => {}
     }
     let ctx = crate::auth::get_user_ctx(&headers).await;
-
-    let order = sqlx::query("SELECT purchaser_id, status FROM sales_order WHERE id = ?")
-        .bind(id)
-        .fetch_optional(crate::db::pool())
-        .await
-        .ok()
-        .flatten();
-    let order = match order {
-        Some(o) => o,
-        None => return (StatusCode::NOT_FOUND, "订单不存在".to_string()),
-    };
-    let order_purchaser_id: i64 = order.get("purchaser_id");
-    let order_status: String = order.get("status");
-    if !crate::auth::can_access_sales_order(&ctx, order_purchaser_id) {
-        return (StatusCode::FORBIDDEN, "您没有权限操作此订单".to_string());
-    }
-    if order_status == "confirmed" {
-        return (StatusCode::BAD_REQUEST, "订单已审核，请勿重复操作".to_string());
-    }
-    if order_status != "pending" {
-        return (StatusCode::BAD_REQUEST, format!("当前订单状态为「{}」，仅待审核状态的订单允许审核", order_status));
-    }
-
     let reason = data["reason"].as_str().unwrap_or("").trim().to_string();
-    // 出库时点已后移到「确认验收」，审核只做状态原子转换，不写库存流水、不动 inventory。
-    let result = sqlx::query("UPDATE sales_order SET status = 'confirmed', version = version + 1 WHERE id = ? AND status = 'pending'")
-        .bind(id)
-        .execute(crate::db::pool())
-        .await;
-
-    match result {
-        Ok(res) if res.rows_affected() > 0 => {
-            crate::auth::log_operation(&ctx, "sales_order.approve", "sales_order", &id.to_string(),
-                &format!("审核通过销售单 ID={}（{}）", id, if reason.is_empty() { "无备注" } else { &reason })).await;
-            (StatusCode::OK, "审核成功，订单已锁定；确认验收时出库".to_string())
+    match app.sales_order.approve(id, reason, &ctx).await {
+        Ok(outcome) => {
+            for log in &outcome.logs {
+                crate::auth::log_operation(&ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
+            }
+            (StatusCode::OK, outcome.body)
         }
-        _ => (StatusCode::CONFLICT, "订单状态已变化，请刷新后重试".to_string()),
+        Err(e) => text_error_response(e),
     }
 }
 
-pub async fn api_sales_order_unapprove(headers: axum::http::HeaderMap, Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn api_sales_order_unapprove(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/sales_order/unapprove").await {
         Err(e) => return e,
         Ok(_) => {}
     }
     let ctx = crate::auth::get_user_ctx(&headers).await;
-
     let reason = data["reason"].as_str().unwrap_or("").trim().to_string();
-    if reason.is_empty() {
-        return (StatusCode::BAD_REQUEST, "反审核必须填写原因".to_string());
-    }
-
-    let order = sqlx::query("SELECT purchaser_id, status FROM sales_order WHERE id = ?")
-        .bind(id)
-        .fetch_optional(crate::db::pool())
-        .await
-        .ok()
-        .flatten();
-    let order = match order {
-        Some(o) => o,
-        None => return (StatusCode::NOT_FOUND, "订单不存在".to_string()),
-    };
-    let order_purchaser_id: i64 = order.get("purchaser_id");
-    let order_status: String = order.get("status");
-    if !crate::auth::can_access_sales_order(&ctx, order_purchaser_id) {
-        return (StatusCode::FORBIDDEN, "您没有权限操作此订单".to_string());
-    }
-    // 超级管理员拥有任何时刻的反审核权限；其他角色仅允许对已审核（confirmed）订单反审核
-    let is_super_admin = ctx.role == "super_admin";
-    if !is_super_admin && order_status != "confirmed" {
-        return (StatusCode::BAD_REQUEST, format!("当前订单状态为「{}」，仅已审核状态的订单允许反审核", order_status));
-    }
-
-    let update_sql = if is_super_admin {
-        "UPDATE sales_order SET status = 'pending', version = version + 1 WHERE id = ?"
-    } else {
-        "UPDATE sales_order SET status = 'pending', version = version + 1 WHERE id = ? AND status = 'confirmed'"
-    };
-    // 用 BEGIN IMMEDIATE 事务：主表 UPDATE + （仅已出库时）写冲销流水 + 回滚 inventory
-    let mut tx = match crate::db::pool().begin_with("BEGIN IMMEDIATE").await {
-        Ok(t) => t,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "反审核失败：事务启动失败".to_string()),
-    };
-    let result = sqlx::query(AssertSqlSafe(update_sql.to_string()))
-        .bind(id)
-        .execute(&mut *tx)
-        .await;
-
-    match result {
-        Ok(res) if res.rows_affected() > 0 => {
-            // 出库时点在验收：只有原状态为 accepted（已出库）才需写冲销（in）；
-            // confirmed 等未出库状态反审核只改状态，不动库存。
-            if order_status == "accepted" {
-                if let Err(e) = stock_writer::write_stock_movements_for_unaudit(
-                    &mut tx, id, "sales_order_item", "out", "sales", "sales", "销售出库", "反审核冲销"
-                ).await {
-                    let _ = tx.rollback().await;
-                    return (StatusCode::INTERNAL_SERVER_ERROR, format!("反审核失败：写冲销流水失败 {}", e));
-                }
+    match app.sales_order.unapprove(id, reason, &ctx).await {
+        Ok(outcome) => {
+            for log in &outcome.logs {
+                crate::auth::log_operation(&ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
             }
-            match tx.commit().await {
-                Ok(_) => {
-                    crate::auth::log_operation(&ctx, "sales_order.unapprove", "sales_order", &id.to_string(),
-                        &format!("反审核销售单 ID={}，原因：{}", id, reason)).await;
-                    (StatusCode::OK, "反审核成功，订单已解锁".to_string())
-                }
-                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("反审核失败：提交事务失败 {}", e)),
-            }
+            (StatusCode::OK, outcome.body)
         }
-        _ => {
-            let _ = tx.rollback().await;
-            (StatusCode::CONFLICT, "订单状态已变化，请刷新后重试".to_string())
-        }
+        Err(e) => text_error_response(e),
     }
 }
 

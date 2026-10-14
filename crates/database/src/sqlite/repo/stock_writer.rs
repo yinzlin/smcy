@@ -135,6 +135,57 @@ pub async fn write_stock_movements_for_audit(
     Ok(())
 }
 
+/// FIFO 最早未消耗完批次（自 backend api/handlers.rs 平移，SQL 与行为逐字一致；pool 改为显式入参）。
+/// 批次队列：入库口径与 write_stock_movements_for_audit 一致（审核及之后状态的采购单）。
+/// 注意：历史数据 production_date 可能是空串而非 NULL，必须 NULLIF 归一，否则 COALESCE 不生效、
+/// 空串排序键反而排在真实日期之前，FIFO 指针会错误落在无批次采购行上。
+pub async fn fifo_earliest_batch(pool: &sqlx::SqlitePool, product_id: i64) -> (Option<String>, Option<String>) {
+    let rows = sqlx::query(
+        "SELECT poi.id,
+                CASE WHEN poi.base_quantity > 0 THEN poi.base_quantity
+                     ELSE poi.quantity * COALESCE(
+                         (SELECT pu.ratio FROM product_unit pu
+                          WHERE pu.product_id = poi.product_id AND pu.unit_name = poi.unit), 1)
+                END AS eff_base,
+                NULLIF(poi.production_date, '') AS production_date,
+                NULLIF(poi.batch_no, '') AS batch_no
+         FROM purchase_order_item poi
+         JOIN purchase_order po ON poi.order_id = po.id
+         WHERE poi.product_id = ?
+           AND po.status IN ('confirmed','sorting','sorted','delivering','delivered','accepted','settled')
+         ORDER BY COALESCE(NULLIF(poi.production_date, ''), po.order_date) ASC, poi.id ASC"
+    )
+    .bind(product_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    // 净出库：销售出库 out 为正，撤销验收冲销 in 为负（撤销后批次自动"退回"队列）
+    let net_out: f64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(CASE WHEN direction='out' THEN base_quantity ELSE -base_quantity END), 0.0)
+         FROM stock_movement WHERE product_id = ? AND movement_type = 'sales'"
+    )
+    .bind(product_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0.0);
+
+    let mut remaining = net_out;
+    for r in rows {
+        let qty: f64 = r.get("eff_base");
+        let prod: Option<String> = r.get("production_date");
+        let batch: Option<String> = r.get("batch_no");
+        if qty <= 0.0 { continue; }
+        if remaining >= qty {
+            remaining -= qty;
+            continue;
+        }
+        // 该批次仍有剩余 → 即最早未消耗完的批次（NULLIF 已把空串归一为 None）
+        return (prod, batch);
+    }
+    (None, None)
+}
+
 /// 反审核/撤销时为每个明细写一条冲销流水（direction 与原方向相反）+ 同步 inventory.quantity。
 /// 必须在已开始的事务内调用。
 pub async fn write_stock_movements_for_unaudit(
