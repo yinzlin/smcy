@@ -58,6 +58,12 @@ const RestorePage = lazy(() => import('./pages/admin/RestorePage'))
 const OperationLogPage = lazy(() => import('./pages/admin/OperationLogPage'))
 // 库存盘点（无菜单入口，路由保留）
 const InventoryPage = lazy(() => import('./pages/admin/InventoryPage'))
+// 移动端分拣页（独立全屏页，不挂 MainLayout 侧边栏）
+const MobileSortPage = lazy(() => import('./pages/mobile/SortPage'))
+const MobileSortByPurchaserPage = lazy(() => import('./pages/mobile/SortByPurchaserPage'))
+const MobileSortByCategoryPage = lazy(() => import('./pages/mobile/SortByCategoryPage'))
+const MobileSortBySupplierPage = lazy(() => import('./pages/mobile/SortBySupplierPage'))
+const MobileSortComprehensivePage = lazy(() => import('./pages/mobile/SortComprehensivePage'))
 
 function PageFallback() {
   return (
@@ -135,6 +141,12 @@ export default function App() {
           <Route path="operation-log" element={<Suspense fallback={<PageFallback />}><OperationLogPage /></Suspense>} />
           <Route path="inventory" element={<Suspense fallback={<PageFallback />}><InventoryPage /></Suspense>} />
         </Route>
+        {/* 移动端分拣页：独立于主布局的全屏移动页（与老 /mobile/sort* 一致无侧边栏） */}
+        <Route path="mobile/sort" element={<Suspense fallback={<PageFallback />}><MobileSortPage /></Suspense>} />
+        <Route path="mobile/sort-by-purchaser" element={<Suspense fallback={<PageFallback />}><MobileSortByPurchaserPage /></Suspense>} />
+        <Route path="mobile/sort-by-category" element={<Suspense fallback={<PageFallback />}><MobileSortByCategoryPage /></Suspense>} />
+        <Route path="mobile/sort-by-supplier" element={<Suspense fallback={<PageFallback />}><MobileSortBySupplierPage /></Suspense>} />
+        <Route path="mobile/sort-comprehensive" element={<Suspense fallback={<PageFallback />}><MobileSortComprehensivePage /></Suspense>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>

@@ -116,6 +116,13 @@ redirect_app!(redirect_app_query_overview, "/app/query/overview");
 redirect_app!(redirect_app_query_category_stats, "/app/query/category-stats");
 redirect_app!(redirect_app_query_document_summary, "/app/query/document-summary");
 
+// 移动端分拣页（老页保留在 /legacy/sort* 回退）
+redirect_app!(redirect_app_mobile_sort, "/app/mobile/sort");
+redirect_app!(redirect_app_mobile_sort_by_purchaser, "/app/mobile/sort-by-purchaser");
+redirect_app!(redirect_app_mobile_sort_by_category, "/app/mobile/sort-by-category");
+redirect_app!(redirect_app_mobile_sort_by_supplier, "/app/mobile/sort-by-supplier");
+redirect_app!(redirect_app_mobile_sort_comprehensive, "/app/mobile/sort-comprehensive");
+
 fn serve_embedded(path: &str) -> axum::response::Response {
     match AppAssets::get(path) {
         Some(content) => {
