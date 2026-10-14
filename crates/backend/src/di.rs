@@ -8,6 +8,7 @@ use application::service::category::CategoryService;
 use application::service::product::ProductService;
 use application::service::purchaser::PurchaserService;
 use application::service::supplier::SupplierService;
+use application::service::today_price::TodayPriceService;
 use application::service::user::UserService;
 use application::service::warehouse::WarehouseService;
 use database::sqlite::repo::audit::SqliteBasicAuditRepo;
@@ -16,9 +17,10 @@ use database::sqlite::repo::oplog::SqliteOperationLogRepo;
 use database::sqlite::repo::product::SqliteProductRepo;
 use database::sqlite::repo::purchaser::SqlitePurchaserRepo;
 use database::sqlite::repo::supplier::SqliteSupplierRepo;
+use database::sqlite::repo::today_price::SqliteTodayPriceRepo;
 use database::sqlite::repo::user::SqliteUserRepo;
 use database::sqlite::repo::warehouse::SqliteWarehouseRepo;
-use domain::port::product::RemoteImageStore;
+use domain::port::product::{ProductImageStore, RemoteImageStore};
 
 /// 远程图片转存基础设施适配器：导入商品时下载网络图片到本地 uploads（复用旧实现）
 #[derive(Clone, Copy)]
@@ -27,6 +29,32 @@ pub struct BackendImageStore;
 impl RemoteImageStore for BackendImageStore {
     async fn save_remote(&self, url: &str, name_prefix: &str) -> Result<String, String> {
         crate::api::handlers::save_remote_image_to_local(url, name_prefix).await
+    }
+}
+
+impl ProductImageStore for BackendImageStore {
+    async fn save_upload(&self, name_prefix: &str, ext: &str, bytes: &[u8]) -> Result<String, String> {
+        // 行为保持：目录创建失败吞错，继续走写文件分支（写失败才报"保存图片失败"）
+        tokio::fs::create_dir_all("uploads/products").await.ok();
+        let timestamp = chrono::Utc::now().timestamp_millis();
+        let random: u32 = rand::random();
+        let new_filename = format!("{}_{}_{}.{}", name_prefix, timestamp, random, ext);
+        let path = format!("uploads/products/{}", new_filename);
+        if tokio::fs::write(&path, bytes).await.is_err() {
+            return Err(String::new()); // 用例层映射为"保存图片失败"
+        }
+        Ok(format!("/api/uploads/products/{}", new_filename))
+    }
+
+    async fn remove_by_url(&self, url: &str) {
+        // 行为保持：解析失败/删除失败均吞错
+        if let Some(path) = common::utils::image_url_to_path(url) {
+            let _ = tokio::fs::remove_file(&path).await;
+        }
+    }
+
+    async fn read_file(&self, path: &str) -> Result<Vec<u8>, String> {
+        tokio::fs::read(path).await.map_err(|e| e.to_string())
     }
 }
 
@@ -40,6 +68,7 @@ pub struct App {
     pub supplier: SupplierService<SqliteSupplierRepo>,
     pub purchaser: PurchaserService<SqlitePurchaserRepo>,
     pub product: ProductService<SqliteProductRepo, BackendImageStore>,
+    pub today_price: TodayPriceService<SqliteTodayPriceRepo>,
 }
 
 /// 初始化数据库；如有待重建的 price_schedule 时段则补跑重建，完成后升级 user_version
@@ -62,5 +91,6 @@ pub async fn bootstrap() -> App {
             SqliteProductRepo::new(database::pool().clone()),
             BackendImageStore,
         ),
+        today_price: TodayPriceService::new(SqliteTodayPriceRepo::new(database::pool().clone())),
     }
 }

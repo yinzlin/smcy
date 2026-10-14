@@ -283,6 +283,16 @@ pub trait RemoteImageStore: Send + Sync {
     async fn save_remote(&self, url: &str, name_prefix: &str) -> Result<String, String>;
 }
 
+/// 本地图片文件存储出站端口（uploads 目录的写/删/读）
+pub trait ProductImageStore: Send + Sync {
+    /// 保存上传图片到 uploads/products/，返回本地访问 URL（/api/uploads/products/xxx）
+    async fn save_upload(&self, name_prefix: &str, ext: &str, bytes: &[u8]) -> Result<String, String>;
+    /// 按访问 URL 删除本地文件（image_url_to_path 解析失败/删除失败均吞错）
+    async fn remove_by_url(&self, url: &str);
+    /// 读取 uploads 下文件（path 为完整相对路径，由调用方做白名单/防穿越校验）
+    async fn read_file(&self, path: &str) -> Result<Vec<u8>, String>;
+}
+
 /// 商品仓储端口
 pub trait ProductRepo: Send + Sync {
     /// 分页列表，返回 (行, 总数)；总数查询失败按旧行为上抛（旧 unwrap → 500）
@@ -313,6 +323,15 @@ pub trait ProductRepo: Send + Sync {
     async fn count_refs(&self, id: i64) -> Result<RefCounts, RefCountError>;
     /// 事务内清附属数据并删除商品，返回 rows_affected（0=不存在）
     async fn delete_cascade(&self, id: i64) -> Result<u64, DeleteCascadeError>;
+
+    // —— 子步c：图片读写 ——
+
+    /// 按 id 取商品名称（不存在或查询失败均返回 None）
+    async fn name_of(&self, id: i64) -> Result<Option<String>, DomainError>;
+    /// 按 id 取 image_url（行缺失/列 NULL 均返回 None）
+    async fn image_url_of(&self, id: i64) -> Result<Option<String>, DomainError>;
+    /// 更新 image_url；url=None 时绑定 NULL（替代旧 SET image_url = NULL 字面量）
+    async fn set_image_url_opt(&self, id: i64, url: Option<&str>) -> Result<(), DomainError>;
 
     // —— 子步b：导出 / 导入 ——
 

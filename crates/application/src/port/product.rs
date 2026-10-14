@@ -54,6 +54,17 @@ pub trait ProductUseCase: Send + Sync {
     /// 按商品清空价格快照（旧行为吞错恒 200）
     async fn price_delete_by_product(&self, product_id: i64);
 
+    // —— 子步c：图片操作 ——
+
+    /// 上传图片：校验扩展名/大小→保存→回填商品 image_url；返回 JSON 文本 {"url":"/api/uploads/products/xxx"}
+    async fn upload_image(&self, product_id: Option<i64>, files: Vec<(String, Vec<u8>)>) -> Result<String, UseCaseError>;
+    /// 删除图片：取 url→删文件→设 NULL；返回"删除成功"
+    async fn delete_image(&self, product_id: Option<i64>) -> Result<String, UseCaseError>;
+    /// 网络图片转存：下载→回填 image_url；返回 JSON 文本 {"url":"..."} 或 {"error":"..."}
+    async fn image_from_url(&self, product_id: Option<i64>, url: String) -> Result<String, UseCaseError>;
+    /// 读取图片文件：白名单校验 / 防穿越 / mime 推断；None=404
+    async fn read_image(&self, folder: Option<String>, filename: String) -> Option<(Vec<u8>, &'static str)>;
+
     // —— 子步b：售价同步 / 自动更新 / 最近进价 / 价格日志 ——
 
     /// 按价格策略快照同步商品基础单价

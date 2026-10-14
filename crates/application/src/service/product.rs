@@ -5,7 +5,7 @@ use common::utils::{round2, sanitize_filename_prefix};
 use domain::error::DomainError;
 use domain::port::product::{
     DeleteCascadeError, ImportInsertOutcome, ImportProduct, NewProduct, NewProductUnit, PriceSnapshot,
-    ProductExportRow, ProductListFilter, ProductRepo, RemoteImageStore, UpdateProduct,
+    ProductExportRow, ProductImageStore, ProductListFilter, ProductRepo, RemoteImageStore, UpdateProduct,
 };
 
 use crate::error::UseCaseError;
@@ -20,12 +20,12 @@ fn storage_msg(e: &DomainError) -> String {
 }
 
 #[derive(Clone)]
-pub struct ProductService<R: ProductRepo, S: RemoteImageStore> {
+pub struct ProductService<R: ProductRepo, S: RemoteImageStore + ProductImageStore> {
     repo: R,
     image: S,
 }
 
-impl<R: ProductRepo, S: RemoteImageStore> ProductService<R, S> {
+impl<R: ProductRepo, S: RemoteImageStore + ProductImageStore> ProductService<R, S> {
     pub fn new(repo: R, image: S) -> Self {
         Self { repo, image }
     }
@@ -67,7 +67,7 @@ impl<R: ProductRepo, S: RemoteImageStore> ProductService<R, S> {
     }
 }
 
-impl<R: ProductRepo, S: RemoteImageStore> ProductUseCase for ProductService<R, S> {
+impl<R: ProductRepo, S: RemoteImageStore + ProductImageStore> ProductUseCase for ProductService<R, S> {
     async fn list(&self, is_super_admin: bool, f: ProductListFilter) -> Result<serde_json::Value, UseCaseError> {
         // 行为保持：总数查询失败旧 unwrap panic → 500；数据查询失败返回空数组
         let (rows, total) = self
@@ -883,6 +883,113 @@ impl<R: ProductRepo, S: RemoteImageStore> ProductUseCase for ProductService<R, S
             })
             .collect();
         serde_json::to_string(&logs).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    // —— 子步c：图片操作 ——
+
+    async fn upload_image(&self, product_id: Option<i64>, files: Vec<(String, Vec<u8>)>) -> Result<String, UseCaseError> {
+        let Some(pid) = product_id else {
+            return Err(UseCaseError::BadRequest("缺少 product_id 参数".to_string()));
+        };
+
+        // 行为保持：商品名查询失败/不存在均回退 "product"
+        let product_name = self.repo.name_of(pid).await.ok().flatten().unwrap_or_else(|| "product".to_string());
+        let name_prefix = sanitize_filename_prefix(&product_name);
+
+        let mut file_path = String::new();
+        let mut has_file = false;
+
+        for (filename, bytes) in files {
+            has_file = true;
+            let ext = std::path::Path::new(&filename)
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("jpg")
+                .to_lowercase();
+            if !["jpg", "jpeg", "png", "gif", "webp"].contains(&ext.as_str()) {
+                return Err(UseCaseError::BadRequest("不支持的图片格式".to_string()));
+            }
+            if bytes.len() > 5 * 1024 * 1024 {
+                return Err(UseCaseError::BadRequest("图片大小不能超过5MB".to_string()));
+            }
+            file_path = self
+                .image
+                .save_upload(&name_prefix, &ext, &bytes)
+                .await
+                .map_err(|e| UseCaseError::Storage(if e.is_empty() { "保存图片失败".to_string() } else { e }))?;
+        }
+
+        if !has_file {
+            return Err(UseCaseError::BadRequest("请选择要上传的图片".to_string()));
+        }
+
+        // 行为保持：旧代码 UPDATE 失败吞错不响应 500
+        let _ = self.repo.set_image_url_opt(pid, Some(&file_path)).await;
+
+        Ok(serde_json::json!({ "url": file_path }).to_string())
+    }
+
+    async fn delete_image(&self, product_id: Option<i64>) -> Result<String, UseCaseError> {
+        let Some(pid) = product_id else {
+            return Err(UseCaseError::BadRequest("缺少 product_id 参数".to_string()));
+        };
+        // 行为保持：查询失败/无图均不报错，仍返回"删除成功"
+        if let Ok(Some(url)) = self.repo.image_url_of(pid).await {
+            self.image.remove_by_url(&url).await;
+        }
+        // 行为保持：清库失败吞错
+        let _ = self.repo.set_image_url_opt(pid, None).await;
+        Ok("删除成功".to_string())
+    }
+
+    async fn image_from_url(&self, product_id: Option<i64>, url: String) -> Result<String, UseCaseError> {
+        let Some(pid) = product_id else {
+            return Err(UseCaseError::BadRequest("缺少 product_id".to_string()));
+        };
+        // 行为保持：商品名查询失败/不存在均回退 "product"
+        let product_name = self.repo.name_of(pid).await.ok().flatten().unwrap_or_else(|| "product".to_string());
+        let name_prefix = sanitize_filename_prefix(&product_name);
+
+        match self.image.save_remote(&url, &name_prefix).await {
+            Ok(local_url) => match self.repo.set_image_url_opt(pid, Some(&local_url)).await {
+                Ok(_) => Ok(serde_json::json!({ "url": local_url }).to_string()),
+                Err(e) => Err(UseCaseError::Storage(format!("更新数据库失败: {}", storage_msg(&e)))),
+            },
+            Err(e) => Err(UseCaseError::BadRequest(e)),
+        }
+    }
+
+    async fn read_image(&self, folder: Option<String>, filename: String) -> Option<(Vec<u8>, &'static str)> {
+        let path = match &folder {
+            Some(f) => {
+                // 仅允许已知子目录，防止路径穿越
+                let allowed = ["products", "customer_orders", "signed_orders", "purchase_documents"];
+                if !allowed.contains(&f.as_str())
+                    || filename.contains("..")
+                    || filename.contains('/')
+                    || filename.contains('\\')
+                {
+                    return None;
+                }
+                format!("uploads/{}/{}", f, filename)
+            }
+            None => format!("uploads/{}", filename),
+        };
+
+        let content = self.image.read_file(&path).await.ok()?;
+        let ext = std::path::Path::new(&filename)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("jpg")
+            .to_lowercase();
+        let mime: &'static str = match ext.as_str() {
+            "jpg" | "jpeg" => "image/jpeg",
+            "png" => "image/png",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            _ => "image/jpeg",
+        };
+        Some((content, mime))
     }
 }
 

@@ -7,6 +7,7 @@ use application::port::category::CategoryUseCase;
 use application::port::product::ProductUseCase;
 use application::port::purchaser::PurchaserUseCase;
 use application::port::supplier::SupplierUseCase;
+use application::port::today_price::TodayPriceUseCase;
 use application::port::user::UserUseCase;
 use application::port::warehouse::WarehouseUseCase;
 use crate::di::App;
@@ -16,13 +17,12 @@ use chrono::Local;
 use domain::port::audit::BasicTable;
 use domain::port::purchaser::UpsertPurchaser;
 use domain::port::supplier::UpsertSupplier;
+use domain::port::today_price::TodayPriceSaveItem;
 use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder, Workbook, XlsxError};
 use crate::utils::{xlsx_response, xlsx_header_format, parse_keyword_pattern, parse_csv, sanitize_filename_prefix, image_url_to_path, operation_action_label, sanitize_xlsx_string};
 use crate::generate_order_no;
 use crate::models::*;
 use crate::update_product_purchase_prices;
-use crate::log_price_change;
-use crate::recalc_base_price_by_markup;
 use crate::auto_mark_gov_status;
 use crate::sync_product_base_price;
 use crate::build_purchase_order_export_workbook;
@@ -1196,108 +1196,36 @@ pub async fn api_product_delete(State(app): State<App>, headers: axum::http::Hea
 }
 
 pub async fn api_product_upload_image(
+    State(app): State<App>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
     let product_id = params.get("product_id").and_then(|s| s.parse::<i64>().ok());
-    if product_id.is_none() {
-        return (StatusCode::BAD_REQUEST, "缺少 product_id 参数".to_string());
-    }
-    let product_id = product_id.unwrap();
-
-    // 获取商品名称作为文件名前缀
-    let product_name: String = sqlx::query_scalar("SELECT name FROM product WHERE id = ?")
-        .bind(product_id)
-        .fetch_optional(crate::db::pool())
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "product".to_string());
-    let name_prefix = sanitize_filename_prefix(&product_name);
-
-    tokio::fs::create_dir_all("uploads/products").await.ok();
-
-    let mut file_path = String::new();
-    let mut has_file = false;
-
+    // 收集 multipart 中 name="file" 的 (文件名, 内容)；next_field 失败 panic 行为保留
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
     while let Some(field) = multipart.next_field().await.unwrap() {
         if field.name() != Some("file") {
             continue;
         }
-
-        has_file = true;
-
-        let filename = field.file_name().unwrap_or_else(|| "unknown.jpg");
-        let ext = std::path::Path::new(filename)
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("jpg")
-            .to_lowercase();
-
-        if !["jpg", "jpeg", "png", "gif", "webp"].contains(&ext.as_str()) {
-            return (StatusCode::BAD_REQUEST, "不支持的图片格式".to_string());
-        }
-
-        let timestamp = chrono::Utc::now().timestamp_millis();
-        let random: u32 = rand::random();
-        let new_filename = format!("{}_{}_{}.{}", name_prefix, timestamp, random, ext);
-        let path = format!("uploads/products/{}", new_filename);
-
-        let bytes = field.bytes().await.unwrap_or_default();
-        if bytes.len() > 5 * 1024 * 1024 {
-            return (StatusCode::BAD_REQUEST, "图片大小不能超过5MB".to_string());
-        }
-
-        if tokio::fs::write(&path, bytes).await.is_err() {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "保存图片失败".to_string());
-        }
-
-        file_path = format!("/api/uploads/products/{}", new_filename);
+        let filename = field.file_name().unwrap_or_else(|| "unknown.jpg").to_string();
+        let bytes = field.bytes().await.unwrap_or_default().to_vec();
+        files.push((filename, bytes));
     }
-
-    if !has_file {
-        return (StatusCode::BAD_REQUEST, "请选择要上传的图片".to_string());
+    match app.product.upload_image(product_id, files).await {
+        Ok(body) => (StatusCode::OK, body),
+        Err(e) => text_error_response(e),
     }
-
-    let _ = sqlx::query("UPDATE product SET image_url = ? WHERE id = ?")
-        .bind(&file_path)
-        .bind(product_id)
-        .execute(crate::db::pool())
-        .await;
-
-    (StatusCode::OK, serde_json::json!({ "url": file_path }).to_string())
 }
 
 pub async fn api_product_delete_image(
+    State(app): State<App>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> (StatusCode, String) {
     let product_id = params.get("product_id").and_then(|s| s.parse::<i64>().ok());
-    if product_id.is_none() {
-        return (StatusCode::BAD_REQUEST, "缺少 product_id 参数".to_string());
+    match app.product.delete_image(product_id).await {
+        Ok(body) => (StatusCode::OK, body),
+        Err(e) => text_error_response(e),
     }
-    let product_id = product_id.unwrap();
-
-    let row = sqlx::query("SELECT image_url FROM product WHERE id = ?")
-        .bind(product_id)
-        .fetch_optional(crate::db::pool())
-        .await
-        .unwrap_or(None);
-
-    if let Some(row) = row {
-        let image_url: Option<String> = row.get("image_url");
-        if let Some(url) = image_url {
-            if let Some(path) = image_url_to_path(&url) {
-                let _ = tokio::fs::remove_file(&path).await;
-            }
-        }
-    }
-
-    let _ = sqlx::query("UPDATE product SET image_url = NULL WHERE id = ?")
-        .bind(product_id)
-        .execute(crate::db::pool())
-        .await;
-
-    (StatusCode::OK, "删除成功".to_string())
 }
 
 /// 下载网络图片并转存到本地 uploads/products/，返回本地访问 URL
@@ -1403,6 +1331,7 @@ pub(crate) async fn save_remote_image_to_local(url: &str, name_prefix: &str) -> 
 
 /// 通过网络图片 URL 设置商品图片：下载转存到本地后回填 image_url
 pub async fn api_product_image_from_url(
+    State(app): State<App>,
     axum::Json(req): axum::Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let product_id = req.get("product_id").and_then(|v| v.as_i64());
@@ -1411,43 +1340,20 @@ pub async fn api_product_image_from_url(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-
-    let Some(pid) = product_id else {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(serde_json::json!({ "error": "缺少 product_id" })),
-        );
-    };
-
-    // 商品名作为文件名前缀
-    let product_name: String = sqlx::query_scalar("SELECT name FROM product WHERE id = ?")
-        .bind(pid)
-        .fetch_optional(crate::db::pool())
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "product".to_string());
-    let name_prefix = sanitize_filename_prefix(&product_name);
-
-    match save_remote_image_to_local(&url, &name_prefix).await {
-        Ok(local_url) => {
-            match sqlx::query("UPDATE product SET image_url = ? WHERE id = ?")
-                .bind(&local_url)
-                .bind(pid)
-                .execute(crate::db::pool())
-                .await
-            {
-                Ok(_) => (
-                    StatusCode::OK,
-                    axum::Json(serde_json::json!({ "url": local_url })),
-                ),
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(serde_json::json!({ "error": format!("更新数据库失败: {}", e) })),
-                ),
-            }
+    match app.product.image_from_url(product_id, url).await {
+        Ok(body) => (StatusCode::OK, body),
+        Err(e) => {
+            // 行为保持：400 为 BadRequest，500 为 Storage
+            let status = match &e {
+                UseCaseError::BadRequest(_) => StatusCode::BAD_REQUEST,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            let msg = match e {
+                UseCaseError::BadRequest(m) | UseCaseError::Storage(m) => m,
+                _ => "服务器内部错误".to_string(),
+            };
+            (status, serde_json::json!({ "error": msg }).to_string())
         }
-        Err(e) => (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": e }))),
     }
 }
 
@@ -1812,81 +1718,42 @@ pub async fn api_purchase_document_delete(headers: axum::http::HeaderMap, Path(i
 }
 
 pub async fn api_product_get_image(
+    State(app): State<App>,
     Path(filename): Path<String>,
 ) -> impl IntoResponse {
-    let path = format!("uploads/{}", filename);
-    let file = tokio::fs::read(&path).await;
-
-    match file {
-        Ok(content) => {
-            let ext = std::path::Path::new(&filename)
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("jpg")
-                .to_lowercase();
-
-            let mime_type = match ext.as_str() {
-                "jpg" | "jpeg" => "image/jpeg",
-                "png" => "image/png",
-                "gif" => "image/gif",
-                "webp" => "image/webp",
-                _ => "image/jpeg",
-            };
-
-            (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, mime_type)],
-                content,
-            )
-        }
-        Err(_) => (
+    match app.product.read_image(None, filename).await {
+        Some((content, mime)) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, mime)],
+            content,
+        )
+            .into_response(),
+        None => (
             StatusCode::NOT_FOUND,
             [(header::CONTENT_TYPE, "text/plain")],
             "图片不存在".as_bytes().to_vec(),
-        ),
+        )
+            .into_response(),
     }
 }
 
 pub async fn api_get_uploaded_image(
+    State(app): State<App>,
     Path((folder, filename)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    // 仅允许已知子目录，防止路径穿越
-    let allowed = ["products", "customer_orders", "signed_orders", "purchase_documents"];
-    if !allowed.contains(&folder.as_str()) || filename.contains("..") || filename.contains('/') || filename.contains('\\') {
-        return (
+    match app.product.read_image(Some(folder), filename).await {
+        Some((content, mime)) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, mime)],
+            content,
+        )
+            .into_response(),
+        None => (
             StatusCode::NOT_FOUND,
             [(header::CONTENT_TYPE, "text/plain")],
             "图片不存在".as_bytes().to_vec(),
-        );
-    }
-    let path = format!("uploads/{}/{}", folder, filename);
-    let file = tokio::fs::read(&path).await;
-
-    match file {
-        Ok(content) => {
-            let ext = std::path::Path::new(&filename)
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("jpg")
-                .to_lowercase();
-            let mime_type = match ext.as_str() {
-                "jpg" | "jpeg" => "image/jpeg",
-                "png" => "image/png",
-                "gif" => "image/gif",
-                "webp" => "image/webp",
-                _ => "image/jpeg",
-            };
-            (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, mime_type)],
-                content,
-            )
-        }
-        Err(_) => (
-            StatusCode::NOT_FOUND,
-            [(header::CONTENT_TYPE, "text/plain")],
-            "图片不存在".as_bytes().to_vec(),
-        ),
+        )
+            .into_response(),
     }
 }
 
@@ -11348,6 +11215,7 @@ pub async fn api_sales_order_sort_items_by_supplier_excel(axum::extract::Query(p
 //       供销售订单生成采购订单时使用正确的进价
 
 pub async fn api_product_today_price_items(
+    State(app): State<App>,
     headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -11357,121 +11225,12 @@ pub async fn api_product_today_price_items(
         return (StatusCode::FORBIDDEN, serde_json::json!({ "success": false, "message": "只有超级管理员可以使用今日进价采集" }).to_string());
     }
     let date = params.get("date").cloned().unwrap_or_default().trim().to_string();
-    let has_date = !date.is_empty();
-    let where_sql = if has_date {
-        "WHERE so.order_date = ?"
-    } else {
-        "WHERE so.status IN ('pending', 'sorting')"
-    };
-    // 按 (供应商, 商品, 销售单位) 分组取数：
-    // - total_qty 用 base_quantity 换算为基础单位合计（历史 base_quantity=0 的明细回退原始数量）
-    // - qty_detail 保留各销售单位原始数量明细（如 "2箱 + 5斤"），全部为基础单位时不输出
-    let sql = format!(
-        "SELECT soi.product_id, MAX(soi.product_name) as product_name, MAX(COALESCE(soi.spec,'')) as spec,
-                MAX(soi.supplier_id) as supplier_id, MAX(s.name) as supplier_name,
-                MAX(p.base_unit) as base_unit,
-                MAX(p.purchase_price) as purchase_price,
-                MAX(p.max_purchase_price) as max_purchase_price,
-                MAX(p.min_purchase_price) as min_purchase_price,
-                MAX(psp.price) as supplier_price,
-                COALESCE(NULLIF(TRIM(COALESCE(soi.unit, '')), ''), '') as sale_unit,
-                SUM(soi.quantity) as unit_qty,
-                SUM(CASE WHEN soi.base_quantity > 0 THEN soi.base_quantity ELSE soi.quantity END) as base_qty
-         FROM sales_order_item soi
-         LEFT JOIN sales_order so ON soi.order_id = so.id
-         LEFT JOIN supplier s ON soi.supplier_id = s.id
-         LEFT JOIN product p ON soi.product_id = p.id
-         LEFT JOIN product_supplier_price psp ON psp.product_id = soi.product_id AND psp.supplier_id = soi.supplier_id
-         {} AND soi.product_id > 0
-         GROUP BY soi.supplier_id, soi.product_id, sale_unit
-         ORDER BY MAX(s.name), soi.supplier_id, MAX(soi.product_name), soi.product_id, sale_unit", where_sql
-    );
-    let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
-    if has_date {
-        q = q.bind(&date);
-    }
-    let rows = q.fetch_all(crate::db::pool()).await.unwrap_or_default();
-
-    // 数字格式化：去尾零（2.00→"2"，2.50→"2.5"）
-    fn fmt_qty(v: f64) -> String {
-        let s = format!("{:.2}", v);
-        s.trim_end_matches('0').trim_end_matches('.').to_string()
-    }
-
-    // 供应商 → 商品聚合；product_index 记录 (supplier, product) 在 items vec 中的位置
-    let mut supplier_map: std::collections::HashMap<i64, (String, Vec<serde_json::Value>)> = std::collections::HashMap::new();
-    let mut product_index: std::collections::HashMap<(i64, i64), usize> = std::collections::HashMap::new();
-    // (supplier, product) → (total_base_qty, 单位明细 "数量+单位", 是否存在非基础单位)
-    let mut qty_acc: std::collections::HashMap<(i64, i64), (f64, Vec<String>, bool)> = std::collections::HashMap::new();
-
-    for r in &rows {
-        let supplier_id = r.get::<i64, _>("supplier_id");
-        let supplier_name = r.get::<Option<String>, _>("supplier_name").unwrap_or_else(|| {
-            if supplier_id == 0 { "未分配供应商".to_string() } else { format!("供应商{}", supplier_id) }
-        });
-        let product_id = r.get::<i64, _>("product_id");
-        let base_unit = r.get::<Option<String>, _>("base_unit").unwrap_or_default();
-        let unit = r.get::<String, _>("sale_unit");
-        let unit_qty: f64 = r.get::<Option<f64>, _>("unit_qty").unwrap_or(0.0);
-        let base_qty: f64 = r.get::<Option<f64>, _>("base_qty").unwrap_or(0.0);
-
-        let entry = supplier_map.entry(supplier_id).or_insert_with(|| (supplier_name.clone(), Vec::new()));
-        if !product_index.contains_key(&(supplier_id, product_id)) {
-            product_index.insert((supplier_id, product_id), entry.1.len());
-            entry.1.push(serde_json::json!({
-                "product_id": product_id,
-                "product_name": r.get::<Option<String>, _>("product_name").unwrap_or_default(),
-                "spec": r.get::<Option<String>, _>("spec").unwrap_or_default(),
-                "base_unit": base_unit,
-                "total_qty": 0.0,
-                "purchase_price": r.get::<Option<f64>, _>("purchase_price").unwrap_or(0.0),
-                "max_purchase_price": r.get::<Option<f64>, _>("max_purchase_price").unwrap_or(0.0),
-                "min_purchase_price": r.get::<Option<f64>, _>("min_purchase_price").unwrap_or(0.0),
-                "supplier_price": r.get::<Option<f64>, _>("supplier_price").unwrap_or(0.0),
-            }));
-        }
-
-        // 单位为空视为基础单位
-        let display_unit = if unit.is_empty() { base_unit.clone() } else { unit.clone() };
-        let acc = qty_acc.entry((supplier_id, product_id)).or_insert_with(|| (0.0, Vec::new(), false));
-        acc.0 += base_qty;
-        acc.1.push(format!("{}{}", fmt_qty(unit_qty), display_unit));
-        if !unit.is_empty() && unit != base_unit {
-            acc.2 = true;
-        }
-    }
-
-    // 回填 total_qty（基础单位换算合计）与 qty_detail（多单位明细）
-    for ((supplier_id, product_id), (total, details, has_non_base)) in &qty_acc {
-        if let Some((_, items)) = supplier_map.get_mut(supplier_id) {
-            if let Some(&idx) = product_index.get(&(*supplier_id, *product_id)) {
-                if let Some(item) = items.get_mut(idx) {
-                    item["total_qty"] = serde_json::json!(((*total) * 100.0).round() / 100.0);
-                    if *has_non_base || details.len() > 1 {
-                        item["qty_detail"] = serde_json::json!(details.join(" + "));
-                    }
-                }
-            }
-        }
-    }
-
-    let mut result: Vec<serde_json::Value> = Vec::new();
-    for (supplier_id, (supplier_name, items)) in supplier_map {
-        let total_qty: f64 = items.iter().map(|i| i["total_qty"].as_f64().unwrap_or(0.0)).sum();
-        result.push(serde_json::json!({
-            "supplier_id": supplier_id,
-            "supplier_name": supplier_name,
-            "items": items,
-            "total_quantity": total_qty,
-        }));
-    }
-    result.sort_by(|a, b| a["supplier_name"].as_str().unwrap_or("").cmp(b["supplier_name"].as_str().unwrap_or(""))
-        .then_with(|| a["supplier_id"].as_i64().unwrap_or(0).cmp(&b["supplier_id"].as_i64().unwrap_or(0))));
-
-    (StatusCode::OK, serde_json::to_string(&result).unwrap())
+    let date = if date.is_empty() { None } else { Some(date) };
+    (StatusCode::OK, app.today_price.items(date).await)
 }
 
 pub async fn api_product_today_price_save(
+    State(app): State<App>,
     headers: axum::http::HeaderMap,
     Json(data): Json<std::collections::HashMap<String, serde_json::Value>>,
 ) -> impl IntoResponse {
@@ -11480,69 +11239,21 @@ pub async fn api_product_today_price_save(
     if ctx.role != "super_admin" {
         return (StatusCode::FORBIDDEN, serde_json::json!({ "success": false, "message": "只有超级管理员可以录入今日进价" }).to_string());
     }
-    let items = data.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let mut updated = 0i64;
-    for item in items {
+    let raw_items = data.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let mut items: Vec<TodayPriceSaveItem> = Vec::new();
+    for item in raw_items {
         let product_id = item.get("product_id").and_then(|v| v.as_i64());
         let supplier_id = item.get("supplier_id").and_then(|v| v.as_i64());
         let price = item.get("price").and_then(|v| v.as_f64());
-        if let (Some(pid), Some(sid), Some(price)) = (product_id, supplier_id, price) {
-            if pid <= 0 || sid <= 0 || price <= 0.0 {
-                continue;
-            }
-            // 进价统一四舍五入保留两位小数
-            let price = (price * 100.0).round() / 100.0;
-
-            // 1) 写入分供应商价表（UPSERT，同一商品同一供应商唯一）
-            let psp_res = sqlx::query(
-                "INSERT INTO product_supplier_price(product_id, supplier_id, price, updated_at)
-                 VALUES (?, ?, ?, datetime('now','localtime'))
-                 ON CONFLICT(product_id, supplier_id) DO UPDATE SET price = excluded.price, updated_at = excluded.updated_at"
-            )
-            .bind(pid)
-            .bind(sid)
-            .bind(price)
-            .execute(crate::db::pool())
-            .await;
-            if psp_res.is_err() {
-                continue;
-            }
-
-            // 2) 同步更新 product.purchase_price（全局回退价）及 max/min 区间
-            let row = sqlx::query(
-                "SELECT purchase_price, max_purchase_price, min_purchase_price FROM product WHERE id = ?"
-            )
-            .bind(pid)
-            .fetch_optional(crate::db::pool())
-            .await
-            .unwrap_or(None);
-            if let Some(r) = row {
-                let old_purchase: f64 = r.get("purchase_price");
-                let old_max: f64 = r.get("max_purchase_price");
-                let old_min: f64 = r.get("min_purchase_price");
-                let new_max = ((if old_max > 0.0 { old_max.max(price) } else { price }) * 100.0).round() / 100.0;
-                let new_min = ((if old_min > 0.0 { old_min.min(price) } else { price }) * 100.0).round() / 100.0;
-                let res = sqlx::query(
-                    "UPDATE product SET purchase_price = ?, max_purchase_price = ?, min_purchase_price = ? WHERE id = ?"
-                )
-                .bind(price)
-                .bind(new_max)
-                .bind(new_min)
-                .bind(pid)
-                .execute(crate::db::pool())
-                .await;
-                if res.is_ok() {
-                    updated += 1;
-                    log_price_change(pid, "purchase_price", old_purchase, price, "today_price_collect", None, Some("今日进价采集录入")).await;
-                    recalc_base_price_by_markup(pid, "today_price_collect", None).await;
-                }
-            }
+        if let (Some(product_id), Some(supplier_id), Some(price)) = (product_id, supplier_id, price) {
+            items.push(TodayPriceSaveItem { product_id, supplier_id, price });
         }
     }
-    (StatusCode::OK, serde_json::json!({ "success": true, "message": format!("已保存 {} 个商品的今日进价", updated) }).to_string())
+    (StatusCode::OK, app.today_price.save(items).await)
 }
 
 pub async fn api_product_today_price_excel(
+    State(app): State<App>,
     headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -11552,230 +11263,28 @@ pub async fn api_product_today_price_excel(
         return (StatusCode::FORBIDDEN, serde_json::json!({ "success": false, "message": "只有超级管理员可以使用今日进价采集" }).to_string()).into_response();
     }
     let date = params.get("date").cloned().unwrap_or_default().trim().to_string();
-    let has_date = !date.is_empty();
+    let date = if date.is_empty() { None } else { Some(date) };
     // print_values=0：今日价列留空，供打印后手写采集；=1：今日价列显示当前最近价
     let print_values = matches!(
         params.get("print_values").map(|v| v.trim().to_lowercase()).as_deref(),
         Some("1") | Some("true") | Some("yes") | Some("on")
     );
-    let where_sql = if has_date {
-        "WHERE so.order_date = ?"
-    } else {
-        "WHERE so.status IN ('pending', 'sorting')"
-    };
-    let sql = format!(
-        "SELECT soi.product_id, MAX(soi.product_name) as product_name, MAX(COALESCE(soi.spec,'')) as spec,
-                MAX(soi.supplier_id) as supplier_id, MAX(s.name) as supplier_name,
-                MAX(p.base_unit) as base_unit,
-                MAX(p.purchase_price) as purchase_price,
-                MAX(p.max_purchase_price) as max_purchase_price,
-                MAX(p.min_purchase_price) as min_purchase_price,
-                MAX(psp.price) as supplier_price,
-                SUM(CASE WHEN soi.base_quantity > 0 THEN soi.base_quantity ELSE soi.quantity END) as total_qty
-         FROM sales_order_item soi
-         LEFT JOIN sales_order so ON soi.order_id = so.id
-         LEFT JOIN supplier s ON soi.supplier_id = s.id
-         LEFT JOIN product p ON soi.product_id = p.id
-         LEFT JOIN product_supplier_price psp ON psp.product_id = soi.product_id AND psp.supplier_id = soi.supplier_id
-         {} AND soi.product_id > 0
-         GROUP BY soi.supplier_id, soi.product_id
-         ORDER BY MAX(s.name), soi.supplier_id, MAX(soi.product_name), soi.product_id", where_sql
-    );
-    let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
-    if has_date {
-        q = q.bind(&date);
-    }
-    let rows = q.fetch_all(crate::db::pool()).await.unwrap_or_default();
-
-    let mut supplier_map: std::collections::HashMap<i64, (String, Vec<serde_json::Value>)> = std::collections::HashMap::new();
-    for r in &rows {
-        let supplier_id = r.get::<i64, _>("supplier_id");
-        let supplier_name = r.get::<Option<String>, _>("supplier_name").unwrap_or_else(|| {
-            if supplier_id == 0 { "未分配供应商".to_string() } else { format!("供应商{}", supplier_id) }
-        });
-        let item = serde_json::json!({
-            "product_id": r.get::<i64, _>("product_id"),
-            "product_name": r.get::<Option<String>, _>("product_name").unwrap_or_default(),
-            "spec": r.get::<Option<String>, _>("spec").unwrap_or_default(),
-            "base_unit": r.get::<Option<String>, _>("base_unit").unwrap_or_default(),
-            "total_qty": r.get::<Option<f64>, _>("total_qty").unwrap_or(0.0),
-            "purchase_price": r.get::<Option<f64>, _>("purchase_price").unwrap_or(0.0),
-            "max_purchase_price": r.get::<Option<f64>, _>("max_purchase_price").unwrap_or(0.0),
-            "min_purchase_price": r.get::<Option<f64>, _>("min_purchase_price").unwrap_or(0.0),
-        });
-        let entry = supplier_map.entry(supplier_id).or_insert_with(|| (supplier_name.clone(), Vec::new()));
-        entry.1.push(item);
-    }
-
-    let excel_result: Result<Vec<u8>, XlsxError> = (|| {
-        let mut workbook = Workbook::new();
-
-        let title_format = Format::new()
-            .set_bold()
-            .set_font_size(14)
-            .set_align(FormatAlign::Center)
-            .set_align(FormatAlign::VerticalCenter);
-
-        let header_format = Format::new()
-            .set_bold()
-            .set_font_size(10)
-            .set_align(FormatAlign::Center)
-            .set_align(FormatAlign::VerticalCenter)
-            .set_border(FormatBorder::Thin)
-            .set_text_wrap();
-
-        let cell_format = Format::new()
-            .set_font_size(10)
-            .set_align(FormatAlign::Center)
-            .set_align(FormatAlign::VerticalCenter)
-            .set_border(FormatBorder::Thin);
-
-        let cell_left_format = Format::new()
-            .set_font_size(10)
-            .set_align(FormatAlign::Left)
-            .set_align(FormatAlign::VerticalCenter)
-            .set_border(FormatBorder::Thin);
-
-        let date_format = Format::new()
-            .set_font_size(10)
-            .set_align(FormatAlign::Right)
-            .set_align(FormatAlign::VerticalCenter);
-
-        let grand_total_format = Format::new()
-            .set_bold()
-            .set_font_size(11)
-            .set_align(FormatAlign::Left)
-            .set_align(FormatAlign::VerticalCenter)
-            .set_background_color("#E5E7EB")
-            .set_font_color("#374151");
-
-        let col_widths = [4, 16, 6, 8, 8, 8, 8, 8];
-        let headers = ["序号", "品名规格", "基本单位", "合计数量", "最高价", "最低价", "最近价", "今日价"];
-        let display_date = if has_date {
-            date.clone()
-        } else {
-            Local::now().format("%Y-%m-%d").to_string()
-        };
-
-        let max_col = 7u16;
-
-        if supplier_map.is_empty() {
-            let worksheet = workbook.add_worksheet();
-            worksheet.set_name("无数据")?;
-            worksheet.merge_range(0, 0, 0, max_col, "暂无采购数据", &title_format)?;
-        } else {
-            // 固定排序：供应商按名称排序，保证每次导出 sheet 顺序一致
-            let mut supplier_list: Vec<(i64, String, Vec<serde_json::Value>)> = supplier_map
-                .into_iter()
-                .map(|(sid, (sname, sitems))| (sid, sname, sitems))
-                .collect();
-            supplier_list.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
-
-            for (supplier_id, supplier_name, items) in supplier_list {
-                let sheet_name: String = supplier_name
-                    .chars()
-                    .filter(|c| !matches!(c, '\\' | '/' | '?' | '*' | '[' | ']' | ':'))
-                    .take(31)
-                    .collect();
-                let worksheet = workbook.add_worksheet();
-                worksheet.set_name(sheet_name.as_str())?;
-
-                worksheet.set_landscape();
-                worksheet.set_margins(0.0, 0.0, 0.4, 0.5, 0.0, 0.2);
-                worksheet.set_print_center_vertically(false);
-                worksheet.set_print_center_horizontally(true);
-                worksheet.set_header("");
-                worksheet.set_footer("&C第 &P 页，共 &N 页");
-                worksheet.set_repeat_rows(0, 2)?;
-
-                for (i, w) in col_widths.iter().enumerate() {
-                    worksheet.set_column_width(i as u16, *w)?;
-                }
-
-                let mut current_row = 0;
-                let title = format!("{} - 今日进价采集清单", supplier_name);
-                worksheet.merge_range(current_row, 0, current_row, max_col, title.as_str(), &title_format)?;
-                worksheet.set_row_height(current_row, 28)?;
-                current_row += 1;
-
-                worksheet.merge_range(current_row, 4, current_row, max_col, display_date.as_str(), &date_format)?;
-                worksheet.set_row_height(current_row, 14)?;
-                current_row += 1;
-
-                for (i, header) in headers.iter().enumerate() {
-                    worksheet.write_with_format(current_row, i as u16, *header, &header_format)?;
-                }
-                current_row += 1;
-
-                let mut grand_total_qty = 0.0;
-                let mut seq = 1i64;
-                for item in &items {
-                    // 导出名称与采购单规则对齐：规格 -> 名称（独立取值不拼接）
-                    let product_name = item["product_name"].as_str().unwrap_or("");
-                    let spec = item["spec"].as_str().unwrap_or("").trim();
-                    let name_with_spec = if spec.is_empty() {
-                        product_name.to_string()
-                    } else {
-                        spec.to_string()
-                    };
-                    let base_unit = item["base_unit"].as_str().unwrap_or("");
-                    let total_qty = item["total_qty"].as_f64().unwrap_or(0.0);
-                    let max_p = item["max_purchase_price"].as_f64().unwrap_or(0.0);
-                    let min_p = item["min_purchase_price"].as_f64().unwrap_or(0.0);
-                    let purchase_price = item["purchase_price"].as_f64().unwrap_or(0.0);
-
-                    worksheet.write_with_format(current_row, 0, seq as f64, &cell_format)?;
-                    worksheet.write_with_format(current_row, 1, name_with_spec.as_str(), &cell_left_format)?;
-                    worksheet.write_with_format(current_row, 2, base_unit, &cell_format)?;
-                    worksheet.write_with_format(current_row, 3, total_qty, &cell_format)?;
-                    worksheet.write_with_format(current_row, 4, max_p, &cell_format)?;
-                    worksheet.write_with_format(current_row, 5, min_p, &cell_format)?;
-                    worksheet.write_with_format(current_row, 6, purchase_price, &cell_format)?;
-                    if print_values {
-                        worksheet.write_with_format(current_row, 7, purchase_price, &cell_format)?;
-                    } else {
-                        worksheet.write_with_format(current_row, 7, "", &cell_format)?;
-                    }
-                    worksheet.set_row_height(current_row, 20.0)?;
-                    current_row += 1;
-                    seq += 1;
-                    grand_total_qty += total_qty;
-                }
-
-                let grand_total = format!("合计数量 {}", grand_total_qty);
-                worksheet.merge_range(current_row, 0, current_row, 6, grand_total.as_str(), &grand_total_format)?;
-                worksheet.set_row_height(current_row, 22)?;
-                let _ = supplier_id;
-            }
-        }
-
-        let buf = workbook.save_to_buffer()?;
-        Ok(buf)
-    })();
-
-    match excel_result {
-        Ok(buf) => {
-            let filename = if has_date {
-                format!("今日进价采集清单_{}.xlsx", date)
-            } else {
-                "今日进价采集清单.xlsx".to_string()
-            };
+    match app.today_price.export_excel(date, print_values).await {
+        Ok((filename, buf)) => {
             let headers = [
                 ("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
                 ("Content-Disposition", &format!("attachment; filename=\"{}\"", filename)),
             ];
             (StatusCode::OK, headers, buf).into_response()
         }
-        Err(e) => {
-            eprintln!("今日进价采集清单导出失败: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "导出失败").into_response()
-        }
+        Err(e) => text_error_response(e).into_response(),
     }
 }
 
 // ===== 今日进价采集·A4 打印页 =====
 // 按供应商分组，A4 纵向三栏排版（每栏四列：序号/品名规格/单位/今日价，栏间空一列，共 14 列），左边距 1cm
 pub async fn api_product_today_price_a4(
+    State(app): State<App>,
     headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -11785,304 +11294,28 @@ pub async fn api_product_today_price_a4(
         return (StatusCode::FORBIDDEN, serde_json::json!({ "success": false, "message": "只有超级管理员可以使用今日进价采集" }).to_string()).into_response();
     }
     let date = params.get("date").cloned().unwrap_or_default().trim().to_string();
-    let has_date = !date.is_empty();
+    let date = if date.is_empty() { None } else { Some(date) };
     // print_values=1：今日价列显示最近价（purchase_price）；=0：留空手写
     let print_values = matches!(
         params.get("print_values").map(|v| v.trim().to_lowercase()).as_deref(),
         Some("1") | Some("true") | Some("yes") | Some("on")
     );
-    let where_sql = if has_date {
-        "WHERE so.order_date = ?"
-    } else {
-        "WHERE so.status IN ('pending', 'sorting')"
-    };
-    let sql = format!(
-        "SELECT soi.product_id, MAX(soi.product_name) as product_name, MAX(COALESCE(soi.spec,'')) as spec,
-                MAX(soi.supplier_id) as supplier_id, MAX(s.name) as supplier_name,
-                MAX(p.base_unit) as base_unit,
-                MAX(p.purchase_price) as purchase_price,
-                MAX(p.max_purchase_price) as max_purchase_price,
-                MAX(p.min_purchase_price) as min_purchase_price,
-                MAX(psp.price) as supplier_price,
-                SUM(CASE WHEN soi.base_quantity > 0 THEN soi.base_quantity ELSE soi.quantity END) as total_qty
-         FROM sales_order_item soi
-         LEFT JOIN sales_order so ON soi.order_id = so.id
-         LEFT JOIN supplier s ON soi.supplier_id = s.id
-         LEFT JOIN product p ON soi.product_id = p.id
-         LEFT JOIN product_supplier_price psp ON psp.product_id = soi.product_id AND psp.supplier_id = soi.supplier_id
-         {} AND soi.product_id > 0
-         GROUP BY soi.supplier_id, soi.product_id
-         ORDER BY MAX(s.name), soi.supplier_id, MAX(soi.product_name), soi.product_id", where_sql
-    );
-    let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
-    if has_date {
-        q = q.bind(&date);
-    }
-    let rows = q.fetch_all(crate::db::pool()).await.unwrap_or_default();
-
-    // 供应商 → 商品去重结果（与采集页数据一致）
-    let mut supplier_map: std::collections::HashMap<i64, (String, Vec<serde_json::Value>)> = std::collections::HashMap::new();
-    for r in &rows {
-        let supplier_id = r.get::<i64, _>("supplier_id");
-        let supplier_name = r.get::<Option<String>, _>("supplier_name").unwrap_or_else(|| {
-            if supplier_id == 0 { "未分配供应商".to_string() } else { format!("供应商{}", supplier_id) }
-        });
-        let item = serde_json::json!({
-            "product_id": r.get::<i64, _>("product_id"),
-            "product_name": r.get::<Option<String>, _>("product_name").unwrap_or_default(),
-            "spec": r.get::<Option<String>, _>("spec").unwrap_or_default(),
-            "base_unit": r.get::<Option<String>, _>("base_unit").unwrap_or_default(),
-            "total_qty": r.get::<Option<f64>, _>("total_qty").unwrap_or(0.0),
-            "purchase_price": r.get::<Option<f64>, _>("purchase_price").unwrap_or(0.0),
-            "max_purchase_price": r.get::<Option<f64>, _>("max_purchase_price").unwrap_or(0.0),
-            "min_purchase_price": r.get::<Option<f64>, _>("min_purchase_price").unwrap_or(0.0),
-        });
-        let entry = supplier_map.entry(supplier_id).or_insert_with(|| (supplier_name.clone(), Vec::new()));
-        entry.1.push(item);
-    }
-
-    // 供应商按名称排序
-    let mut supplier_list: Vec<(i64, String, Vec<serde_json::Value>)> = supplier_map
-        .into_iter()
-        .map(|(sid, (sname, sitems))| (sid, sname, sitems))
-        .collect();
-    supplier_list.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-
-    let display_date = if has_date { date.clone() } else { Local::now().format("%Y-%m-%d").to_string() };
-
-    // A4 三栏排版：14 列 = 3 个大栏（每栏 4 列：序号/品名规格/单位/今日价）+ 2 个间隔列。
-    // 供应商分组排列，每栏可容纳多家供应商（按名称排序依次填充），序号按栏竖向从 1 递增。
-    // 每栏有固定行容量，放不下时切到下一栏；超过 3 栏则分 sheet（每 sheet 一页 A4）。
-    // 每栏行容量：A4 纵向一页（标题28+日期16+表头22≈66pt，内容行18pt）
-    // 可打印高度 ≈ 799pt，40 行内容可完整落在一页内
-    const MAX_ROWS_PER_COL: usize = 40;
-    const COL_BASE: [u16; 3] = [0, 5, 10];
-
-    let excel_result: Result<Vec<u8>, XlsxError> = (|| {
-        let mut workbook = Workbook::new();
-
-        let title_format = Format::new()
-            .set_bold()
-            .set_font_size(14)
-            .set_align(FormatAlign::Center)
-            .set_align(FormatAlign::VerticalCenter);
-
-        let date_format = Format::new()
-            .set_font_size(10)
-            .set_align(FormatAlign::Center)
-            .set_align(FormatAlign::VerticalCenter);
-
-        let header_format = Format::new()
-            .set_bold()
-            .set_font_size(10)
-            .set_align(FormatAlign::Center)
-            .set_align(FormatAlign::VerticalCenter)
-            .set_border(FormatBorder::Thin);
-
-        let supplier_format = Format::new()
-            .set_bold()
-            .set_font_size(10)
-            .set_align(FormatAlign::Left)
-            .set_align(FormatAlign::VerticalCenter)
-            .set_border(FormatBorder::Thin)
-            .set_background_color("#FDE68A");
-
-        let cell_format = Format::new()
-            .set_font_size(10)
-            .set_align(FormatAlign::Center)
-            .set_align(FormatAlign::VerticalCenter)
-            .set_border(FormatBorder::Thin);
-
-        let cell_left_format = Format::new()
-            .set_font_size(10)
-            .set_align(FormatAlign::Left)
-            .set_align(FormatAlign::VerticalCenter)
-            .set_border(FormatBorder::Thin);
-
-        let cell_right_format = Format::new()
-            .set_font_size(10)
-            .set_align(FormatAlign::Right)
-            .set_align(FormatAlign::VerticalCenter)
-            .set_border(FormatBorder::Thin);
-
-        // 展平商品（保留供应商分组，供应商已按名称排序）
-        struct FlatItem {
-            supplier: String,
-            name_spec: String,
-            base_unit: String,
-            /// print_values=1 时为价格，否则为 None（今日价留空手写）
-            price: Option<f64>,
-        }
-        let mut flat: Vec<FlatItem> = Vec::new();
-        for (_sid, sname, items) in &supplier_list {
-            for it in items {
-                let name = it["product_name"].as_str().unwrap_or("");
-                // 导出名称与采购单规则对齐：规格 -> 名称（独立取值不拼接）
-                let spec = it["spec"].as_str().unwrap_or("").trim();
-                let name_spec = if spec.is_empty() { name.to_string() } else { spec.to_string() };
-                let price = if print_values {
-                    let raw = it["purchase_price"].as_f64().unwrap_or(0.0);
-                    Some((raw * 100.0).round() / 100.0)
-                } else {
-                    None
-                };
-                flat.push(FlatItem {
-                    supplier: sname.clone(),
-                    name_spec,
-                    base_unit: it["base_unit"].as_str().unwrap_or("").to_string(),
-                    price,
-                });
-            }
-        }
-
-        if flat.is_empty() {
-            let worksheet = workbook.add_worksheet();
-            worksheet.set_name("无数据")?;
-            worksheet.merge_range(0, 0, 0, 13, "暂无采购数据", &title_format)?;
-            let buf = workbook.save_to_buffer()?;
-            return Ok(buf);
-        }
-
-        // 按供应商分组切块（保持供应商名称排序）；单供应商超过栏容量时拆成多块，
-        // 每块最多 MAX_ROWS_PER_COL-1 个商品（留 1 行给供应商标题），避免单栏溢出分页
-        let mut blocks: Vec<(String, Vec<&FlatItem>)> = Vec::new();
-        for it in &flat {
-            if let Some(last) = blocks.last_mut() {
-                if last.0 == it.supplier {
-                    last.1.push(it);
-                    continue;
-                }
-            }
-            blocks.push((it.supplier.clone(), vec![it]));
-        }
-        let mut split_blocks: Vec<(String, Vec<&FlatItem>)> = Vec::new();
-        for (sname, items) in blocks {
-            for chunk in items.chunks(MAX_ROWS_PER_COL - 1) {
-                split_blocks.push((sname.clone(), chunk.to_vec()));
-            }
-        }
-
-        // 把供应商块分配到"栏"：每栏容量 MAX_ROWS_PER_COL（含供应商标题行），放不下切下一栏；满 3 栏则分页
-        let mut pages: Vec<Vec<(String, Vec<&FlatItem>, u16)>> = Vec::new(); // 每页一组块，元素 (供应商名, 商品, 栏起始列)
-        let mut cur_page: Vec<(String, Vec<&FlatItem>, u16)> = Vec::new();
-        let mut col_index = 0usize;
-        let mut rows_used = 0usize;
-
-        for (sname, items) in split_blocks {
-            let need = 1 + items.len(); // 供应商标题行 + 商品行
-            if rows_used > 0 && rows_used + need > MAX_ROWS_PER_COL {
-                col_index += 1;
-                rows_used = 0;
-                if col_index >= 3 {
-                    pages.push(std::mem::take(&mut cur_page));
-                    col_index = 0;
-                }
-            }
-            cur_page.push((sname.clone(), items, COL_BASE[col_index]));
-            rows_used += need;
-            if rows_used >= MAX_ROWS_PER_COL {
-                col_index += 1;
-                rows_used = 0;
-                if col_index >= 3 {
-                    pages.push(std::mem::take(&mut cur_page));
-                    col_index = 0;
-                }
-            }
-        }
-        if !cur_page.is_empty() {
-            pages.push(cur_page);
-        }
-
-        for (page_idx, blocks_in_sheet) in pages.iter().enumerate() {
-            let worksheet = workbook.add_worksheet();
-            worksheet.set_name(format!("第{}页", page_idx + 1).as_str())?;
-
-            // A4 纵向、左边距 1cm（约 0.394 英寸），其余边距 0.5cm
-            worksheet.set_portrait();
-            worksheet.set_paper_size(9); // A4 paper size
-            worksheet.set_margins(0.394, 0.2, 0.2, 0.2, 0.2, 0.2);
-            worksheet.set_print_center_horizontally(false);
-            worksheet.set_header("");
-            worksheet.set_footer("&C第 &P 页，共 &N 页");
-
-            // 列宽：每栏 [序号2.5, 品名规格13, 单位4.5, 今日价6.5]，间隔列1.2，总计 14 列
-            let col_widths = [2.5, 13.0, 4.5, 6.5, 1.2, 2.5, 13.0, 4.5, 6.5, 1.2, 2.5, 13.0, 4.5, 6.5];
-            for (i, w) in col_widths.iter().enumerate() {
-                worksheet.set_column_width(i as u16, *w)?;
-            }
-
-            // 标题 + 日期
-            worksheet.merge_range(0, 0, 0, 13, "今日进价采集清单", &title_format)?;
-            worksheet.set_row_height(0, 28)?;
-            worksheet.merge_range(1, 0, 1, 13, display_date.as_str(), &date_format)?;
-            worksheet.set_row_height(1, 16)?;
-
-            // 表头（3 组，组间空一列）
-            let headers = ["序号", "品名规格", "单位", "今日价"];
-            for base in COL_BASE.iter() {
-                for (hi, h) in headers.iter().enumerate() {
-                    worksheet.write_with_format(2, base + hi as u16, *h, &header_format)?;
-                }
-            }
-            worksheet.set_row_height(2, 22)?;
-
-            // 每栏从第 3 行开始独立向下填充，栏内序号连续递增
-            for col_idx in 0..3usize {
-                let base = COL_BASE[col_idx];
-                let col_blocks: Vec<&(String, Vec<&FlatItem>, u16)> = blocks_in_sheet.iter().filter(|b| b.2 == base).collect();
-                if col_blocks.is_empty() {
-                    continue;
-                }
-                let mut row = 3u32;
-                for (sname, items, _b) in col_blocks {
-                    worksheet.merge_range(row, base, row, base + 3, sname.as_str(), &supplier_format)?;
-                    worksheet.set_row_height(row, 18)?;
-                    row += 1;
-                    // 序号按供应商分组重新从 1 编号
-                    let mut seq = 1i64;
-                    for it in items {
-                        worksheet.write_with_format(row, base, seq as f64, &cell_format)?;
-                        worksheet.write_with_format(row, base + 1, it.name_spec.as_str(), &cell_left_format)?;
-                        worksheet.write_with_format(row, base + 2, it.base_unit.as_str(), &cell_format)?;
-                        match it.price {
-                            Some(p) => { worksheet.write_with_format(row, base + 3, p, &cell_right_format)?; }
-                            None => { worksheet.write_with_format(row, base + 3, "", &cell_right_format)?; }
-                        }
-                        worksheet.set_row_height(row, 18)?;
-                        row += 1;
-                        seq += 1;
-                    }
-                }
-            }
-        }
-
-        let buf = workbook.save_to_buffer()?;
-        Ok(buf)
-    })();
-
-    match excel_result {
-        Ok(buf) => {
-            let filename = if has_date {
-                format!("今日进价采集清单_A4_{}.xlsx", date)
-            } else {
-                "今日进价采集清单_A4.xlsx".to_string()
-            };
+    match app.today_price.export_a4(date, print_values).await {
+        Ok((filename, buf)) => {
             let headers = [
                 ("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
                 ("Content-Disposition", &format!("attachment; filename=\"{}\"", filename)),
             ];
             (StatusCode::OK, headers, buf).into_response()
         }
-        Err(e) => {
-            eprintln!("今日进价采集A4导出失败: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "导出失败").into_response()
-        }
+        Err(e) => text_error_response(e).into_response(),
     }
 }
 
 // ===== 今日进价采集·按商品分类导出 =====
 // 去除采购单位/仓库/供应商分组，按商品分类排序，便于整体采集当日进价
 pub async fn api_product_today_price_excel_by_category(
+    State(app): State<App>,
     headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -12092,206 +11325,20 @@ pub async fn api_product_today_price_excel_by_category(
         return (StatusCode::FORBIDDEN, serde_json::json!({ "success": false, "message": "只有超级管理员可以使用今日进价采集" }).to_string()).into_response();
     }
     let date = params.get("date").cloned().unwrap_or_default().trim().to_string();
-    let has_date = !date.is_empty();
+    let date = if date.is_empty() { None } else { Some(date) };
     let print_values = matches!(
         params.get("print_values").map(|v| v.trim().to_lowercase()).as_deref(),
         Some("1") | Some("true") | Some("yes") | Some("on")
     );
-    let where_sql = if has_date {
-        "WHERE so.order_date = ?"
-    } else {
-        "WHERE so.status IN ('pending', 'sorting')"
-    };
-    let sql = format!(
-        "SELECT soi.product_id, MAX(soi.product_name) as product_name, MAX(COALESCE(soi.spec,'')) as spec,
-                MAX(p.base_unit) as base_unit,
-                MAX(p.purchase_price) as purchase_price,
-                MAX(p.max_purchase_price) as max_purchase_price,
-                MAX(p.min_purchase_price) as min_purchase_price,
-                SUM(CASE WHEN soi.base_quantity > 0 THEN soi.base_quantity ELSE soi.quantity END) as total_qty,
-                MAX(c.name) as category_name,
-                MAX(c2.name) as parent_name
-         FROM sales_order_item soi
-         LEFT JOIN sales_order so ON soi.order_id = so.id
-         LEFT JOIN product p ON soi.product_id = p.id
-         LEFT JOIN category c ON p.category_id = c.id
-         LEFT JOIN category c2 ON c.parent_id = c2.id
-         {} AND soi.product_id > 0
-         GROUP BY soi.product_id
-         ORDER BY MAX(c2.name), MAX(c.name), MAX(soi.product_name), soi.product_id", where_sql
-    );
-    let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
-    if has_date {
-        q = q.bind(&date);
-    }
-    let rows = q.fetch_all(crate::db::pool()).await.unwrap_or_default();
-
-    // 按分类排序：分类 sort_key 优先，再按商品名
-    let mut items: Vec<serde_json::Value> = rows.iter().map(|r| {
-        let category_name = r.get::<Option<String>, _>("category_name").unwrap_or_default();
-        let parent_name = r.get::<Option<String>, _>("parent_name").unwrap_or_default();
-        let sort_key = crate::get_category_sort_key(&category_name, &parent_name);
-        serde_json::json!({
-            "product_id": r.get::<i64, _>("product_id"),
-            "product_name": r.get::<Option<String>, _>("product_name").unwrap_or_default(),
-            "spec": r.get::<Option<String>, _>("spec").unwrap_or_default(),
-            "base_unit": r.get::<Option<String>, _>("base_unit").unwrap_or_default(),
-            "total_qty": r.get::<Option<f64>, _>("total_qty").unwrap_or(0.0),
-            "purchase_price": r.get::<Option<f64>, _>("purchase_price").unwrap_or(0.0),
-            "max_purchase_price": r.get::<Option<f64>, _>("max_purchase_price").unwrap_or(0.0),
-            "min_purchase_price": r.get::<Option<f64>, _>("min_purchase_price").unwrap_or(0.0),
-            "category_name": category_name,
-            "sort_key": sort_key,
-        })
-    }).collect();
-    items.sort_by(|a, b| {
-        let sk = a["sort_key"].as_i64().unwrap_or(999).cmp(&b["sort_key"].as_i64().unwrap_or(999));
-        if sk != std::cmp::Ordering::Equal { return sk; }
-        let pn = a["product_name"].as_str().unwrap_or("").cmp(b["product_name"].as_str().unwrap_or(""));
-        if pn != std::cmp::Ordering::Equal { return pn; }
-        a["product_id"].as_i64().unwrap_or(0).cmp(&b["product_id"].as_i64().unwrap_or(0))
-    });
-
-    let excel_result: Result<Vec<u8>, XlsxError> = (|| {
-        let mut workbook = Workbook::new();
-        let worksheet = workbook.add_worksheet();
-
-        worksheet.set_landscape();
-        worksheet.set_margins(0.2, 0.2, 0.2, 0.2, 0.2, 0.2);
-        worksheet.set_print_center_vertically(false);
-        worksheet.set_print_center_horizontally(true);
-        worksheet.set_header("");
-        worksheet.set_footer("&C第 &P 页，共 &N 页");
-        worksheet.set_repeat_rows(0, 2)?;
-
-        let title_format = Format::new()
-            .set_bold()
-            .set_font_size(14)
-            .set_align(FormatAlign::Center)
-            .set_align(FormatAlign::VerticalCenter);
-
-        let header_format = Format::new()
-            .set_bold()
-            .set_font_size(10)
-            .set_align(FormatAlign::Center)
-            .set_align(FormatAlign::VerticalCenter)
-            .set_border(FormatBorder::Thin)
-            .set_text_wrap();
-
-        let cell_format = Format::new()
-            .set_font_size(10)
-            .set_align(FormatAlign::Center)
-            .set_align(FormatAlign::VerticalCenter)
-            .set_border(FormatBorder::Thin);
-
-        let cell_left_format = Format::new()
-            .set_font_size(10)
-            .set_align(FormatAlign::Left)
-            .set_align(FormatAlign::VerticalCenter)
-            .set_border(FormatBorder::Thin);
-
-        let date_format = Format::new()
-            .set_font_size(10)
-            .set_align(FormatAlign::Right)
-            .set_align(FormatAlign::VerticalCenter);
-
-        let col_widths = [4, 16, 6, 8, 8, 8, 8, 8];
-        // 第1列为序号，第2列为品名规格，第3列基本单位，第4列合计数量，第5~7列价格，第8列今日价
-        let headers = ["序号", "品名规格", "基本单位", "合计数量", "最高价", "最低价", "最近价", "今日价"];
-        let display_date = if has_date {
-            date.clone()
-        } else {
-            Local::now().format("%Y-%m-%d").to_string()
-        };
-        let max_col = 7u16;
-
-        let mut current_row = 0;
-        worksheet.merge_range(current_row, 0, current_row, max_col, "今日进价采集清单（按分类）", &title_format)?;
-        worksheet.set_row_height(current_row, 28)?;
-        current_row += 1;
-
-        worksheet.merge_range(current_row, 4, current_row, max_col, display_date.as_str(), &date_format)?;
-        worksheet.set_row_height(current_row, 14)?;
-        current_row += 1;
-
-        for (i, header) in headers.iter().enumerate() {
-            worksheet.write_with_format(current_row, i as u16, *header, &header_format)?;
-        }
-        worksheet.set_row_height(current_row, 20)?;
-        current_row += 1;
-
-        // 按分类分组打印分类标题
-        let mut last_sort_key: i64 = -1;
-        let mut seq = 1i64;
-        for item in &items {
-            let sort_key = item["sort_key"].as_i64().unwrap_or(999);
-            if sort_key != last_sort_key {
-                if last_sort_key != -1 {
-                    current_row += 1;
-                }
-                let category_name = item["category_name"].as_str().unwrap_or("未分类");
-                worksheet.merge_range(current_row, 0, current_row, max_col, format!("【{}】", category_name).as_str(), &header_format)?;
-                worksheet.set_row_height(current_row, 20)?;
-                current_row += 1;
-                last_sort_key = sort_key;
-            }
-
-            // 导出名称与采购单规则对齐：规格 -> 名称（独立取值不拼接）
-            let product_name = item["product_name"].as_str().unwrap_or("");
-            let spec = item["spec"].as_str().unwrap_or("").trim();
-            let name_with_spec = if spec.is_empty() {
-                product_name.to_string()
-            } else {
-                spec.to_string()
-            };
-            let base_unit = item["base_unit"].as_str().unwrap_or("");
-            let total_qty = item["total_qty"].as_f64().unwrap_or(0.0);
-            let max_p = item["max_purchase_price"].as_f64().unwrap_or(0.0);
-            let min_p = item["min_purchase_price"].as_f64().unwrap_or(0.0);
-            let purchase_price = item["purchase_price"].as_f64().unwrap_or(0.0);
-
-            worksheet.write_with_format(current_row, 0, seq as f64, &cell_format)?;
-            worksheet.write_with_format(current_row, 1, name_with_spec.as_str(), &cell_left_format)?;
-            worksheet.write_with_format(current_row, 2, base_unit, &cell_format)?;
-            worksheet.write_with_format(current_row, 3, total_qty, &cell_format)?;
-            worksheet.write_with_format(current_row, 4, max_p, &cell_format)?;
-            worksheet.write_with_format(current_row, 5, min_p, &cell_format)?;
-            worksheet.write_with_format(current_row, 6, purchase_price, &cell_format)?;
-            if print_values {
-                worksheet.write_with_format(current_row, 7, purchase_price, &cell_format)?;
-            } else {
-                worksheet.write_with_format(current_row, 7, "", &cell_format)?;
-            }
-            worksheet.set_row_height(current_row, 20.0)?;
-            current_row += 1;
-            seq += 1;
-        }
-
-        for (i, w) in col_widths.iter().enumerate() {
-            worksheet.set_column_width(i as u16, *w)?;
-        }
-
-        let buf = workbook.save_to_buffer()?;
-        Ok(buf)
-    })();
-
-    match excel_result {
-        Ok(buf) => {
-            let filename = if has_date {
-                format!("今日进价采集清单_按分类_{}.xlsx", date)
-            } else {
-                "今日进价采集清单_按分类.xlsx".to_string()
-            };
+    match app.today_price.export_by_category(date, print_values).await {
+        Ok((filename, buf)) => {
             let headers = [
                 ("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
                 ("Content-Disposition", &format!("attachment; filename=\"{}\"", filename)),
             ];
             (StatusCode::OK, headers, buf).into_response()
         }
-        Err(e) => {
-            eprintln!("今日进价采集清单(按分类)导出失败: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "导出失败").into_response()
-        }
+        Err(e) => text_error_response(e).into_response(),
     }
 }
 

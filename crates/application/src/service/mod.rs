@@ -10,6 +10,7 @@ pub mod purchase;
 pub mod purchaser;
 pub mod stock;
 pub mod supplier;
+pub mod today_price;
 pub mod user;
 pub mod warehouse;
 
@@ -24,6 +25,7 @@ pub use purchase::*;
 pub use purchaser::*;
 pub use stock::*;
 pub use supplier::*;
+pub use today_price::*;
 pub use user::*;
 pub use warehouse::*;
 

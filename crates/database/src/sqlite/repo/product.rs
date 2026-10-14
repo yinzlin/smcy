@@ -397,6 +397,40 @@ impl ProductRepo for SqliteProductRepo {
         Ok(rows)
     }
 
+    // —— 子步c：图片读写 ——
+
+    async fn name_of(&self, id: i64) -> Result<Option<String>, DomainError> {
+        sqlx::query_scalar("SELECT name FROM product WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)
+    }
+
+    async fn image_url_of(&self, id: i64) -> Result<Option<String>, DomainError> {
+        // 行为保持：行缺失（商品不存在）与列 NULL 均按 None 处理
+        let row = sqlx::query("SELECT image_url FROM product WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?;
+        Ok(match row {
+            Some(r) => r.get::<Option<String>, _>("image_url"),
+            None => None,
+        })
+    }
+
+    async fn set_image_url_opt(&self, id: i64, url: Option<&str>) -> Result<(), DomainError> {
+        // url=None 绑定 NULL，等价于旧 SET image_url = NULL 字面量
+        sqlx::query("UPDATE product SET image_url = ? WHERE id = ?")
+            .bind(url)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(storage)
+    }
+
     // —— 子步b：导出 / 导入 ——
 
     async fn list_for_export(&self) -> Result<Vec<ProductExportRow>, DomainError> {

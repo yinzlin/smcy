@@ -11,6 +11,7 @@ pub mod category;
 pub mod product;
 pub mod purchaser;
 pub mod supplier;
+pub mod today_price;
 pub mod user;
 pub mod warehouse;
 
@@ -19,5 +20,6 @@ pub use category::*;
 pub use product::*;
 pub use purchaser::*;
 pub use supplier::*;
+pub use today_price::*;
 pub use user::*;
 pub use warehouse::*;
