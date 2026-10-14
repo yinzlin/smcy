@@ -4,6 +4,7 @@ use axum::response::IntoResponse;
 use application::error::UseCaseError;
 use application::port::audit::BasicAuditUseCase;
 use application::port::category::CategoryUseCase;
+use application::port::inventory::InventoryUseCase;
 use application::port::price_schedule::PriceScheduleUseCase;
 use application::port::product::ProductUseCase;
 use application::port::purchaser::PurchaserUseCase;
@@ -1946,31 +1947,9 @@ pub async fn api_category_tree(State(app): State<App>, axum::extract::Query(para
     (StatusCode::OK, serde_json::to_string(&tree).unwrap())
 }
 
-pub async fn api_inventory_list() -> impl IntoResponse {
-    let rows = sqlx::query(
-        "SELECT i.id, i.product_id, i.warehouse_id, p.name, p.spec, i.quantity, i.min_stock, i.max_stock, w.name as warehouse_name
-         FROM inventory i JOIN product p ON i.product_id = p.id LEFT JOIN warehouse w ON i.warehouse_id = w.id"
-    )
-    .fetch_all(crate::db::pool())
-    .await
-    .unwrap_or_default();
-    
-    let inventory: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|row| serde_json::json!({
-            "id": row.get::<i64, _>("id"),
-            "product_id": row.get::<i64, _>("product_id"),
-            "warehouse_id": row.get::<i64, _>("warehouse_id"),
-            "warehouse_name": row.get::<Option<String>, _>("warehouse_name"),
-            "name": row.get::<String, _>("name"),
-            "spec": row.get::<Option<String>, _>("spec"),
-            "quantity": row.get::<f64, _>("quantity"),
-            "min_stock": row.get::<f64, _>("min_stock"),
-            "max_stock": row.get::<f64, _>("max_stock"),
-        }))
-        .collect();
-    
-    (StatusCode::OK, serde_json::to_string(&inventory).unwrap())
+pub async fn api_inventory_list(State(app): State<App>) -> impl IntoResponse {
+    let rows = app.inventory.list().await;
+    (StatusCode::OK, serde_json::to_string(&rows).unwrap())
 }
 
 pub async fn api_warehouse_list(State(app): State<App>) -> impl IntoResponse {

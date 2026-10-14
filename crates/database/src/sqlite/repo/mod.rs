@@ -5,6 +5,7 @@
 
 pub mod audit;
 pub mod category;
+pub mod inventory;
 pub mod oplog;
 pub mod price_schedule;
 pub mod product;
@@ -16,6 +17,7 @@ pub mod warehouse;
 
 pub use audit::*;
 pub use category::*;
+pub use inventory::*;
 pub use oplog::*;
 pub use price_schedule::*;
 pub use product::*;

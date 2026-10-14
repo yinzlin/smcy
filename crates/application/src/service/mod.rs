@@ -2,6 +2,7 @@
 pub mod basic_audit;
 pub mod category;
 pub mod excel;
+pub mod inventory;
 pub mod legacy_user;
 pub mod order_no;
 pub mod price;
@@ -18,6 +19,7 @@ pub mod warehouse;
 pub use basic_audit::*;
 pub use category::*;
 pub use excel::*;
+pub use inventory::*;
 pub use legacy_user::*;
 pub use order_no::*;
 pub use price::*;
