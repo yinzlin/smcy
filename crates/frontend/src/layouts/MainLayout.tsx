@@ -1,5 +1,5 @@
 import { Button, Dropdown, Layout, Menu, Space } from 'antd'
-import { AppstoreOutlined, HomeOutlined, LogoutOutlined, ShoppingOutlined, SwapOutlined, UserOutlined, FileTextOutlined, MoneyCollectOutlined } from '@ant-design/icons'
+import { AppstoreOutlined, HomeOutlined, LogoutOutlined, ShoppingOutlined, SwapOutlined, UserOutlined, FileTextOutlined, MoneyCollectOutlined, DollarOutlined } from '@ant-design/icons'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../stores/auth'
 
@@ -33,6 +33,7 @@ export default function MainLayout() {
             ...(user?.role === 'super_admin'
               ? [{ key: '/today-price', icon: <MoneyCollectOutlined />, label: '今日进价采集' }]
               : []),
+            { key: '/price-schedule', icon: <DollarOutlined />, label: '价格策略' },
           ]}
           onClick={({ key }) => navigate(key)}
         />

@@ -58,6 +58,11 @@ pub async fn redirect_app_today_price() -> impl IntoResponse {
     Redirect::temporary("/app/today-price")
 }
 
+/// /query/price_schedule 302 到 React 价格策略页（老页保留在 /legacy/price_schedule 回退）
+pub async fn redirect_app_price_schedule() -> impl IntoResponse {
+    Redirect::temporary("/app/price-schedule")
+}
+
 fn serve_embedded(path: &str) -> axum::response::Response {
     match AppAssets::get(path) {
         Some(content) => {
