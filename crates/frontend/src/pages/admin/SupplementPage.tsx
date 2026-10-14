@@ -29,6 +29,7 @@ import {
   type SupplementRecord,
 } from '../../api/admin/supplement'
 import { CompareTables, ProductSelect } from './SupplementParts'
+import { scrollX } from '../../utils/tableScroll'
 
 const fmt = (v: number) => (Number(v) || 0).toFixed(2)
 
@@ -1002,6 +1003,7 @@ export default function SupplementPage() {
                   columns={srcListColumns}
                   dataSource={orders}
                   pagination={false}
+                  scroll={scrollX('max-content')}
                   onRow={(o) => ({ style: { cursor: 'pointer' }, onClick: () => selectConsumableOrder(o) })}
                 />
               </div>
@@ -1018,6 +1020,7 @@ export default function SupplementPage() {
                       columns={srcDetailColumns}
                       dataSource={srcItems}
                       pagination={false}
+                      scroll={scrollX('max-content')}
                       onRow={(item) =>
                         hasScheme && schemeItemIds.includes(item.id) ? { style: { backgroundColor: '#e8f4ff' } } : {}
                       }
@@ -1044,6 +1047,7 @@ export default function SupplementPage() {
                               columns={srcSuppColumns}
                               dataSource={srcSupplements}
                               pagination={false}
+                              scroll={scrollX('max-content')}
                             />
                           </div>
                         </>
@@ -1100,6 +1104,7 @@ export default function SupplementPage() {
                   columns={tgtListColumns}
                   dataSource={orders}
                   pagination={false}
+                  scroll={scrollX('max-content')}
                   onRow={(o) => ({ style: { cursor: 'pointer' }, onClick: () => selectTargetOrder(o) })}
                 />
               </div>
@@ -1115,6 +1120,7 @@ export default function SupplementPage() {
                       columns={tgtDetailColumns}
                       dataSource={tgtItems}
                       pagination={false}
+                      scroll={scrollX('max-content')}
                     />
 
                     {/* 真实账套 vs 分摊账套 对比 */}
@@ -1264,6 +1270,7 @@ export default function SupplementPage() {
                               columns={replaceLineColumns}
                               dataSource={replaceLines}
                               pagination={false}
+                              scroll={scrollX('max-content')}
                               locale={{ emptyText: ' ' }}
                             />
                             <div style={{ marginBottom: 8 }}>
@@ -1303,6 +1310,7 @@ export default function SupplementPage() {
                           columns={pendingColumns}
                           dataSource={pendingSupplements}
                           pagination={false}
+                          scroll={scrollX('max-content')}
                           onRow={(o) => ({
                             style: { color: o.operation_type === 'replace_remove' ? '#a94442' : o.operation_type === 'replace_add' ? '#3c763d' : undefined },
                           })}

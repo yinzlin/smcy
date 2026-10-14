@@ -5,6 +5,7 @@ import type { TableProps } from 'antd'
 import { useQuery } from '@tanstack/react-query'
 import ReportCard from '../../components/report/ReportCard'
 import { fmtMoney } from '../../utils/format'
+import { scrollX } from '../../utils/tableScroll'
 import { fetchPurchaserBalance, PURCHASER_BALANCE_EXPORT_URL, type PurchaserBalanceRow } from '../../api/query/prices'
 
 const EXPORT_BTN_STYLE = { background: '#52c41a', borderColor: '#52c41a', color: '#fff' }
@@ -60,6 +61,7 @@ export default function PurchaserBalancePage() {
         loading={isLoading}
         columns={columns}
         dataSource={rows}
+        scroll={scrollX('max-content')}
         pagination={false}
         summary={() =>
           rows.length > 0 ? (

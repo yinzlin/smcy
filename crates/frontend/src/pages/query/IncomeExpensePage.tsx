@@ -5,6 +5,7 @@ import dayjs from 'dayjs'
 import { useQuery } from '@tanstack/react-query'
 import ReportCard, { FilterItem } from '../../components/report/ReportCard'
 import { fmt2, fmtMoney } from '../../utils/format'
+import { scrollX } from '../../utils/tableScroll'
 import {
   INCOME_EXPENSE_EXPORT_URL,
   fetchIncomeExpense,
@@ -90,6 +91,7 @@ export default function IncomeExpensePage() {
         loading={isFetching}
         columns={columns}
         dataSource={data?.records ?? []}
+        scroll={scrollX('max-content')}
         pagination={false}
       />
     </ReportCard>

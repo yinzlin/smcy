@@ -5,6 +5,7 @@ import dayjs from 'dayjs'
 import { useQuery } from '@tanstack/react-query'
 import ReportCard, { FilterItem } from '../../components/report/ReportCard'
 import { fmt2 } from '../../utils/format'
+import { scrollX } from '../../utils/tableScroll'
 import {
   fetchCategoryStats,
   type CategoryStatsQuery,
@@ -65,6 +66,7 @@ export default function CategoryStatsPage() {
         loading={isFetching}
         columns={columns}
         dataSource={data ?? []}
+        scroll={scrollX('max-content')}
         pagination={false}
       />
     </ReportCard>

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { App, AutoComplete, Button, Input, InputNumber, Popconfirm, Select } from 'antd'
 import { getLastPurchasePrice, getProductUnits, searchProducts, type ProductSearchItem, type UnitOption } from '../../api/purchase'
 import { lookupPriceScheduleBatch, type SchedulePriceEntry } from '../../api/sales'
+import useIsMobile from '../../hooks/useIsMobile'
 
 export interface SalesEditItem {
   key: number
@@ -62,6 +63,24 @@ export function scheduleUnitPrice(p: SchedulePriceEntry | null | undefined): num
   return round2(vals.reduce((a, b) => a + b, 0) / vals.length)
 }
 
+/** 移动端卡片字段：label 在上的紧凑布局（chrome87 兼容的 flex 布局） */
+function MobileField({
+  label,
+  children,
+  style,
+}: {
+  label: string
+  children: React.ReactNode
+  style?: React.CSSProperties
+}) {
+  return (
+    <div style={{ minWidth: 0, marginBottom: 8, ...style }}>
+      <div style={{ fontSize: 12, color: '#888', marginBottom: 2 }}>{label}</div>
+      {children}
+    </div>
+  )
+}
+
 interface Props {
   items: SalesEditItem[]
   onChange: (items: SalesEditItem[]) => void
@@ -72,6 +91,7 @@ interface Props {
 
 export default function SalesItemsEditor({ items, onChange, orderDate, suppliers }: Props) {
   const { modal } = App.useApp()
+  const isMobile = useIsMobile()
 
   const containerRef = useRef<HTMLDivElement>(null)
   const itemsRef = useRef(items)
@@ -89,6 +109,10 @@ export default function SalesItemsEditor({ items, onChange, orderDate, suppliers
 
   const removeItem = (index: number) => {
     onChange(itemsRef.current.filter((_, j) => j !== index))
+  }
+
+  const addRow = () => {
+    onChange([...itemsRef.current, newBlankSalesItem()])
   }
 
   // 同列上下移动焦点（WPS 风格）
@@ -137,8 +161,45 @@ export default function SalesItemsEditor({ items, onChange, orderDate, suppliers
     }, 300)
   }
 
+  // 商品下拉选项（桌面/移动共用）
+  const productOptions = (index: number) =>
+    (searchMap[index] ?? []).map((p) => ({
+      value: String(p.id),
+      label: (
+        <div>
+          <strong>{p.name}</strong>
+          {p.spec ? ` (${p.spec})` : ''}
+          {(p.alias1 || p.alias2) && (
+            <div style={{ fontSize: 12, color: '#888' }}>
+              {[p.alias1 && `别称1: ${p.alias1}`, p.alias2 && `别称2: ${p.alias2}`].filter(Boolean).join(', ')}
+            </div>
+          )}
+          {p.category_name && <div style={{ fontSize: 12, color: '#aaa' }}>分类: {p.category_name}</div>}
+        </div>
+      ),
+    }))
+
+  const handleProductNameChange = (index: number, v: string) => {
+    if ((searchMap[index] ?? []).some((p) => String(p.id) === v)) return
+    const cur = itemsRef.current[index]
+    patch(index, {
+      product_name: v,
+      ...(cur.product_id > 0 && v !== cur.product_name ? { product_id: 0 } : {}),
+    })
+    handleProductSearch(index, v)
+  }
+
+  const handleProductSelect = (index: number, v: string) => {
+    const p = (searchMap[index] ?? []).find((x) => String(x.id) === v)
+    if (!p) return
+    // 移动端只做数据更新；桌面 wrapper 额外做焦点跳转
+    if (isMobile) void applyProductCore(index, p)
+    else void applyProduct(index, p)
+  }
+
   // 选中商品：默认基础单价 → 按订单日期查时段价 → 零售价低于最近采购价提醒 → 多单位
-  const applyProduct = async (index: number, p: ProductSearchItem) => {
+  // （纯数据更新部分，桌面/移动共用；焦点跳转拆分到桌面 wrapper applyProduct）
+  const applyProductCore = async (index: number, p: ProductSearchItem) => {
     // 同商品重复提示：订单中已有该商品时，确认后才能再增加一条记录
     const dupIdx = itemsRef.current.findIndex((it, j) => j !== index && it.product_id === p.id)
     if (dupIdx >= 0) {
@@ -221,11 +282,15 @@ export default function SalesItemsEditor({ items, onChange, orderDate, suppliers
       patch(index, { units: [] })
     }
 
-    // WPS 风格：选中后跳到下一行商品名称，末行则自动新增明细
+    // 末行则自动新增明细（数据行为，两分支共用）
     if (index >= itemsRef.current.length - 1) {
-      onChange([...itemsRef.current, newBlankSalesItem()])
+      addRow()
     }
-    focusProductInput(index + 1)
+  }
+
+  // 桌面专用 wrapper：选中商品后跳到下一行商品名称（WPS 风格焦点跳转，仅桌面分支调用）
+  const applyProduct = (index: number, p: ProductSearchItem) => {
+    void applyProductCore(index, p).then(() => focusProductInput(index + 1))
   }
 
   const updateUnit = (index: number, unitName: string) => {
@@ -262,7 +327,145 @@ export default function SalesItemsEditor({ items, onChange, orderDate, suppliers
     }
   }
 
+  const updateQuantity = (index: number, v: number | null) => {
+    const qty = round2(v ?? 0)
+    const item = itemsRef.current[index]
+    patch(index, {
+      quantity: qty,
+      base_quantity: round2(qty * (item.ratio || 1)),
+      amount: round2(item.unit_price * qty),
+    })
+  }
+
+  const updateUnitPrice = (index: number, v: number | null) => {
+    const price = round2(v ?? 0)
+    const item = itemsRef.current[index]
+    patch(index, { unit_price: price, amount: round2(price * item.quantity) })
+  }
+
   const cellStyle: React.CSSProperties = { border: '1px solid #f0f0f0', padding: 4, verticalAlign: 'middle' }
+
+  // 移动端：逐行卡片布局（不渲染桌面 table，无键盘导航；业务 handler 与桌面共用）
+  if (isMobile) {
+    return (
+      <div style={{ padding: 4 }}>
+        {items.map((item, index) => (
+          <div
+            key={item.key}
+            style={{ border: '1px solid #f0f0f0', borderRadius: 8, padding: 12, marginBottom: 12, background: '#fff' }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <div
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  fontWeight: 600,
+                  marginRight: 8,
+                }}
+              >
+                #{index + 1} {item.product_name || <span style={{ color: '#bbb' }}>未选择商品</span>}
+              </div>
+              <Popconfirm title="确定删除该商品行？" onConfirm={() => removeItem(index)}>
+                <Button size="small" danger>
+                  删除
+                </Button>
+              </Popconfirm>
+            </div>
+            <MobileField label="商品名称">
+              <AutoComplete
+                style={{ width: '100%' }}
+                value={item.product_name}
+                placeholder="输入商品名称搜索"
+                options={productOptions(index)}
+                onChange={(v) => handleProductNameChange(index, v)}
+                onSelect={(v) => handleProductSelect(index, v)}
+              />
+            </MobileField>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+              <MobileField label="规格" style={{ flex: 1, marginBottom: 0 }}>
+                <Input value={item.spec} onChange={(e) => patch(index, { spec: e.target.value })} />
+              </MobileField>
+              <MobileField label="单位" style={{ flex: 1, marginBottom: 0 }}>
+                <Select
+                  style={{ width: '100%' }}
+                  value={item.unit || undefined}
+                  onChange={(v) => updateUnit(index, v)}
+                  options={[
+                    ...(item.base_unit ? [{ value: item.base_unit, label: `${item.base_unit}(基础单位)` }] : []),
+                    ...item.units.map((u) => ({ value: u.name, label: u.name })),
+                  ]}
+                />
+              </MobileField>
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+              <MobileField label="预售数量" style={{ flex: 1, marginBottom: 0 }}>
+                <InputNumber
+                  style={{ width: '100%' }}
+                  controls={false}
+                  min={0}
+                  precision={2}
+                  placeholder="预售数量"
+                  value={item.pre_sale_quantity || null}
+                  onChange={(v) => updatePreSaleQty(index, v ?? 0)}
+                />
+              </MobileField>
+              <MobileField label="数量" style={{ flex: 1, marginBottom: 0 }}>
+                <InputNumber
+                  style={{ width: '100%' }}
+                  controls={false}
+                  min={0}
+                  precision={2}
+                  value={item.quantity || null}
+                  onChange={(v) => updateQuantity(index, v)}
+                />
+              </MobileField>
+              <MobileField label="单价" style={{ flex: 1, marginBottom: 0 }}>
+                <InputNumber
+                  style={{ width: '100%' }}
+                  controls={false}
+                  min={0}
+                  precision={2}
+                  value={item.unit_price}
+                  onChange={(v) => updateUnitPrice(index, v)}
+                />
+              </MobileField>
+            </div>
+            <MobileField label="金额">
+              <div style={{ textAlign: 'right', fontSize: 16, fontWeight: 600, padding: '2px 0' }}>
+                {item.amount.toFixed(2)}
+              </div>
+            </MobileField>
+            <MobileField label="供应商">
+              <Select
+                style={{ width: '100%' }}
+                showSearch
+                allowClear
+                placeholder="请选择供应商"
+                optionFilterProp="label"
+                value={item.supplier_id || undefined}
+                options={suppliers.map((s) => ({ value: s.id, label: s.name }))}
+                onChange={(v, opt) =>
+                  patch(index, {
+                    supplier_id: v ?? 0,
+                    supplier_name: v ? ((opt as { label: string })?.label ?? '') : '',
+                  })
+                }
+              />
+            </MobileField>
+            <MobileField label="备注" style={{ marginBottom: 0 }}>
+              <Input placeholder="单品备注" value={item.remark} onChange={(e) => patch(index, { remark: e.target.value })} />
+            </MobileField>
+          </div>
+        ))}
+        <Button block type="dashed" onClick={() => addRow()}>
+          新增商品行
+        </Button>
+      </div>
+    )
+  }
 
   return (
     <div ref={containerRef} style={{ overflowX: 'auto' }}>
@@ -286,36 +489,9 @@ export default function SalesItemsEditor({ items, onChange, orderDate, suppliers
                     style={{ width: '100%' }}
                     value={item.product_name}
                     placeholder="输入商品名称搜索"
-                    options={(searchMap[index] ?? []).map((p) => ({
-                      value: String(p.id),
-                      label: (
-                        <div>
-                          <strong>{p.name}</strong>
-                          {p.spec ? ` (${p.spec})` : ''}
-                          {(p.alias1 || p.alias2) && (
-                            <div style={{ fontSize: 12, color: '#888' }}>
-                              {[p.alias1 && `别称1: ${p.alias1}`, p.alias2 && `别称2: ${p.alias2}`]
-                                .filter(Boolean)
-                                .join(', ')}
-                            </div>
-                          )}
-                          {p.category_name && <div style={{ fontSize: 12, color: '#aaa' }}>分类: {p.category_name}</div>}
-                        </div>
-                      ),
-                    }))}
-                    onChange={(v) => {
-                      if ((searchMap[index] ?? []).some((p) => String(p.id) === v)) return
-                      const cur = itemsRef.current[index]
-                      patch(index, {
-                        product_name: v,
-                        ...(cur.product_id > 0 && v !== cur.product_name ? { product_id: 0 } : {}),
-                      })
-                      handleProductSearch(index, v)
-                    }}
-                    onSelect={(v) => {
-                      const p = (searchMap[index] ?? []).find((x) => String(x.id) === v)
-                      if (p) void applyProduct(index, p)
-                    }}
+                    options={productOptions(index)}
+                    onChange={(v) => handleProductNameChange(index, v)}
+                    onSelect={(v) => handleProductSelect(index, v)}
                     onDropdownVisibleChange={(open) => {
                       dropdownOpen.current[index] = open
                     }}
@@ -323,7 +499,7 @@ export default function SalesItemsEditor({ items, onChange, orderDate, suppliers
                       if (e.key === 'Enter' && !dropdownOpen.current[index]) {
                         e.preventDefault()
                         if (index >= itemsRef.current.length - 1) {
-                          onChange([...itemsRef.current, newBlankSalesItem()])
+                          addRow()
                         }
                         focusProductInput(index + 1)
                       }
@@ -372,14 +548,7 @@ export default function SalesItemsEditor({ items, onChange, orderDate, suppliers
                   min={0}
                   precision={2}
                   value={item.quantity || null}
-                  onChange={(v) => {
-                    const qty = round2(v ?? 0)
-                    patch(index, {
-                      quantity: qty,
-                      base_quantity: round2(qty * (item.ratio || 1)),
-                      amount: round2(item.unit_price * qty),
-                    })
-                  }}
+                  onChange={(v) => updateQuantity(index, v)}
                   onKeyDown={(e) => handleEnterNav(e, index)}
                 />
               </td>
@@ -391,10 +560,7 @@ export default function SalesItemsEditor({ items, onChange, orderDate, suppliers
                   min={0}
                   precision={2}
                   value={item.unit_price}
-                  onChange={(v) => {
-                    const price = round2(v ?? 0)
-                    patch(index, { unit_price: price, amount: round2(price * item.quantity) })
-                  }}
+                  onChange={(v) => updateUnitPrice(index, v)}
                   onKeyDown={(e) => handleEnterNav(e, index)}
                 />
               </td>

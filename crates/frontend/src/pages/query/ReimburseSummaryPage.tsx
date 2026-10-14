@@ -12,6 +12,7 @@ import {
   type ReimburseSummaryProductItem,
 } from '../../api/query/summaries'
 import { fmt2, fmtMoney } from '../../utils/format'
+import { scrollX } from '../../utils/tableScroll'
 
 const SECTION_TITLE: CSSProperties = { fontSize: 15, fontWeight: 600, margin: '0 0 10px' }
 const SECTION_TITLE_GAP: CSSProperties = { fontSize: 15, fontWeight: 600, margin: '20px 0 10px' }
@@ -92,6 +93,7 @@ export default function ReimburseSummaryPage() {
         loading={isFetching}
         columns={purchaserColumns}
         dataSource={purchasers}
+        scroll={scrollX('max-content')}
         pagination={false}
         summary={() =>
           purchasers.length > 0 ? (
@@ -123,6 +125,7 @@ export default function ReimburseSummaryPage() {
         loading={isFetching}
         columns={productColumns}
         dataSource={products}
+        scroll={scrollX('max-content')}
         pagination={false}
         summary={() =>
           products.length > 0 ? (

@@ -1,0 +1,11 @@
+/* 全局移动端兜底（chrome87 兼容，仅用 calc/vw/max-width） */
+
+/* 弹窗小屏收缩：任何固定宽度 Modal 都不超出视口 */
+.ant-modal {
+  max-width: calc(100vw - 16px);
+}
+
+/* 抽屉在超窄屏不占满全宽时保持可读 */
+.ant-drawer-content-wrapper {
+  max-width: 100vw;
+}

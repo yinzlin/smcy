@@ -4,6 +4,7 @@ import type { TableProps } from 'antd'
 import { useQuery } from '@tanstack/react-query'
 import ReportCard from '../../components/report/ReportCard'
 import { fmt2 } from '../../utils/format'
+import { scrollX } from '../../utils/tableScroll'
 import {
   queryStockWarning,
   STOCK_WARNING_EXPORT_URL,
@@ -77,6 +78,7 @@ export default function StockWarningPage() {
           loading={isLoading}
           columns={lowColumns}
           dataSource={data?.low_stock ?? []}
+          scroll={scrollX('max-content')}
           pagination={false}
           locale={{ emptyText: '暂无数据' }}
         />
@@ -92,6 +94,7 @@ export default function StockWarningPage() {
           size="small"
           columns={highColumns}
           dataSource={data?.high_stock ?? []}
+          scroll={scrollX('max-content')}
           pagination={false}
           locale={{ emptyText: '暂无数据' }}
         />

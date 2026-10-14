@@ -44,10 +44,11 @@ export default function LoginPage() {
         justifyContent: 'center',
         alignItems: 'center',
         background: '#f0f2f5',
+        padding: 16,
       }}
     >
       {contextHolder}
-      <Card title="食材收发系统" style={{ width: 360 }} styles={{ header: { textAlign: 'center' } }}>
+      <Card title="食材收发系统" style={{ width: '100%', maxWidth: 360 }} styles={{ header: { textAlign: 'center' } }}>
         <Form layout="vertical" onFinish={onFinish} autoComplete="off">
           <Form.Item name="username" rules={[{ required: true, message: '请输入用户名' }]}>
             <Input prefix={<UserOutlined />} placeholder="用户名" size="large" />

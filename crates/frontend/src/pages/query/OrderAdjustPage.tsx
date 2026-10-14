@@ -27,6 +27,7 @@ import {
   type SupplementRecord,
 } from '../../api/query/orderadjust'
 import { listPurchasers, type SalesOrderDetail } from '../../api/sales'
+import { scrollX } from '../../utils/tableScroll'
 
 type AdjType = 'new_item' | 'increase_quantity' | 'replace'
 
@@ -602,6 +603,7 @@ export default function OrderAdjustPage() {
           loading={adjLoading}
           columns={adjColumns}
           dataSource={adjResp?.items ?? []}
+          scroll={scrollX('max-content')}
           pagination={false}
           locale={{ emptyText: '暂无' }}
         />
@@ -656,6 +658,7 @@ export default function OrderAdjustPage() {
                       loading={compareQuery.isLoading}
                       columns={realColumns}
                       dataSource={compare?.items ?? []}
+                      scroll={scrollX('max-content')}
                       pagination={false}
                       locale={{ emptyText: BLANK_EMPTY_TEXT }}
                     />
@@ -685,6 +688,7 @@ export default function OrderAdjustPage() {
                       loading={compareQuery.isLoading}
                       columns={adjustedColumns}
                       dataSource={compare?.items ?? []}
+                      scroll={scrollX('max-content')}
                       pagination={false}
                       locale={{ emptyText: BLANK_EMPTY_TEXT }}
                       onRow={(it) => ({
@@ -843,6 +847,7 @@ export default function OrderAdjustPage() {
                   bordered
                   columns={replaceLineColumns}
                   dataSource={replaceLines}
+                  scroll={scrollX('max-content')}
                   pagination={false}
                   locale={{ emptyText: BLANK_EMPTY_TEXT }}
                 />
@@ -885,6 +890,7 @@ export default function OrderAdjustPage() {
               loading={recordsQuery.isLoading}
               columns={recordColumns}
               dataSource={recordsQuery.data ?? []}
+              scroll={scrollX('max-content')}
               pagination={false}
               locale={{ emptyText: BLANK_EMPTY_TEXT }}
             />

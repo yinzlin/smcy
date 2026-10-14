@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { App, Button, Card, Col, Form, Input, InputNumber, Modal, Row, Select, Table } from 'antd'
 import type { TableProps } from 'antd'
 import { checkProductName, createProduct, type Category, type Product } from '../../api/product'
+import { scrollX } from '../../utils/tableScroll'
 
 interface Props {
   categories: Category[]
@@ -68,40 +69,40 @@ export default function CreateProductCard({ categories, isSuperAdmin, onCreated 
   return (
     <Card title="新增商品" size="small">
       <Form form={form} layout="vertical" initialValues={{ base_unit: '斤' }}>
-        <Row gutter={12}>
-          <Col span={4}>
+        <Row gutter={[12, 8]}>
+          <Col xs={24} sm={12} lg={4}>
             <Form.Item name="name" rules={[{ required: true, message: '请输入商品名称' }]}>
               <Input placeholder="商品名称" />
             </Form.Item>
           </Col>
-          <Col span={4}>
+          <Col xs={24} sm={12} lg={4}>
             <Form.Item name="spec">
               <Input placeholder="规格" />
             </Form.Item>
           </Col>
-          <Col span={2}>
+          <Col xs={24} sm={12} lg={2}>
             <Form.Item name="unit">
               <Input placeholder="显示单位" />
             </Form.Item>
           </Col>
-          <Col span={2}>
+          <Col xs={24} sm={12} lg={2}>
             <Form.Item name="base_unit">
               <Input placeholder="基础单位" />
             </Form.Item>
           </Col>
-          <Col span={3}>
+          <Col xs={24} sm={12} lg={3}>
             <Form.Item name="base_price">
               <InputNumber placeholder="基础单价(售价)" step={0.01} style={{ width: '100%' }} />
             </Form.Item>
           </Col>
           {isSuperAdmin && (
-            <Col span={3}>
+            <Col xs={24} sm={12} lg={3}>
               <Form.Item name="purchase_price">
                 <InputNumber placeholder="进价" step={0.01} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
           )}
-          <Col span={3}>
+          <Col xs={24} sm={12} lg={3}>
             <Form.Item name="category_id">
               <Select
                 placeholder="分类"
@@ -110,12 +111,12 @@ export default function CreateProductCard({ categories, isSuperAdmin, onCreated 
               />
             </Form.Item>
           </Col>
-          <Col span={2}>
+          <Col xs={24} sm={12} lg={2}>
             <Form.Item name="shelf_life">
               <Input placeholder="保质期" />
             </Form.Item>
           </Col>
-          <Col span={2}>
+          <Col xs={24} sm={12} lg={2}>
             <Form.Item>
               <Button type="primary" loading={submitting} onClick={submit} block>
                 新增
@@ -149,6 +150,7 @@ export default function CreateProductCard({ categories, isSuperAdmin, onCreated 
           pagination={false}
           dataSource={duplicates ?? []}
           columns={duplicateColumns}
+          scroll={scrollX('max-content')}
         />
       </Modal>
     </Card>

@@ -10,6 +10,7 @@ import {
 } from '../../api/query/orders'
 import { listPurchasers, type SalesOrderDetail } from '../../api/sales'
 import { fmt2, fmtMoney } from '../../utils/format'
+import { scrollX } from '../../utils/tableScroll'
 import ReportCard, { FilterItem } from '../../components/report/ReportCard'
 
 const PAGE_SIZE = 20
@@ -208,6 +209,7 @@ export default function SalesOrderQueryPage() {
           loading={listQuery.isFetching}
           columns={columns}
           dataSource={rows}
+          scroll={scrollX('max-content')}
           pagination={
             resp && resp.total_pages > 1
               ? {
@@ -275,6 +277,7 @@ export default function SalesOrderQueryPage() {
               pagination={false}
               columns={itemColumns}
               dataSource={detailItems}
+              scroll={scrollX('max-content')}
               summary={() => (
                 <Table.Summary.Row>
                   <Table.Summary.Cell index={0} colSpan={6}>

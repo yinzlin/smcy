@@ -11,6 +11,7 @@ import {
   type ProductRankTopItem,
 } from '../../api/query/summaries'
 import { fmt2, fmtMoney } from '../../utils/format'
+import { scrollX } from '../../utils/tableScroll'
 
 const SECTION_TITLE: CSSProperties = { fontSize: 15, fontWeight: 600, margin: '0 0 10px' }
 const SECTION_TITLE_GAP: CSSProperties = { fontSize: 15, fontWeight: 600, margin: '20px 0 10px' }
@@ -84,6 +85,7 @@ export default function ProductRankPage() {
         loading={isFetching}
         columns={topColumns}
         dataSource={topSelling}
+        scroll={scrollX('max-content')}
         pagination={false}
         summary={() =>
           topSelling.length > 0 ? (
@@ -113,6 +115,7 @@ export default function ProductRankPage() {
         loading={isFetching}
         columns={slowColumns}
         dataSource={slowMoving}
+        scroll={scrollX('max-content')}
         pagination={false}
       />
     </ReportCard>

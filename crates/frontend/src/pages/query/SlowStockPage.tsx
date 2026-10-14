@@ -5,6 +5,7 @@ import type { TableProps } from 'antd'
 import { useQuery } from '@tanstack/react-query'
 import ReportCard, { FilterItem } from '../../components/report/ReportCard'
 import { fmt2 } from '../../utils/format'
+import { scrollX } from '../../utils/tableScroll'
 import { querySlowStock, type SlowStockItem } from '../../api/query/stock'
 
 export default function SlowStockPage() {
@@ -58,6 +59,7 @@ export default function SlowStockPage() {
         loading={isLoading}
         columns={columns}
         dataSource={data}
+        scroll={scrollX('max-content')}
         pagination={false}
         locale={{ emptyText: '暂无数据' }}
       />

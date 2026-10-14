@@ -289,8 +289,8 @@ export default function PurchaserPage() {
       <Space direction="vertical" size="middle" style={{ display: 'flex' }}>
           <Card size="small" title="新增采购单位">
             <Form form={createForm} onFinish={handleCreate} layout="vertical">
-              <Row gutter={8}>
-                <Col span={3}>
+              <Row gutter={[8, 8]}>
+                <Col xs={24} sm={12} lg={3}>
                   <Form.Item
                     name="name"
                     rules={[{ required: true, message: '请输入单位名称' }]}
@@ -299,37 +299,37 @@ export default function PurchaserPage() {
                     <Input placeholder="单位名称" />
                   </Form.Item>
                 </Col>
-                <Col span={2}>
+                <Col xs={24} sm={12} lg={2}>
                   <Form.Item name="contact" style={{ marginBottom: 8 }}>
                     <Input placeholder="联系人" />
                   </Form.Item>
                 </Col>
-                <Col span={2}>
+                <Col xs={24} sm={12} lg={2}>
                   <Form.Item name="phone" style={{ marginBottom: 8 }}>
                     <Input placeholder="电话" />
                   </Form.Item>
                 </Col>
-                <Col span={3}>
+                <Col xs={24} sm={12} lg={3}>
                   <Form.Item name="address" style={{ marginBottom: 8 }}>
                     <Input placeholder="地址" />
                   </Form.Item>
                 </Col>
-                <Col span={2}>
+                <Col xs={24} sm={12} lg={2}>
                   <Form.Item name="category_id" style={{ marginBottom: 8 }}>
                     <Select placeholder="无分类" allowClear options={categoryOptions} />
                   </Form.Item>
                 </Col>
-                <Col span={4}>
+                <Col xs={24} sm={12} lg={4}>
                   <Form.Item name="business_scope" style={{ marginBottom: 8 }}>
                     <Input placeholder="经营范围" />
                   </Form.Item>
                 </Col>
-                <Col span={4}>
+                <Col xs={24} sm={12} lg={4}>
                   <Form.Item name="remark" style={{ marginBottom: 8 }}>
                     <Input placeholder="备注" />
                   </Form.Item>
                 </Col>
-                <Col span={2}>
+                <Col xs={24} sm={12} lg={2}>
                   <Button type="primary" htmlType="submit" block>
                     新增
                   </Button>

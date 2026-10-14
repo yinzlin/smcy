@@ -156,7 +156,7 @@ export function StockSummaryView({ title, desc, kind }: { title: string; desc: s
     >
       <Row gutter={16} style={{ marginBottom: 16 }}>
         {summaryTiles.map((t) => (
-          <Col span={6} key={t.label}>
+          <Col xs={12} md={6} lg={6} key={t.label}>
             <div style={{ background: '#fafafa', borderRadius: 8, textAlign: 'center', padding: '8px 0' }}>
               <div style={{ color: '#999', fontSize: 12 }}>{t.label}</div>
               <div style={{ fontSize: 22, fontWeight: 600, color: t.color }}>{fmt2(t.value)}</div>

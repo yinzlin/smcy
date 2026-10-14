@@ -20,6 +20,7 @@ import {
   type SalesOrderListItem,
 } from '../../api/sales'
 import { useAuth } from '../../stores/auth'
+import { scrollX } from '../../utils/tableScroll'
 import SalesFormCard from './SalesFormCard'
 
 const STATUS_LABELS: Record<string, string> = {
@@ -423,6 +424,7 @@ export default function SalesPage() {
         loading={isLoading}
         columns={columns}
         dataSource={orders}
+        scroll={scrollX('max-content')}
         onRow={(o) => ({ onClick: () => void loadDetail(o.id), style: { cursor: 'pointer' } })}
         onChange={(_p, _f, sorter) => {
           const s = Array.isArray(sorter) ? sorter[0] : sorter

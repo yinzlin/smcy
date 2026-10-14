@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { App, AutoComplete, Button, Card, DatePicker, Input, InputNumber, Modal, Select, Space, Table, Upload } from 'antd'
+import { App, AutoComplete, Button, Card, Col, DatePicker, Input, InputNumber, Modal, Row, Select, Space, Table, Upload } from 'antd'
 import { PictureOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { useQuery } from '@tanstack/react-query'
@@ -506,11 +506,11 @@ export default function SalesFormCard({ editing, onSaved, onCancelEdit }: Props)
 
   return (
     <Card title={editing ? `编辑销售订单（${editing.order_no}）` : '新建销售订单'} style={{ marginBottom: 16 }}>
-      <Space wrap size="middle" style={{ marginBottom: 12 }}>
-        <div>
+      <Row gutter={[8, 8]} style={{ marginBottom: 12 }}>
+        <Col xs={24} sm={12} lg={6}>
           <div style={{ marginBottom: 4 }}>采购单位：</div>
           <AutoComplete
-            style={{ width: 220 }}
+            style={{ width: '100%', maxWidth: 220 }}
             placeholder="输入关键字搜索（仅已审核）"
             value={purchaserName}
             options={auditedPurchasers.map((p) => ({ value: String(p.id), label: p.name }))}
@@ -525,11 +525,11 @@ export default function SalesFormCard({ editing, onSaved, onCancelEdit }: Props)
               if (p) selectPurchaser(p.id, p.name)
             }}
           />
-        </div>
-        <div>
+        </Col>
+        <Col xs={24} sm={12} lg={6}>
           <div style={{ marginBottom: 4 }}>出库仓库：</div>
           <Select
-            style={{ width: 200 }}
+            style={{ width: '100%', maxWidth: 200 }}
             showSearch
             allowClear
             placeholder="选择仓库"
@@ -541,35 +541,35 @@ export default function SalesFormCard({ editing, onSaved, onCancelEdit }: Props)
             }}
             options={warehouses.map((w) => ({ value: w.id, label: w.name }))}
           />
-        </div>
-        <div>
+        </Col>
+        <Col xs={24} sm={12} lg={6}>
           <div style={{ marginBottom: 4 }}>订单号：</div>
-          <Input style={{ width: 180 }} value={orderNo} readOnly />
-        </div>
-        <div>
+          <Input style={{ width: '100%', maxWidth: 180 }} value={orderNo} readOnly />
+        </Col>
+        <Col xs={24} sm={12} lg={6}>
           <div style={{ marginBottom: 4 }}>订单日期：</div>
           <DatePicker
             value={dayjs(orderDate)}
             onChange={(d) => void onOrderDateChange(d ? d.format('YYYY-MM-DD') : today())}
           />
-        </div>
-        <div>
+        </Col>
+        <Col xs={24} sm={12} lg={6}>
           <div style={{ marginBottom: 4 }}>供应商（验收单/报销单用）：</div>
-          <Input style={{ width: 240 }} value={supplierCompany} onChange={(e) => setSupplierCompany(e.target.value)} placeholder="请输入供应商名称" />
-        </div>
-        <div>
+          <Input style={{ width: '100%', maxWidth: 240 }} value={supplierCompany} onChange={(e) => setSupplierCompany(e.target.value)} placeholder="请输入供应商名称" />
+        </Col>
+        <Col xs={24} sm={12} lg={6}>
           <div style={{ marginBottom: 4 }}>供货车牌号（验收单/报销单用）：</div>
-          <Input style={{ width: 160 }} value={truckPlate} onChange={(e) => setTruckPlate(e.target.value)} placeholder="请输入供货车牌号" />
-        </div>
-        <div>
+          <Input style={{ width: '100%', maxWidth: 160 }} value={truckPlate} onChange={(e) => setTruckPlate(e.target.value)} placeholder="请输入供货车牌号" />
+        </Col>
+        <Col xs={24} sm={12} lg={6}>
           <div style={{ marginBottom: 4 }}>联系方式（验收单/报销单用）：</div>
-          <Input style={{ width: 160 }} value={contactPhone} onChange={(e) => setContactPhone(e.target.value)} placeholder="请输入联系方式" />
-        </div>
-        <div>
+          <Input style={{ width: '100%', maxWidth: 160 }} value={contactPhone} onChange={(e) => setContactPhone(e.target.value)} placeholder="请输入联系方式" />
+        </Col>
+        <Col xs={24} sm={12} lg={6}>
           <div style={{ marginBottom: 4 }}>备注：</div>
-          <Input style={{ width: 200 }} value={remark} onChange={(e) => setRemark(e.target.value)} />
-        </div>
-      </Space>
+          <Input style={{ width: '100%', maxWidth: 200 }} value={remark} onChange={(e) => setRemark(e.target.value)} />
+        </Col>
+      </Row>
 
       <SalesItemsEditor items={items} onChange={setItems} orderDate={orderDate} suppliers={auditedSuppliers} />
 

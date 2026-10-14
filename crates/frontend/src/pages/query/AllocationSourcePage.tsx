@@ -7,6 +7,7 @@ import { useQuery } from '@tanstack/react-query'
 import ReportCard, { FilterItem } from '../../components/report/ReportCard'
 import { getAllocationSource, type AllocationSourceItem } from '../../api/query/summaries'
 import { fmtMoney } from '../../utils/format'
+import { scrollX } from '../../utils/tableScroll'
 
 const SECTION_TITLE: CSSProperties = { fontSize: 15, fontWeight: 600, margin: '0 0 10px' }
 
@@ -92,6 +93,7 @@ export default function AllocationSourcePage() {
         loading={isFetching}
         columns={columns}
         dataSource={rows}
+        scroll={scrollX('max-content')}
         pagination={false}
         summary={() =>
           rows.length > 0 ? (

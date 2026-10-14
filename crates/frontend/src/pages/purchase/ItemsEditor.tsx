@@ -12,6 +12,7 @@ import {
   type UnitOption,
   type Warehouse,
 } from '../../api/purchase'
+import useIsMobile from '../../hooks/useIsMobile'
 
 export interface EditItem {
   key: number
@@ -89,8 +90,17 @@ interface Props {
   warehouses: Warehouse[]
 }
 
+// 移动端卡片：标签+控件的纵向行
+const fieldRow = (label: string, control: React.ReactNode) => (
+  <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+    <span style={{ width: 68, flexShrink: 0, color: '#666', fontSize: 13 }}>{label}</span>
+    <div style={{ flex: 1, minWidth: 0 }}>{control}</div>
+  </div>
+)
+
 export default function ItemsEditor({ items, onChange, supplierId, orderDate, warehouses }: Props) {
   const { message, modal } = App.useApp()
+  const isMobile = useIsMobile()
   const containerRef = useRef<HTMLDivElement>(null)
   const itemsRef = useRef(items)
   useEffect(() => {
@@ -156,47 +166,28 @@ export default function ItemsEditor({ items, onChange, supplierId, orderDate, wa
     }, 300)
   }
 
-  // 选中商品：基础信息 → 比价自动填价 → 最近采购价对比提示 → 加载多单位
-  const applyProduct = async (index: number, p: ProductSearchItem) => {
-    const dupIdx = itemsRef.current.findIndex((it, j) => j !== index && it.product_id === p.id)
-    if (dupIdx >= 0) {
-      const ok = await new Promise<boolean>((resolve) => {
-        modal.confirm({
-          title: `该订单已有商品【${p.name}】（第${dupIdx + 1}行），是否确认增加记录？`,
-          okText: '确定',
-          cancelText: '取消',
-          onOk: () => resolve(true),
-          onCancel: () => resolve(false),
-        })
-      })
-      if (!ok) return
-    }
-
-    const price = round2(p.purchase_price || p.base_price || p.selling_price || 0)
+  // 商品名称输入/手改（桌面表格与移动卡片共用）
+  const handleProductNameChange = (index: number, v: string) => {
+    // 选中选项时 onChange 会以 option.value（商品ID）触发，文本由 onSelect 处理
+    if ((searchMap[index] ?? []).some((p) => String(p.id) === v)) return
+    const cur = itemsRef.current[index]
+    // 已选商品后手改文本：清空 product_id，强制重新从下拉选择，保证名称与ID一致
     patch(index, {
-      product_id: p.id,
-      product_name: p.name,
-      alias1: p.alias1 ?? '',
-      alias2: p.alias2 ?? '',
-      spec: p.spec ?? '',
-      unit: p.base_unit,
-      base_unit: p.base_unit,
-      purchase_price: p.purchase_price || 0,
-      unit_price: price,
-      base_price: price,
-      ratio: 1,
-      amount: round2((itemsRef.current[index].quantity || 0) * price),
+      product_name: v,
+      ...(cur.product_id > 0 && v !== cur.product_name ? { product_id: 0 } : {}),
     })
+    handleProductSearch(index, v)
+  }
 
-    // 采购比价：约定采购价 > 当前供应商今日价 > 当前供应商最近价 > 其他供应商最低价
+  // 拉取并计算比价信息（桌面选中商品与移动端比价按钮共用）
+  const fetchCompare = async (productId: number) => {
     let suppliers: CompareSupplier[] = []
     let contractPrice = 0
     let contractEffDate = ''
-    let bestSource = ''
     try {
       const [c, k] = await Promise.all([
-        getPriceCompare(p.id),
-        supplierId ? lookupContractPrice(p.id, supplierId, orderDate) : Promise.resolve(null),
+        getPriceCompare(productId),
+        supplierId ? lookupContractPrice(productId, supplierId, orderDate) : Promise.resolve(null),
       ])
       suppliers = c.suppliers ?? []
       if (k?.matched && k.price > 0) {
@@ -208,6 +199,7 @@ export default function ItemsEditor({ items, onChange, supplierId, orderDate, wa
     }
 
     let best = 0
+    let bestSource = ''
     if (contractPrice > 0) {
       best = contractPrice
       bestSource = `约定采购价（${contractEffDate} 生效）`
@@ -238,6 +230,45 @@ export default function ItemsEditor({ items, onChange, supplierId, orderDate, wa
         }
       }
     }
+
+    return { suppliers, contractPrice, contractEffDate, best, bestSource }
+  }
+
+  // 选中商品的纯数据流程（桌面表格与移动卡片共用）：
+  // 查重确认 → 填基础信息 → 比价自动填价并打开抽屉 → 最近采购价对比提示 → 加载多单位
+  const applyProductData = async (index: number, p: ProductSearchItem): Promise<boolean> => {
+    const dupIdx = itemsRef.current.findIndex((it, j) => j !== index && it.product_id === p.id)
+    if (dupIdx >= 0) {
+      const ok = await new Promise<boolean>((resolve) => {
+        modal.confirm({
+          title: `该订单已有商品【${p.name}】（第${dupIdx + 1}行），是否确认增加记录？`,
+          okText: '确定',
+          cancelText: '取消',
+          onOk: () => resolve(true),
+          onCancel: () => resolve(false),
+        })
+      })
+      if (!ok) return false
+    }
+
+    const price = round2(p.purchase_price || p.base_price || p.selling_price || 0)
+    patch(index, {
+      product_id: p.id,
+      product_name: p.name,
+      alias1: p.alias1 ?? '',
+      alias2: p.alias2 ?? '',
+      spec: p.spec ?? '',
+      unit: p.base_unit,
+      base_unit: p.base_unit,
+      purchase_price: p.purchase_price || 0,
+      unit_price: price,
+      base_price: price,
+      ratio: 1,
+      amount: round2((itemsRef.current[index].quantity || 0) * price),
+    })
+
+    // 采购比价：约定采购价 > 当前供应商今日价 > 当前供应商最近价 > 其他供应商最低价
+    const { suppliers, contractPrice, contractEffDate, best, bestSource } = await fetchCompare(p.id)
 
     if (best > 0) {
       const bp = round2(best)
@@ -295,11 +326,41 @@ export default function ItemsEditor({ items, onChange, supplierId, orderDate, wa
       patch(index, { units: [] })
     }
 
-    // WPS 风格：选中后跳到下一行商品名称，末行则自动新增明细
+    return true
+  }
+
+  // 桌面 WPS 流程：纯数据流程 + 焦点跳转（末行自动新增明细并聚焦下一行商品输入框）
+  const applyProduct = async (index: number, p: ProductSearchItem) => {
+    const ok = await applyProductData(index, p)
+    if (!ok) return
     if (index >= itemsRef.current.length - 1) {
       onChange([...itemsRef.current, newBlankItem()])
     }
     focusProductInput(index + 1)
+  }
+
+  // 移动端比价按钮：拉取比价数据并打开抽屉（与选中商品共用 fetchCompare）
+  const openCompareForItem = async (index: number) => {
+    const item = itemsRef.current[index]
+    if (!item.product_id) {
+      message.warning('请先选择商品')
+      return
+    }
+    const { suppliers, contractPrice, contractEffDate, bestSource } = await fetchCompare(item.product_id)
+    if (suppliers.length > 0 || contractPrice > 0) {
+      setCompare({
+        open: true,
+        index,
+        productName: item.product_name,
+        baseUnit: item.base_unit,
+        contractPrice,
+        contractEffectiveDate: contractEffDate,
+        contractSource: bestSource,
+        suppliers,
+      })
+    } else {
+      message.info('该商品暂无比价数据')
+    }
   }
 
   const updateUnit = (index: number, unitName: string) => {
@@ -330,6 +391,22 @@ export default function ItemsEditor({ items, onChange, supplierId, orderDate, wa
     })
   }
 
+  // 数量变更（桌面表格与移动卡片共用）
+  const updateQuantity = (index: number, item: EditItem, v: number | null) => {
+    const qty = round2(v ?? 0)
+    patch(index, {
+      quantity: qty,
+      base_quantity: round2(qty * (item.ratio || 1)),
+      amount: round2(item.unit_price * qty),
+    })
+  }
+
+  // 进价变更（桌面表格与移动卡片共用）
+  const updatePrice = (index: number, item: EditItem, v: number | null) => {
+    const price = round2(v ?? 0)
+    patch(index, { unit_price: price, amount: round2(price * item.quantity) })
+  }
+
   const selectCompareSupplier = (s: CompareSupplier) => {
     if (!compare) return
     const price = s.today_price > 0 ? s.today_price : s.last_base_unit_price
@@ -346,8 +423,177 @@ export default function ItemsEditor({ items, onChange, supplierId, orderDate, wa
 
   const cellStyle: React.CSSProperties = { border: '1px solid #f0f0f0', padding: 4, verticalAlign: 'middle' }
 
+  // 移动端卡片样式
+  const cardStyle: React.CSSProperties = {
+    border: '1px solid #f0f0f0',
+    borderRadius: 6,
+    padding: 8,
+    marginBottom: 8,
+    background: '#fff',
+  }
+
+  // 商品下拉选项（桌面表格与移动卡片共用）
+  const productOptions = (index: number) =>
+    (searchMap[index] ?? []).map((p) => ({
+      value: String(p.id),
+      label: (
+        <div>
+          <strong>{p.name}</strong>
+          {p.spec ? ` (${p.spec})` : ''}
+          {(p.alias1 || p.alias2) && (
+            <div style={{ fontSize: 12, color: '#888' }}>
+              {[p.alias1 && `别称1: ${p.alias1}`, p.alias2 && `别称2: ${p.alias2}`]
+                .filter(Boolean)
+                .join(', ')}
+            </div>
+          )}
+          {p.category_name && <div style={{ fontSize: 12, color: '#aaa' }}>分类: {p.category_name}</div>}
+        </div>
+      ),
+    }))
+
+  // 单位下拉选项（桌面表格与移动卡片共用）
+  const unitOptions = (item: EditItem) => [
+    ...(item.base_unit ? [{ value: item.base_unit, label: `${item.base_unit}(基础单位)` }] : []),
+    ...item.units.map((u) => ({ value: u.name, label: u.name })),
+  ]
+
   return (
     <div ref={containerRef} style={{ overflowX: 'auto' }}>
+      {isMobile ? (
+        <div>
+          {items.map((item, index) => (
+            <div key={item.key} style={cardStyle}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                <div
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    fontWeight: 600,
+                    marginRight: 8,
+                  }}
+                >
+                  <span style={{ color: '#999', marginRight: 4 }}>{index + 1}.</span>
+                  {item.product_name || <span style={{ color: '#bbb', fontWeight: 400 }}>未选择商品</span>}
+                </div>
+                <Popconfirm title="确定删除该商品行？" onConfirm={() => removeItem(index)}>
+                  <Button size="small" danger>
+                    删除
+                  </Button>
+                </Popconfirm>
+              </div>
+              {fieldRow(
+                '商品',
+                <AutoComplete
+                  style={{ width: '100%' }}
+                  value={item.product_name}
+                  placeholder="输入商品名称搜索"
+                  options={productOptions(index)}
+                  onChange={(v) => handleProductNameChange(index, v)}
+                  onSelect={(v) => {
+                    const p = (searchMap[index] ?? []).find((x) => String(x.id) === v)
+                    if (p) void applyProductData(index, p)
+                  }}
+                />,
+              )}
+              {fieldRow('规格', <Input value={item.spec} onChange={(e) => patch(index, { spec: e.target.value })} />)}
+              {fieldRow(
+                '单位',
+                <Select
+                  style={{ width: '100%' }}
+                  value={item.unit || undefined}
+                  onChange={(v) => updateUnit(index, v)}
+                  options={unitOptions(item)}
+                />,
+              )}
+              {fieldRow(
+                '订购数量',
+                <InputNumber
+                  style={{ width: '100%' }}
+                  controls={false}
+                  min={0}
+                  precision={2}
+                  placeholder="订购数量"
+                  value={item.ordered_quantity || null}
+                  onChange={(v) => patch(index, { ordered_quantity: round2(v ?? 0) })}
+                />,
+              )}
+              {fieldRow(
+                '数量',
+                <InputNumber
+                  style={{ width: '100%' }}
+                  controls={false}
+                  min={0}
+                  precision={2}
+                  value={item.quantity || null}
+                  onChange={(v) => updateQuantity(index, item, v)}
+                />,
+              )}
+              {fieldRow(
+                '进价',
+                <InputNumber
+                  style={{ width: '100%' }}
+                  controls={false}
+                  min={0}
+                  precision={2}
+                  value={item.unit_price}
+                  onChange={(v) => updatePrice(index, item, v)}
+                />,
+              )}
+              {fieldRow(
+                '金额',
+                <InputNumber style={{ width: '100%' }} controls={false} readOnly value={item.amount} />,
+              )}
+              {fieldRow(
+                '仓库',
+                <Select
+                  style={{ width: '100%' }}
+                  showSearch
+                  allowClear
+                  placeholder="仓库"
+                  optionFilterProp="label"
+                  value={item.warehouse_id || undefined}
+                  options={warehouses.map((w) => ({ value: w.id, label: w.name }))}
+                  onChange={(v, opt) =>
+                    patch(index, {
+                      warehouse_id: v ?? 0,
+                      warehouse_name: v ? ((opt as { label: string })?.label ?? '') : '',
+                    })
+                  }
+                />,
+              )}
+              {fieldRow(
+                '生产日期',
+                <DatePicker
+                  style={{ width: '100%' }}
+                  value={item.production_date ? dayjs(item.production_date) : null}
+                  onChange={(d) => patch(index, { production_date: d ? d.format('YYYY-MM-DD') : '' })}
+                />,
+              )}
+              {fieldRow(
+                '批号',
+                <Input placeholder="批号" value={item.batch_no} onChange={(e) => patch(index, { batch_no: e.target.value })} />,
+              )}
+              {fieldRow(
+                '备注',
+                <Input placeholder="单品备注" value={item.remark} onChange={(e) => patch(index, { remark: e.target.value })} />,
+              )}
+              {fieldRow(
+                '比价',
+                <Button style={{ width: '100%' }} onClick={() => void openCompareForItem(index)}>
+                  查看比价
+                </Button>,
+              )}
+            </div>
+          ))}
+          <Button block type="dashed" onClick={() => onChange([...itemsRef.current, newBlankItem()])}>
+            新增商品
+          </Button>
+        </div>
+      ) : (
       <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 1320 }}>
         <thead>
           <tr style={{ background: '#fafafa' }}>
@@ -370,34 +616,8 @@ export default function ItemsEditor({ items, onChange, supplierId, orderDate, wa
                     style={{ width: '100%' }}
                     value={item.product_name}
                     placeholder="输入商品名称搜索"
-                    options={(searchMap[index] ?? []).map((p) => ({
-                      value: String(p.id),
-                      label: (
-                        <div>
-                          <strong>{p.name}</strong>
-                          {p.spec ? ` (${p.spec})` : ''}
-                          {(p.alias1 || p.alias2) && (
-                            <div style={{ fontSize: 12, color: '#888' }}>
-                              {[p.alias1 && `别称1: ${p.alias1}`, p.alias2 && `别称2: ${p.alias2}`]
-                                .filter(Boolean)
-                                .join(', ')}
-                            </div>
-                          )}
-                          {p.category_name && <div style={{ fontSize: 12, color: '#aaa' }}>分类: {p.category_name}</div>}
-                        </div>
-                      ),
-                    }))}
-                    onChange={(v) => {
-                      // 选中选项时 onChange 会以 option.value（商品ID）触发，文本由 onSelect 处理
-                      if ((searchMap[index] ?? []).some((p) => String(p.id) === v)) return
-                      const cur = itemsRef.current[index]
-                      // 已选商品后手改文本：清空 product_id，强制重新从下拉选择，保证名称与ID一致
-                      patch(index, {
-                        product_name: v,
-                        ...(cur.product_id > 0 && v !== cur.product_name ? { product_id: 0 } : {}),
-                      })
-                      handleProductSearch(index, v)
-                    }}
+                    options={productOptions(index)}
+                    onChange={(v) => handleProductNameChange(index, v)}
                     onSelect={(v) => {
                       const p = (searchMap[index] ?? []).find((x) => String(x.id) === v)
                       if (p) void applyProduct(index, p)
@@ -431,10 +651,7 @@ export default function ItemsEditor({ items, onChange, supplierId, orderDate, wa
                   style={{ width: '100%' }}
                   value={item.unit || undefined}
                   onChange={(v) => updateUnit(index, v)}
-                  options={[
-                    ...(item.base_unit ? [{ value: item.base_unit, label: `${item.base_unit}(基础单位)` }] : []),
-                    ...item.units.map((u) => ({ value: u.name, label: u.name })),
-                  ]}
+                  options={unitOptions(item)}
                 />
               </td>
               <td style={cellStyle}>
@@ -458,14 +675,7 @@ export default function ItemsEditor({ items, onChange, supplierId, orderDate, wa
                   min={0}
                   precision={2}
                   value={item.quantity || null}
-                  onChange={(v) => {
-                    const qty = round2(v ?? 0)
-                    patch(index, {
-                      quantity: qty,
-                      base_quantity: round2(qty * (item.ratio || 1)),
-                      amount: round2(item.unit_price * qty),
-                    })
-                  }}
+                  onChange={(v) => updateQuantity(index, item, v)}
                   onKeyDown={(e) => handleEnterNav(e, index)}
                 />
               </td>
@@ -477,10 +687,7 @@ export default function ItemsEditor({ items, onChange, supplierId, orderDate, wa
                   min={0}
                   precision={2}
                   value={item.unit_price}
-                  onChange={(v) => {
-                    const price = round2(v ?? 0)
-                    patch(index, { unit_price: price, amount: round2(price * item.quantity) })
-                  }}
+                  onChange={(v) => updatePrice(index, item, v)}
                   onKeyDown={(e) => handleEnterNav(e, index)}
                 />
               </td>
@@ -540,12 +747,13 @@ export default function ItemsEditor({ items, onChange, supplierId, orderDate, wa
           ))}
         </tbody>
       </table>
+      )}
 
       <Drawer
         title={`采购比价 - ${compare?.productName ?? ''}${compare?.baseUnit ? `（基础单位：${compare.baseUnit}）` : ''}`}
         open={compare?.open ?? false}
         onClose={() => setCompare((c) => (c ? { ...c, open: false } : c))}
-        width={860}
+        width={isMobile ? '100%' : 860}
       >
         {compare?.contractPrice ? (
           <div

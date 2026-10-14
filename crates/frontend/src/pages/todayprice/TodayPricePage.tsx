@@ -14,6 +14,7 @@ import {
   type TodayPriceSupplier,
 } from '../../api/todayprice'
 import { useAuth } from '../../stores/auth'
+import { scrollX } from '../../utils/tableScroll'
 
 const fmtPrice = (v: number | undefined) => (!v || v <= 0 ? '-' : Number(v).toFixed(2))
 
@@ -176,7 +177,7 @@ export default function TodayPricePage({ embeddedDate }: Props) {
       <Card style={{ marginBottom: 16 }}>
         <Row gutter={[16, 16]} align="middle">
           <Col>
-            <Space>
+            <Space wrap>
               <span>日期：</span>
               <DatePicker
                 value={dateInput ? dayjs(dateInput) : null}
@@ -221,13 +222,13 @@ export default function TodayPricePage({ embeddedDate }: Props) {
           </Col>
         </Row>
         <Row gutter={16} style={{ marginTop: 16 }}>
-          <Col span={4}>
+          <Col xs={12} md={6} lg={4}>
             <Statistic title="商品种类" value={stats.totalCount} />
           </Col>
-          <Col span={4}>
+          <Col xs={12} md={6} lg={4}>
             <Statistic title="供应商数" value={stats.supplierCount} />
           </Col>
-          <Col span={4}>
+          <Col xs={12} md={6} lg={4}>
             <Statistic title="已录入" value={stats.savedCount} valueStyle={{ color: '#16a34a' }} />
           </Col>
         </Row>
@@ -257,6 +258,7 @@ export default function TodayPricePage({ embeddedDate }: Props) {
                 pagination={false}
                 columns={supplierColumns(supplier, todayPrices, setPrice)}
                 dataSource={items}
+                scroll={scrollX('max-content')}
               />
             </Card>
           ))

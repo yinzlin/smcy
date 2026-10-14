@@ -2,6 +2,7 @@ import { Card, Table } from 'antd'
 import type { TableProps } from 'antd'
 import { useQuery } from '@tanstack/react-query'
 import { listInventory, type InventoryRow } from '../../api/admin/system'
+import { scrollX } from '../../utils/tableScroll'
 
 const columns: TableProps<InventoryRow>['columns'] = [
   { title: 'ID', dataIndex: 'id', width: 80 },
@@ -28,6 +29,7 @@ export default function InventoryPage() {
         loading={isLoading}
         dataSource={rows}
         columns={columns}
+        scroll={scrollX('max-content')}
         pagination={false}
       />
     </Card>

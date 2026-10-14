@@ -5,6 +5,7 @@ import dayjs from 'dayjs'
 import { useQuery } from '@tanstack/react-query'
 import ReportCard, { FilterItem } from '../../components/report/ReportCard'
 import { fmtMoney } from '../../utils/format'
+import { scrollX } from '../../utils/tableScroll'
 import {
   fetchFinanceSettlement,
   type FinanceSettlementQuery,
@@ -155,6 +156,7 @@ export default function FinanceSettlementPage() {
           loading={isFetching}
           columns={columns}
           dataSource={data?.data ?? []}
+          scroll={scrollX('max-content')}
           pagination={{
             current: page,
             pageSize: PAGE_SIZE,

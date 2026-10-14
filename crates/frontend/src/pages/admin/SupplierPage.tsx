@@ -379,8 +379,8 @@ export default function SupplierPage() {
       <Space direction="vertical" size="middle" style={{ display: 'flex' }}>
           <Card size="small" title="新增供应商">
             <Form form={createForm} onFinish={handleCreate} layout="vertical">
-              <Row gutter={8}>
-                <Col span={3}>
+              <Row gutter={[8, 8]}>
+                <Col xs={24} sm={12} lg={3}>
                   <Form.Item
                     name="name"
                     rules={[{ required: true, message: '请输入供应商名称' }]}
@@ -389,47 +389,47 @@ export default function SupplierPage() {
                     <Input placeholder="供应商名称" />
                   </Form.Item>
                 </Col>
-                <Col span={2}>
+                <Col xs={24} sm={12} lg={2}>
                   <Form.Item name="contact" style={{ marginBottom: 8 }}>
                     <Input placeholder="联系人" />
                   </Form.Item>
                 </Col>
-                <Col span={2}>
+                <Col xs={24} sm={12} lg={2}>
                   <Form.Item name="phone" style={{ marginBottom: 8 }}>
                     <Input placeholder="电话" />
                   </Form.Item>
                 </Col>
-                <Col span={3}>
+                <Col xs={24} sm={12} lg={3}>
                   <Form.Item name="address" style={{ marginBottom: 8 }}>
                     <Input placeholder="地址" />
                   </Form.Item>
                 </Col>
-                <Col span={2}>
+                <Col xs={24} sm={12} lg={2}>
                   <Form.Item name="category_id" style={{ marginBottom: 8 }}>
                     <Select placeholder="无分类" allowClear options={categoryOptions} />
                   </Form.Item>
                 </Col>
-                <Col span={4}>
+                <Col xs={24} sm={12} lg={4}>
                   <Form.Item name="business_scope" style={{ marginBottom: 8 }}>
                     <Input placeholder="经营范围" />
                   </Form.Item>
                 </Col>
-                <Col span={3}>
+                <Col xs={24} sm={12} lg={3}>
                   <Form.Item name="remark" style={{ marginBottom: 8 }}>
                     <Input placeholder="备注" />
                   </Form.Item>
                 </Col>
-                <Col span={2}>
+                <Col xs={24} sm={12} lg={2}>
                   <Form.Item name="is_designated" valuePropName="checked" style={{ marginBottom: 8 }}>
                     <Checkbox>定点供应商</Checkbox>
                   </Form.Item>
                 </Col>
-                <Col span={2}>
+                <Col xs={24} sm={12} lg={2}>
                   <Form.Item name="designated_no" style={{ marginBottom: 8 }}>
                     <Input placeholder="定点编号" />
                   </Form.Item>
                 </Col>
-                <Col span={2}>
+                <Col xs={24} sm={12} lg={2}>
                   <Button type="primary" htmlType="submit" block>
                     新增
                   </Button>
@@ -514,8 +514,8 @@ export default function SupplierPage() {
         onCancel={() => setEditing(null)}
       >
         <Form form={editForm} layout="vertical">
-          <Row gutter={8}>
-            <Col span={8}>
+          <Row gutter={[8, 8]}>
+            <Col xs={24} sm={12} lg={8}>
               <Form.Item
                 label="供应商名称"
                 name="name"
@@ -524,77 +524,77 @@ export default function SupplierPage() {
                 <Input />
               </Form.Item>
             </Col>
-            <Col span={4}>
+            <Col xs={24} sm={12} lg={4}>
               <Form.Item label="分类" name="category_id">
                 <Select placeholder="无分类" allowClear options={categoryOptions} />
               </Form.Item>
             </Col>
-            <Col span={3}>
+            <Col xs={24} sm={12} lg={3}>
               <Form.Item label="定点供应商" name="is_designated" valuePropName="checked">
                 <Checkbox />
               </Form.Item>
             </Col>
-            <Col span={3}>
+            <Col xs={24} sm={12} lg={3}>
               <Form.Item label="定点编号" name="designated_no">
                 <Input />
               </Form.Item>
             </Col>
-            <Col span={3}>
+            <Col xs={24} sm={12} lg={3}>
               <Form.Item label="负责人" name="legal_person">
                 <Input />
               </Form.Item>
             </Col>
-            <Col span={3}>
+            <Col xs={24} sm={12} lg={3}>
               <Form.Item label="电话" name="phone">
                 <Input />
               </Form.Item>
             </Col>
-            <Col span={6}>
+            <Col xs={24} sm={12} lg={6}>
               <Form.Item label="联系人" name="contact">
                 <Input />
               </Form.Item>
             </Col>
-            <Col span={6}>
+            <Col xs={24} sm={12} lg={6}>
               <Form.Item label="统一社会信用代码" name="credit_code">
                 <Input />
               </Form.Item>
             </Col>
-            <Col span={12}>
+            <Col xs={24} sm={12} lg={12}>
               <Form.Item label="地址" name="address">
                 <Input />
               </Form.Item>
             </Col>
-            <Col span={6}>
+            <Col xs={24} sm={12} lg={6}>
               <Form.Item label="食品经营/生产许可证号" name="license_no">
                 <Input />
               </Form.Item>
             </Col>
-            <Col span={6}>
+            <Col xs={24} sm={12} lg={6}>
               <Form.Item label="许可证有效期至" name="license_expire">
                 <DatePicker style={{ width: '100%' }} format="YYYY-MM-DD" />
               </Form.Item>
             </Col>
-            <Col span={4}>
+            <Col xs={24} sm={12} lg={4}>
               <Form.Item label="供货合同编号" name="contract_no">
                 <Input />
               </Form.Item>
             </Col>
-            <Col span={4}>
+            <Col xs={24} sm={12} lg={4}>
               <Form.Item label="合同开始日期" name="contract_start">
                 <DatePicker style={{ width: '100%' }} format="YYYY-MM-DD" />
               </Form.Item>
             </Col>
-            <Col span={4}>
+            <Col xs={24} sm={12} lg={4}>
               <Form.Item label="合同结束日期" name="contract_end">
                 <DatePicker style={{ width: '100%' }} format="YYYY-MM-DD" />
               </Form.Item>
             </Col>
-            <Col span={12}>
+            <Col xs={24} sm={12} lg={12}>
               <Form.Item label="经营范围" name="business_scope">
                 <Input.TextArea rows={2} />
               </Form.Item>
             </Col>
-            <Col span={12}>
+            <Col xs={24} sm={12} lg={12}>
               <Form.Item label="备注" name="remark">
                 <Input.TextArea rows={2} />
               </Form.Item>

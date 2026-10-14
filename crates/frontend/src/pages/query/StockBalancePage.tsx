@@ -6,6 +6,7 @@ import { useQuery } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 import ReportCard, { FilterItem } from '../../components/report/ReportCard'
 import { fmt2 } from '../../utils/format'
+import { scrollX } from '../../utils/tableScroll'
 import { listCategories } from '../../api/product'
 import {
   fetchAllStockFlow,
@@ -180,6 +181,7 @@ export default function StockBalancePage() {
           loading={isLoading}
           columns={columns}
           dataSource={data?.items ?? []}
+          scroll={scrollX('max-content')}
           locale={{ emptyText: submitted ? '没有符合条件的记录' : '请设置查询条件后点击"查询"' }}
           pagination={{
             current: page,
@@ -205,6 +207,7 @@ export default function StockBalancePage() {
           loading={flowLoading}
           columns={flowColumns}
           dataSource={flowItems}
+          scroll={scrollX('max-content')}
           pagination={false}
         />
       </Modal>

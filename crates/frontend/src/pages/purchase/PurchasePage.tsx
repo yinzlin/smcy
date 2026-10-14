@@ -18,6 +18,7 @@ import {
   type PurchaseOrderListItem,
 } from '../../api/purchase'
 import { useAuth } from '../../stores/auth'
+import { scrollX } from '../../utils/tableScroll'
 import PurchaseFormCard from './PurchaseFormCard'
 
 const STATUS_LABELS: Record<string, string> = {
@@ -336,6 +337,7 @@ export default function PurchasePage() {
         loading={isLoading}
         columns={columns}
         dataSource={orders}
+        scroll={scrollX('max-content')}
         onRow={(o) => ({ onClick: () => void loadDetail(o.id), style: { cursor: 'pointer' } })}
         onChange={(_p, _f, sorter) => {
           const s = Array.isArray(sorter) ? sorter[0] : sorter

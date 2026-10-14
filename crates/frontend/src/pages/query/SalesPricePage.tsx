@@ -6,6 +6,7 @@ import dayjs from 'dayjs'
 import { useQuery } from '@tanstack/react-query'
 import ReportCard, { FilterItem } from '../../components/report/ReportCard'
 import { fmt2, fmtMoney } from '../../utils/format'
+import { scrollX } from '../../utils/tableScroll'
 import { listPurchasers } from '../../api/sales'
 import { searchProducts, type ProductSearchItem } from '../../api/purchase'
 import {
@@ -434,6 +435,7 @@ export default function SalesPricePage() {
           loading={isLoading}
           columns={columns}
           dataSource={rows}
+          scroll={scrollX('max-content')}
           pagination={{
             current: page,
             pageSize: PAGE_SIZE,

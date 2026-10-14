@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { App, AutoComplete, Button, Card, DatePicker, Input, InputNumber, Select, Space, Tag } from 'antd'
+import { App, AutoComplete, Button, Card, Col, DatePicker, Input, InputNumber, Row, Select, Space, Tag } from 'antd'
 import dayjs from 'dayjs'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -261,11 +261,11 @@ export default function PurchaseFormCard({ editing, onSaved, onCancelEdit }: Pro
 
   return (
     <Card title={editing ? `编辑采购订单（${editing.order_no}）` : '新建采购订单'} style={{ marginBottom: 16 }}>
-      <Space wrap size="middle" style={{ marginBottom: 12 }}>
-        <div>
+      <Row gutter={[8, 8]} style={{ marginBottom: 12 }}>
+        <Col xs={24} sm={12} lg={6}>
           <div style={{ marginBottom: 4 }}>供应商：</div>
           <AutoComplete
-            style={{ width: 240 }}
+            style={{ width: '100%', maxWidth: 240 }}
             placeholder="输入关键字搜索（仅已审核）"
             value={supplierName}
             options={auditedSuppliers.map((s) => ({ value: String(s.id), label: s.name }))}
@@ -284,12 +284,12 @@ export default function PurchaseFormCard({ editing, onSaved, onCancelEdit }: Pro
             }}
           />
           {selectedSupplier && supplierProfile(selectedSupplier)}
-        </div>
-        <div>
+        </Col>
+        <Col xs={24} sm={12} lg={6}>
           <div style={{ marginBottom: 4 }}>订单号：</div>
-          <Input style={{ width: 200 }} value={orderNo} readOnly />
-        </div>
-        <div>
+          <Input style={{ width: '100%', maxWidth: 200 }} value={orderNo} readOnly />
+        </Col>
+        <Col xs={24} sm={12} lg={6}>
           <div style={{ marginBottom: 4 }}>订单日期：</div>
           <DatePicker
             value={dayjs(orderDate)}
@@ -299,15 +299,15 @@ export default function PurchaseFormCard({ editing, onSaved, onCancelEdit }: Pro
               void regenOrderNo(date)
             }}
           />
-        </div>
-        <div>
+        </Col>
+        <Col xs={24} sm={12} lg={6}>
           <div style={{ marginBottom: 4 }}>备注：</div>
-          <Input style={{ width: 200 }} value={remark} onChange={(e) => setRemark(e.target.value)} />
-        </div>
-        <div>
+          <Input style={{ width: '100%', maxWidth: 200 }} value={remark} onChange={(e) => setRemark(e.target.value)} />
+        </Col>
+        <Col xs={24} sm={12} lg={6}>
           <div style={{ marginBottom: 4 }}>经手人：</div>
           <Select
-            style={{ width: 200 }}
+            style={{ width: '100%', maxWidth: 200 }}
             allowClear
             placeholder="请选择经手人"
             value={handlerId ?? undefined}
@@ -319,8 +319,8 @@ export default function PurchaseFormCard({ editing, onSaved, onCancelEdit }: Pro
                 label: `${u.nickname || u.username}${u.phone ? ` (${u.phone})` : ''}`,
               }))}
           />
-        </div>
-      </Space>
+        </Col>
+      </Row>
 
       <ItemsEditor items={items} onChange={setItems} supplierId={supplierId} orderDate={orderDate} warehouses={warehouses} />
 

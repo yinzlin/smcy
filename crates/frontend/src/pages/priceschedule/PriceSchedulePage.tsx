@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Alert, App, AutoComplete, Button, Card, DatePicker, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Table, Tag, Upload,
+  Alert, App, AutoComplete, Button, Card, DatePicker, Form, Input, InputNumber, Modal, Popconfirm, Row, Col, Select, Space, Table, Tag, Upload,
 } from 'antd'
 import { DownloadOutlined, PlusOutlined, ThunderboltOutlined, UploadOutlined } from '@ant-design/icons'
 import type { TableProps } from 'antd'
@@ -28,6 +28,7 @@ import {
 import { listSuppliers, searchProducts, type ProductSearchItem } from '../../api/purchase'
 import { listPurchasers } from '../../api/sales'
 import { useAuth } from '../../stores/auth'
+import { scrollX } from '../../utils/tableScroll'
 
 const SOURCE_PRESETS = ['菜篮子/询价表', '政采平台', '超市实地采价', 'Excel导入']
 
@@ -591,25 +592,29 @@ export default function PriceSchedulePage() {
                 }}
               />
             </Form.Item>
-            <Space size="middle" style={{ display: 'flex' }}>
-              <Form.Item label="价格类型" required style={{ width: 240 }}>
-                <Select
-                  value={editForm.price_type}
-                  onChange={(v) => {
-                    setEditForm((f) => (f ? { ...f, price_type: v } : f))
-                    // 仅新增模式下自动带出该类型最近一条
-                    if (!editForm.id) setTimeout(applyPrefillFromCache, 0)
-                  }}
-                  options={PRICE_TYPE_OPTIONS}
-                />
-              </Form.Item>
-              <Form.Item label="生效日期" required>
-                <DatePicker
-                  value={editForm.effective_date ? dayjs(editForm.effective_date) : null}
-                  onChange={(d) => setEditForm((f) => (f ? { ...f, effective_date: d ? d.format('YYYY-MM-DD') : '' } : f))}
-                />
-              </Form.Item>
-            </Space>
+            <Row gutter={[8, 8]}>
+              <Col xs={24} sm={12}>
+                <Form.Item label="价格类型" required style={{ width: '100%', maxWidth: 240 }}>
+                  <Select
+                    value={editForm.price_type}
+                    onChange={(v) => {
+                      setEditForm((f) => (f ? { ...f, price_type: v } : f))
+                      // 仅新增模式下自动带出该类型最近一条
+                      if (!editForm.id) setTimeout(applyPrefillFromCache, 0)
+                    }}
+                    options={PRICE_TYPE_OPTIONS}
+                  />
+                </Form.Item>
+              </Col>
+              <Col xs={24} sm={12}>
+                <Form.Item label="生效日期" required>
+                  <DatePicker
+                    value={editForm.effective_date ? dayjs(editForm.effective_date) : null}
+                    onChange={(d) => setEditForm((f) => (f ? { ...f, effective_date: d ? d.format('YYYY-MM-DD') : '' } : f))}
+                  />
+                </Form.Item>
+              </Col>
+            </Row>
             {editForm.price_type === 'supplier_contract' && (
               <Form.Item label="供应商" required>
                 <Select
@@ -634,25 +639,29 @@ export default function PriceSchedulePage() {
                 />
               </Form.Item>
             )}
-            <Space size="middle" style={{ display: 'flex' }}>
-              <Form.Item label="价格" required>
-                <InputNumber
-                  min={0}
-                  step={0.01}
-                  precision={2}
-                  value={editForm.price}
-                  onChange={(v) => setEditForm((f) => (f ? { ...f, price: v } : f))}
-                />
-              </Form.Item>
-              <Form.Item label="来源" style={{ minWidth: 220 }}>
-                <AutoComplete
-                  value={editForm.source}
-                  placeholder="菜篮子/询价表"
-                  options={SOURCE_PRESETS.map((s) => ({ value: s }))}
-                  onChange={(v) => setEditForm((f) => (f ? { ...f, source: v } : f))}
-                />
-              </Form.Item>
-            </Space>
+            <Row gutter={[8, 8]}>
+              <Col xs={24} sm={12}>
+                <Form.Item label="价格" required>
+                  <InputNumber
+                    min={0}
+                    step={0.01}
+                    precision={2}
+                    value={editForm.price}
+                    onChange={(v) => setEditForm((f) => (f ? { ...f, price: v } : f))}
+                  />
+                </Form.Item>
+              </Col>
+              <Col xs={24} sm={12}>
+                <Form.Item label="来源" style={{ width: '100%', maxWidth: 220 }}>
+                  <AutoComplete
+                    value={editForm.source}
+                    placeholder="菜篮子/询价表"
+                    options={SOURCE_PRESETS.map((s) => ({ value: s }))}
+                    onChange={(v) => setEditForm((f) => (f ? { ...f, source: v } : f))}
+                  />
+                </Form.Item>
+              </Col>
+            </Row>
             <Form.Item label="备注">
               <Input value={editForm.remark} placeholder="选填" onChange={(e) => setEditForm((f) => (f ? { ...f, remark: e.target.value } : f))} />
             </Form.Item>
@@ -681,6 +690,7 @@ export default function PriceSchedulePage() {
                   rowKey="id"
                   pagination={false}
                   dataSource={list}
+                  scroll={scrollX('max-content')}
                   columns={[
                     { title: 'ID', dataIndex: 'id', width: 60 },
                     {

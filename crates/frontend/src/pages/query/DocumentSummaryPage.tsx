@@ -5,6 +5,7 @@ import dayjs from 'dayjs'
 import { useQuery } from '@tanstack/react-query'
 import ReportCard, { FilterItem } from '../../components/report/ReportCard'
 import { fmt2 } from '../../utils/format'
+import { scrollX } from '../../utils/tableScroll'
 import {
   DOCUMENT_SUMMARY_EXPORT_URL,
   fetchDocumentSummary,
@@ -56,6 +57,7 @@ export default function DocumentSummaryPage() {
         loading={isFetching}
         columns={columns}
         dataSource={data ?? []}
+        scroll={scrollX('max-content')}
         pagination={false}
       />
     </ReportCard>

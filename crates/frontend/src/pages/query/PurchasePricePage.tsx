@@ -5,6 +5,7 @@ import type { TableProps } from 'antd'
 import { useQuery } from '@tanstack/react-query'
 import ReportCard, { FilterItem } from '../../components/report/ReportCard'
 import { fmt2 } from '../../utils/format'
+import { scrollX } from '../../utils/tableScroll'
 import { listSuppliers } from '../../api/purchase'
 import { fetchPurchasePrice, purchasePriceExportUrl, type PurchasePriceQuery, type PurchasePriceRow } from '../../api/query/prices'
 import { useAuth } from '../../stores/auth'
@@ -100,6 +101,7 @@ export default function PurchasePricePage() {
         loading={isLoading}
         columns={columns}
         dataSource={rows}
+        scroll={scrollX('max-content')}
         pagination={{
           current: page,
           pageSize: PAGE_SIZE,

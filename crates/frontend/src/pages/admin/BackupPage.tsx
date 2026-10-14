@@ -9,6 +9,7 @@ import {
   listBackups,
   type BackupRecord,
 } from '../../api/admin/system'
+import { scrollX } from '../../utils/tableScroll'
 
 /**
  * 旧页面 /backup：执行备份按钮 + 记录表格（ID/备份时间/文件名/大小(字节)/操作：下载、删除）。
@@ -100,6 +101,7 @@ export default function BackupPage() {
           loading={isLoading}
           dataSource={rows}
           columns={columns}
+          scroll={scrollX('max-content')}
           pagination={false}
         />
       </Space>

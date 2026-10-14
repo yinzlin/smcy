@@ -29,6 +29,7 @@ import {
   type ProductUnit,
   type Product,
 } from '../../api/product'
+import { scrollX } from '../../utils/tableScroll'
 
 interface Props {
   open: boolean
@@ -333,54 +334,54 @@ export default function ProductEditModal({ open, product, categories, isSuperAdm
       destroyOnClose
     >
       <Form form={form} layout="vertical">
-        <Row gutter={12}>
-          <Col span={8}>
+        <Row gutter={[12, 8]}>
+          <Col xs={24} sm={12} lg={8}>
             <Form.Item label="商品名称（通用名）" name="name" rules={[{ required: true, message: '请输入名称' }]}>
               <Input />
             </Form.Item>
           </Col>
-          <Col span={5}>
+          <Col xs={24} sm={12} lg={5}>
             <Form.Item label="别称1（如地域称呼）" name="alias1">
               <Input placeholder="如：甜蕉" />
             </Form.Item>
           </Col>
-          <Col span={5}>
+          <Col xs={24} sm={12} lg={5}>
             <Form.Item label="别称2（如地域称呼）" name="alias2">
               <Input placeholder="如：甘蕉" />
             </Form.Item>
           </Col>
-          <Col span={6}>
+          <Col xs={24} sm={12} lg={6}>
             <Form.Item label="显示单位" name="unit">
               <Input />
             </Form.Item>
           </Col>
         </Row>
-        <Row gutter={12}>
-          <Col span={4}>
+        <Row gutter={[12, 8]}>
+          <Col xs={24} sm={12} lg={4}>
             <Form.Item label="规格" name="spec">
               <Input />
             </Form.Item>
           </Col>
-          <Col span={4}>
+          <Col xs={24} sm={12} lg={4}>
             <Form.Item label="基础单位" name="base_unit">
               <Input />
             </Form.Item>
           </Col>
-          <Col span={6}>
+          <Col xs={24} sm={12} lg={6}>
             <Form.Item label="基础单价（每基础单位，售价）" name="base_price">
               <InputNumber step={0.01} style={{ width: '100%' }} />
             </Form.Item>
           </Col>
           {isSuperAdmin && (
-            <Col span={6}>
+            <Col xs={24} sm={12} lg={6}>
               <Form.Item label="当前进价（每基础单位，最近采购价）" name="purchase_price">
                 <InputNumber step={0.01} style={{ width: '100%' }} onChange={onMarkupChange} />
               </Form.Item>
             </Col>
           )}
         </Row>
-        <Row gutter={12}>
-          <Col span={8}>
+        <Row gutter={[12, 8]}>
+          <Col xs={24} sm={12} lg={8}>
             <Form.Item label="分类" name="category_id">
               <Select
                 allowClear
@@ -389,12 +390,12 @@ export default function ProductEditModal({ open, product, categories, isSuperAdm
               />
             </Form.Item>
           </Col>
-          <Col span={4}>
+          <Col xs={24} sm={12} lg={4}>
             <Form.Item label="加成率（毛利率）" name="markup_rate">
               <InputNumber step={0.01} min={0} max={5} style={{ width: '100%' }} onChange={onMarkupChange} />
             </Form.Item>
           </Col>
-          <Col span={5}>
+          <Col xs={24} sm={12} lg={5}>
             <Form.Item label="售价自动更新" name="auto_update_price">
               <Select
                 options={[
@@ -406,12 +407,12 @@ export default function ProductEditModal({ open, product, categories, isSuperAdm
           </Col>
           {isSuperAdmin && (
             <>
-              <Col span={3}>
+              <Col xs={24} sm={12} lg={3}>
                 <Form.Item label="历史最高进价（自动）" name="max_purchase_price">
                   <InputNumber readOnly style={{ width: '100%', background: '#f5f5f5' }} />
                 </Form.Item>
               </Col>
-              <Col span={3}>
+              <Col xs={24} sm={12} lg={3}>
                 <Form.Item label="历史最低进价（自动）" name="min_purchase_price">
                   <InputNumber readOnly style={{ width: '100%', background: '#f5f5f5' }} />
                 </Form.Item>
@@ -419,8 +420,8 @@ export default function ProductEditModal({ open, product, categories, isSuperAdm
             </>
           )}
         </Row>
-        <Row gutter={12}>
-          <Col span={7}>
+        <Row gutter={[12, 8]}>
+          <Col xs={24} sm={12} lg={7}>
             <Form.Item label="保质期（如：7天、180天）" name="shelf_life">
               <Input placeholder="如：7天" />
             </Form.Item>
@@ -433,8 +434,8 @@ export default function ProductEditModal({ open, product, categories, isSuperAdm
         <div style={{ background: '#e6f7ff', padding: '8px 12px', borderRadius: 4, fontSize: 12 }}>
           售价计算规则：若有政采平台价则以政采平台价为售价；否则取商超1/商超2/商超3/AI实时采集价的非零平均价（四舍五入保留2位）；若无任何价格则使用基础单价。
         </div>
-        <Row gutter={12} style={{ marginTop: 12 }}>
-          <Col span={8}>
+        <Row gutter={[12, 8]} style={{ marginTop: 12 }}>
+          <Col xs={24} sm={12} lg={8}>
             <Form.Item label="政采平台状态" name="gov_status">
               <Select
                 options={[
@@ -446,35 +447,35 @@ export default function ProductEditModal({ open, product, categories, isSuperAdm
             </Form.Item>
           </Col>
         </Row>
-        <Row gutter={12}>
-          <Col span={6}>
+        <Row gutter={[12, 8]}>
+          <Col xs={24} sm={12} lg={6}>
             <Form.Item label="政采平台价" name="gov_price">
               <InputNumber step={0.01} style={{ width: '100%' }} onChange={onPriceChange} />
             </Form.Item>
           </Col>
-          <Col span={6}>
+          <Col xs={24} sm={12} lg={6}>
             <Form.Item label="商超1零售价" name="supermarket_1">
               <InputNumber step={0.01} style={{ width: '100%' }} onChange={onPriceChange} />
             </Form.Item>
           </Col>
-          <Col span={6}>
+          <Col xs={24} sm={12} lg={6}>
             <Form.Item label="商超2零售价" name="supermarket_2">
               <InputNumber step={0.01} style={{ width: '100%' }} onChange={onPriceChange} />
             </Form.Item>
           </Col>
-          <Col span={6}>
+          <Col xs={24} sm={12} lg={6}>
             <Form.Item label="商超3零售价" name="supermarket_3">
               <InputNumber step={0.01} style={{ width: '100%' }} onChange={onPriceChange} />
             </Form.Item>
           </Col>
         </Row>
-        <Row gutter={12}>
-          <Col span={8}>
+        <Row gutter={[12, 8]}>
+          <Col xs={24} sm={12} lg={8}>
             <Form.Item label="AI实时采集价（预留）" name="ai_realtime">
               <InputNumber step={0.01} style={{ width: '100%' }} onChange={onPriceChange} />
             </Form.Item>
           </Col>
-          <Col span={8}>
+          <Col xs={24} sm={12} lg={8}>
             <Form.Item label="计算售价（只读）" name="selling_price">
               <InputNumber readOnly style={{ width: '100%', background: '#f5f5f5' }} />
             </Form.Item>
@@ -580,6 +581,7 @@ export default function ProductEditModal({ open, product, categories, isSuperAdm
           pagination={false}
           dataSource={units}
           columns={unitColumns()}
+          scroll={scrollX('max-content')}
         />
       </Form>
     </Modal>
