@@ -87,8 +87,14 @@ impl ProductImageStore for BackendImageStore {
 }
 
 /// 应用容器：按业务域聚合全部用例服务（axum State 要求 Clone，池为 Arc 克隆零成本）
+///
+/// `user_repo` / `oplog_repo` / `sales_order_repo` 为中间件（如 auth.rs 的会话解析、
+/// 操作日志、行级数据权限）共享的仓储句柄：中间件不得直连 pool，一律经端口取数。
 #[derive(Clone)]
 pub struct App {
+    pub user_repo: SqliteUserRepo,
+    pub oplog_repo: SqliteOperationLogRepo,
+    pub sales_order_repo: SqliteSalesOrderRepo,
     pub user: UserService<SqliteUserRepo>,
     pub category: CategoryService<SqliteCategoryRepo>,
     pub warehouse: WarehouseService<SqliteWarehouseRepo>,
@@ -121,32 +127,38 @@ pub async fn bootstrap() -> App {
         }
         database::finalize_schedule_rebuild().await;
     }
-    let oplog = SqliteOperationLogRepo::new(database::pool().clone());
+    let pool = database::pool().clone();
+    let user_repo = SqliteUserRepo::new(pool.clone());
+    let oplog_repo = SqliteOperationLogRepo::new(pool.clone());
+    let sales_order_repo = SqliteSalesOrderRepo::new(pool.clone());
     App {
-        user: UserService::new(SqliteUserRepo::new(database::pool().clone())),
-        category: CategoryService::new(SqliteCategoryRepo::new(database::pool().clone())),
-        warehouse: WarehouseService::new(SqliteWarehouseRepo::new(database::pool().clone())),
-        audit: BasicAuditService::new(SqliteBasicAuditRepo::new(database::pool().clone()), oplog),
-        supplier: SupplierService::new(SqliteSupplierRepo::new(database::pool().clone())),
-        purchaser: PurchaserService::new(SqlitePurchaserRepo::new(database::pool().clone())),
+        user_repo: user_repo.clone(),
+        oplog_repo: oplog_repo.clone(),
+        sales_order_repo: sales_order_repo.clone(),
+        user: UserService::new(user_repo.clone()),
+        category: CategoryService::new(SqliteCategoryRepo::new(pool.clone())),
+        warehouse: WarehouseService::new(SqliteWarehouseRepo::new(pool.clone())),
+        audit: BasicAuditService::new(SqliteBasicAuditRepo::new(pool.clone()), oplog_repo.clone()),
+        supplier: SupplierService::new(SqliteSupplierRepo::new(pool.clone())),
+        purchaser: PurchaserService::new(SqlitePurchaserRepo::new(pool.clone())),
         product: ProductService::new(
-            SqliteProductRepo::new(database::pool().clone()),
+            SqliteProductRepo::new(pool.clone()),
             BackendImageStore,
         ),
-        purchase_document: PurchaseDocumentService::new(SqlitePurchaseDocumentRepo::new(database::pool().clone())),
-        today_price: TodayPriceService::new(SqliteTodayPriceRepo::new(database::pool().clone())),
-        price_schedule: PriceScheduleService::new(SqlitePriceScheduleRepo::new(database::pool().clone())),
-        inventory: InventoryService::new(SqliteInventoryRepo::new(database::pool().clone())),
-        purchase_order: PurchaseOrderService::new(SqlitePurchaseOrderRepo::new(database::pool().clone())),
-        sales_order: SalesOrderService::new(SqliteSalesOrderRepo::new(database::pool().clone())),
-        order_allocation: OrderAllocationService::new(SqliteOrderAllocationRepo::new(database::pool().clone())),
-        order_supplement: OrderSupplementService::new(SqliteOrderSupplementRepo::new(database::pool().clone())),
-        query_finance: QueryFinanceService::new(SqliteQueryFinanceRepo::new(database::pool().clone())),
-        query_purchase: QueryPurchaseService::new(SqliteQueryPurchaseRepo::new(database::pool().clone())),
-        query_sales: QuerySalesService::new(SqliteQuerySalesRepo::new(database::pool().clone())),
-        query_stats: QueryStatsService::new(SqliteQueryStatsRepo::new(database::pool().clone())),
-        query_stock: QueryStockService::new(SqliteQueryStockRepo::new(database::pool().clone())),
-        system_mgmt: SystemMgmtService::new(SqliteSystemMgmtRepo::new(database::pool().clone())),
-        food_accept: FoodAcceptService::new(SqliteFoodAcceptRepo::new(database::pool().clone())),
+        purchase_document: PurchaseDocumentService::new(SqlitePurchaseDocumentRepo::new(pool.clone())),
+        today_price: TodayPriceService::new(SqliteTodayPriceRepo::new(pool.clone())),
+        price_schedule: PriceScheduleService::new(SqlitePriceScheduleRepo::new(pool.clone())),
+        inventory: InventoryService::new(SqliteInventoryRepo::new(pool.clone())),
+        purchase_order: PurchaseOrderService::new(SqlitePurchaseOrderRepo::new(pool.clone())),
+        sales_order: SalesOrderService::new(sales_order_repo.clone()),
+        order_allocation: OrderAllocationService::new(SqliteOrderAllocationRepo::new(pool.clone())),
+        order_supplement: OrderSupplementService::new(SqliteOrderSupplementRepo::new(pool.clone())),
+        query_finance: QueryFinanceService::new(SqliteQueryFinanceRepo::new(pool.clone())),
+        query_purchase: QueryPurchaseService::new(SqliteQueryPurchaseRepo::new(pool.clone())),
+        query_sales: QuerySalesService::new(SqliteQuerySalesRepo::new(pool.clone())),
+        query_stats: QueryStatsService::new(SqliteQueryStatsRepo::new(pool.clone())),
+        query_stock: QueryStockService::new(SqliteQueryStockRepo::new(pool.clone())),
+        system_mgmt: SystemMgmtService::new(SqliteSystemMgmtRepo::new(pool.clone())),
+        food_accept: FoodAcceptService::new(SqliteFoodAcceptRepo::new(pool.clone())),
     }
 }

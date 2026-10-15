@@ -5,7 +5,8 @@ use sqlx::Row;
 
 use domain::error::DomainError;
 use domain::port::user::{
-    ActiveUserRow, LoginRow, NewUser, SessionUserRow, UpdateUser, UserDetailRow, UserRepo,
+    ActiveUserRow, LoginRow, NewUser, SessionCtxRow, SessionUserRow, UpdateUser, UserDetailRow,
+    UserRepo,
 };
 
 #[derive(Clone)]
@@ -205,5 +206,23 @@ impl UserRepo for SqliteUserRepo {
                 })
             })
             .transpose()
+    }
+
+    async fn session_ctx(&self, id: i64) -> Result<Option<SessionCtxRow>, DomainError> {
+        sqlx::query(
+            "SELECT role, COALESCE(supplier_id,0) as supplier_id, COALESCE(purchaser_id,0) as purchaser_id FROM user_account WHERE id = ? AND status = 1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?
+        .map(|r| {
+            Ok(SessionCtxRow {
+                role: r.get("role"),
+                supplier_id: r.get("supplier_id"),
+                purchaser_id: r.get("purchaser_id"),
+            })
+        })
+        .transpose()
     }
 }

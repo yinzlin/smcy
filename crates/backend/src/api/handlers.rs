@@ -114,7 +114,7 @@ pub async fn api_operation_log_list(
     headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/system/operation_log").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/system/operation_log").await {
         Err(e) => return e,
         Ok(_) => {}
     }
@@ -129,7 +129,7 @@ pub async fn api_operation_log_export(
     headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/system/operation_log/export").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/system/operation_log/export").await {
         Err(e) => return e.into_response(),
         Ok(_) => {}
     }
@@ -152,7 +152,7 @@ pub async fn api_user_get(State(app): State<App>, Path(id): Path<i64>) -> impl I
 
 // 获取当前登录用户最近保存的"联系方式"（销售订单主表单输入框的回填值）
 pub async fn api_user_get_contact_phone(State(app): State<App>, headers: axum::http::HeaderMap) -> impl IntoResponse {
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     ok_or_err(app.user.get_contact_phone(ctx.user_id).await)
 }
 
@@ -160,7 +160,7 @@ pub async fn api_user_get_contact_phone(State(app): State<App>, headers: axum::h
 // 销售订单保存时同步调用：把用户在主表单输入框填的联系方式持久化，
 // 下次打开销售订单页 / 新建时由前端 GET 拉回作为默认值。
 pub async fn api_user_set_contact_phone(State(app): State<App>, headers: axum::http::HeaderMap, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     let phone = data["contact_phone"].as_str().unwrap_or("").trim().to_string();
     ok_or_err(app.user.set_contact_phone(ctx.user_id, phone).await)
 }
@@ -264,7 +264,7 @@ pub async fn api_restore_file(State(app): State<App>, mut multipart: Multipart) 
 }
 
 pub async fn api_inspect_corrupted_items(State(app): State<App>, headers: axum::http::HeaderMap) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/inspect_corrupted_items").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/inspect_corrupted_items").await {
         Err(e) => return e,
         Ok(_) => {}
     }
@@ -275,7 +275,7 @@ pub async fn api_inspect_corrupted_items(State(app): State<App>, headers: axum::
 }
 
 pub async fn api_clean_corrupted_items(State(app): State<App>, headers: axum::http::HeaderMap) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/clean_corrupted_items").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/clean_corrupted_items").await {
         Err(e) => return e,
         Ok(_) => {}
     }
@@ -286,7 +286,7 @@ pub async fn api_clean_corrupted_items(State(app): State<App>, headers: axum::ht
 }
 
 pub async fn api_clean_invalid_orders(State(app): State<App>, headers: axum::http::HeaderMap) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/clean_invalid_orders").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/clean_invalid_orders").await {
         Err(e) => return e,
         Ok(_) => {}
     }
@@ -428,7 +428,7 @@ pub async fn api_supplier_list(State(app): State<App>, axum::extract::Query(para
 }
 
 pub async fn api_supplier_create(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<SupplierReq>) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/supplier/create").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/supplier/create").await {
         Err(e) => return e.into_response(),
         Ok(_) => {}
     }
@@ -457,7 +457,7 @@ pub async fn api_supplier_create(State(app): State<App>, headers: axum::http::He
 }
 
 pub async fn api_supplier_update(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<SupplierReq>) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/supplier/update").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/supplier/update").await {
         Err(e) => return e.into_response(),
         Ok(_) => {}
     }
@@ -486,7 +486,7 @@ pub async fn api_supplier_update(State(app): State<App>, headers: axum::http::He
 }
 
 pub async fn api_supplier_delete(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<DeleteReq>) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/supplier/delete").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/supplier/delete").await {
         Err(e) => return e.into_response(),
         Ok(_) => {}
     }
@@ -503,7 +503,7 @@ pub async fn api_supplier_delete(State(app): State<App>, headers: axum::http::He
 
 pub async fn api_supplier_approve(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
     let id = req["id"].as_i64().unwrap_or(0);
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.audit.set_audit_status(&ctx, BasicTable::Supplier, id, "confirmed", "supplier.approve").await {
         Ok(()) => (StatusCode::OK, "审核成功".to_string()).into_response(),
         Err(e) => text_error_response(e).into_response(),
@@ -511,7 +511,7 @@ pub async fn api_supplier_approve(State(app): State<App>, headers: axum::http::H
 }
 pub async fn api_supplier_unapprove(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
     let id = req["id"].as_i64().unwrap_or(0);
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.audit.set_audit_status(&ctx, BasicTable::Supplier, id, "pending", "supplier.unapprove").await {
         Ok(()) => (StatusCode::OK, "反审核成功".to_string()).into_response(),
         Err(e) => text_error_response(e).into_response(),
@@ -519,7 +519,7 @@ pub async fn api_supplier_unapprove(State(app): State<App>, headers: axum::http:
 }
 pub async fn api_purchaser_approve(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
     let id = req["id"].as_i64().unwrap_or(0);
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.audit.set_audit_status(&ctx, BasicTable::Purchaser, id, "confirmed", "purchaser.approve").await {
         Ok(()) => (StatusCode::OK, "审核成功".to_string()).into_response(),
         Err(e) => text_error_response(e).into_response(),
@@ -527,7 +527,7 @@ pub async fn api_purchaser_approve(State(app): State<App>, headers: axum::http::
 }
 pub async fn api_purchaser_unapprove(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
     let id = req["id"].as_i64().unwrap_or(0);
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.audit.set_audit_status(&ctx, BasicTable::Purchaser, id, "pending", "purchaser.unapprove").await {
         Ok(()) => (StatusCode::OK, "反审核成功".to_string()).into_response(),
         Err(e) => text_error_response(e).into_response(),
@@ -535,7 +535,7 @@ pub async fn api_purchaser_unapprove(State(app): State<App>, headers: axum::http
 }
 pub async fn api_product_approve(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
     let id = req["id"].as_i64().unwrap_or(0);
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.audit.set_audit_status(&ctx, BasicTable::Product, id, "confirmed", "product.approve").await {
         Ok(()) => (StatusCode::OK, "审核成功".to_string()).into_response(),
         Err(e) => text_error_response(e).into_response(),
@@ -543,7 +543,7 @@ pub async fn api_product_approve(State(app): State<App>, headers: axum::http::He
 }
 pub async fn api_product_unapprove(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
     let id = req["id"].as_i64().unwrap_or(0);
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.audit.set_audit_status(&ctx, BasicTable::Product, id, "pending", "product.unapprove").await {
         Ok(()) => (StatusCode::OK, "反审核成功".to_string()).into_response(),
         Err(e) => text_error_response(e).into_response(),
@@ -551,7 +551,7 @@ pub async fn api_product_unapprove(State(app): State<App>, headers: axum::http::
 }
 pub async fn api_warehouse_approve(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
     let id = req["id"].as_i64().unwrap_or(0);
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.audit.set_audit_status(&ctx, BasicTable::Warehouse, id, "confirmed", "warehouse.approve").await {
         Ok(()) => (StatusCode::OK, "审核成功".to_string()).into_response(),
         Err(e) => text_error_response(e).into_response(),
@@ -559,7 +559,7 @@ pub async fn api_warehouse_approve(State(app): State<App>, headers: axum::http::
 }
 pub async fn api_warehouse_unapprove(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
     let id = req["id"].as_i64().unwrap_or(0);
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.audit.set_audit_status(&ctx, BasicTable::Warehouse, id, "pending", "warehouse.unapprove").await {
         Ok(()) => (StatusCode::OK, "反审核成功".to_string()).into_response(),
         Err(e) => text_error_response(e).into_response(),
@@ -599,7 +599,7 @@ pub async fn api_purchaser_list(State(app): State<App>, axum::extract::Query(par
 }
 
 pub async fn api_purchaser_create(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<PurchaserReq>) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/purchaser/create").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/purchaser/create").await {
         Err(e) => return e.into_response(),
         Ok(_) => {}
     }
@@ -619,7 +619,7 @@ pub async fn api_purchaser_create(State(app): State<App>, headers: axum::http::H
 }
 
 pub async fn api_purchaser_update(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<PurchaserReq>) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/purchaser/update").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/purchaser/update").await {
         Err(e) => return e.into_response(),
         Ok(_) => {}
     }
@@ -639,7 +639,7 @@ pub async fn api_purchaser_update(State(app): State<App>, headers: axum::http::H
 }
 
 pub async fn api_purchaser_delete(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<DeleteReq>) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/purchaser/delete").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/purchaser/delete").await {
         Err(e) => return e.into_response(),
         Ok(_) => {}
     }
@@ -658,7 +658,7 @@ pub async fn api_product_toggle_status(State(app): State<App>, Path(id): Path<i6
 
 pub async fn api_product_list(State(app): State<App>, headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     // 进价仅超级管理员可见：非 super_admin 返回的进价字段置 0
-    let is_super_admin = crate::middleware::auth::get_user_ctx(&headers).await.role == "super_admin";
+    let is_super_admin = crate::middleware::auth::get_user_ctx(&app, &headers).await.role == "super_admin";
     let page: i64 = params.get("page").and_then(|s| s.parse().ok()).unwrap_or(1);
     let page_size: i64 = params.get("page_size").and_then(|s| s.parse().ok()).unwrap_or(20);
     let filter = domain::port::product::ProductListFilter {
@@ -676,7 +676,7 @@ pub async fn api_product_list(State(app): State<App>, headers: axum::http::Heade
 
 pub async fn api_product_create(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<ProductReq>) -> impl IntoResponse {
     // 进价仅超级管理员可设置：非 super_admin 创建商品时进价强制为 0
-    let is_super_admin = crate::middleware::auth::get_user_ctx(&headers).await.role == "super_admin";
+    let is_super_admin = crate::middleware::auth::get_user_ctx(&app, &headers).await.role == "super_admin";
     match app.product.create(is_super_admin, req).await {
         Ok(()) => StatusCode::OK,
         Err(e) => text_error_response(e).0,
@@ -689,13 +689,13 @@ pub async fn api_product_check_name(State(app): State<App>, axum::extract::Query
 }
 
 pub async fn api_product_by_id(State(app): State<App>, headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
-    let is_super_admin = crate::middleware::auth::get_user_ctx(&headers).await.role == "super_admin";
+    let is_super_admin = crate::middleware::auth::get_user_ctx(&app, &headers).await.role == "super_admin";
     let product_id = params.get("id").and_then(|s| s.parse::<i64>().ok());
     (StatusCode::OK, app.product.by_id(is_super_admin, product_id).await)
 }
 
 pub async fn api_product_search(State(app): State<App>, headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
-    let is_super_admin = crate::middleware::auth::get_user_ctx(&headers).await.role == "super_admin";
+    let is_super_admin = crate::middleware::auth::get_user_ctx(&app, &headers).await.role == "super_admin";
     let keyword = params.get("keyword").filter(|s| !s.is_empty()).cloned();
     // audited=1：仅返回已审核商品（开单商品选择用）
     let only_audited = params.get("audited").map(|s| s == "1").unwrap_or(false);
@@ -703,7 +703,7 @@ pub async fn api_product_search(State(app): State<App>, headers: axum::http::Hea
 }
 
 pub async fn api_product_update(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<ProductUpdateReq>) -> impl IntoResponse {
-    let role = match crate::middleware::auth::check_api_permission(&headers, "/api/product/update").await {
+    let role = match crate::middleware::auth::check_api_permission(&app, &headers, "/api/product/update").await {
         Err(e) => return e,
         Ok(role) => role,
     };
@@ -714,7 +714,7 @@ pub async fn api_product_update(State(app): State<App>, headers: axum::http::Hea
 }
 
 pub async fn api_product_delete(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/product/delete").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/product/delete").await {
         Err(e) => return e,
         Ok(_) => {}
     }
@@ -894,7 +894,7 @@ pub async fn api_sales_order_upload_image(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
 
     let order_id = params.get("order_id").and_then(|s| s.parse::<i64>().ok());
     let order_id = match order_id {
@@ -917,7 +917,7 @@ pub async fn api_sales_order_upload_image(
     match app.sales_order.upload_image(order_id, image_type, file, &ctx).await {
         Ok(outcome) => {
             for log in &outcome.logs {
-                crate::middleware::auth::log_operation(&ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
+                crate::middleware::auth::log_operation(&app, &ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
             }
             (StatusCode::OK, outcome.body)
         }
@@ -930,7 +930,7 @@ pub async fn api_sales_order_delete_image(
     headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> (StatusCode, String) {
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
 
     let order_id = params.get("order_id").and_then(|s| s.parse::<i64>().ok());
     let order_id = match order_id {
@@ -942,7 +942,7 @@ pub async fn api_sales_order_delete_image(
     match app.sales_order.delete_image(order_id, image_type, &ctx).await {
         Ok(outcome) => {
             for log in &outcome.logs {
-                crate::middleware::auth::log_operation(&ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
+                crate::middleware::auth::log_operation(&app, &ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
             }
             (StatusCode::OK, outcome.body)
         }
@@ -955,7 +955,7 @@ pub async fn api_purchase_document_list(
     headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     let supplier_id = params.get("supplier_id").and_then(|s| s.parse::<i64>().ok());
     let document_date = params.get("document_date").map(|s| s.as_str()).unwrap_or("");
     match app.purchase_document.list(&ctx, supplier_id, document_date).await {
@@ -969,11 +969,11 @@ pub async fn api_purchase_document_upload(
     headers: axum::http::HeaderMap,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/purchase_document/upload").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/purchase_document/upload").await {
         Err(e) => return e,
         Ok(_) => {}
     }
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
 
     // multipart 字段解析属 HTTP 传输适配（与 api_restore_file 同例）；文件落盘与 DB 写入在用例层
     let mut supplier_id: Option<i64> = None;
@@ -1029,7 +1029,7 @@ pub async fn api_purchase_document_upload(
         &file_bytes.unwrap(),
     ).await {
         Ok(outcome) => {
-            crate::middleware::auth::log_operation(&ctx, "purchase_document.upload", "purchase_document", &outcome.id.to_string(),
+            crate::middleware::auth::log_operation(&app, &ctx, "purchase_document.upload", "purchase_document", &outcome.id.to_string(),
                 &outcome.log_detail).await;
             (StatusCode::OK, serde_json::json!({ "id": outcome.id, "url": outcome.url }).to_string())
         },
@@ -1042,14 +1042,14 @@ pub async fn api_purchase_document_delete(
     headers: axum::http::HeaderMap,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/purchase_document/delete").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/purchase_document/delete").await {
         Err(e) => return e,
         Ok(_) => {}
     }
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.purchase_document.delete(&ctx, id).await {
         Ok(body) => {
-            crate::middleware::auth::log_operation(&ctx, "purchase_document.delete", "purchase_document", &id.to_string(),
+            crate::middleware::auth::log_operation(&app, &ctx, "purchase_document.delete", "purchase_document", &id.to_string(),
                 &format!("删除采购单据 ID={}", id)).await;
             (StatusCode::OK, body)
         },
@@ -1191,7 +1191,7 @@ pub async fn api_product_unit_delete_by_product(State(app): State<App>, Json(req
 }
 
 pub async fn api_product_unit_list(State(app): State<App>, headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
-    let is_super_admin = crate::middleware::auth::get_user_ctx(&headers).await.role == "super_admin";
+    let is_super_admin = crate::middleware::auth::get_user_ctx(&app, &headers).await.role == "super_admin";
     let product_id = params.get("product_id").and_then(|s| s.parse::<i64>().ok());
     (StatusCode::OK, app.product.unit_list(is_super_admin, product_id).await)
 }
@@ -1371,15 +1371,15 @@ pub async fn api_product_last_purchase_price(
 }
 
 pub async fn api_purchase_order_create(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<PurchaseOrderReq>) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/purchase_order/create").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/purchase_order/create").await {
         Err(e) => return e,
         Ok(_) => {}
     }
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.purchase_order.create(req, &ctx).await {
         Ok(outcome) => {
             if let Some((target_id, detail)) = outcome.log {
-                crate::middleware::auth::log_operation(&ctx, "purchase_order.create", "purchase_order", &target_id, &detail).await;
+                crate::middleware::auth::log_operation(&app, &ctx, "purchase_order.create", "purchase_order", &target_id, &detail).await;
             }
             (StatusCode::OK, outcome.body)
         }
@@ -1388,7 +1388,7 @@ pub async fn api_purchase_order_create(State(app): State<App>, headers: axum::ht
 }
 
 pub async fn api_purchase_order_list(State(app): State<App>, headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     let filter = PurchaseOrderListFilter {
         keyword_pattern: parse_keyword_pattern(&params),
         supplier_id: params.get("supplier_id").and_then(|s| s.parse().ok()),
@@ -1405,7 +1405,7 @@ pub async fn api_purchase_order_list(State(app): State<App>, headers: axum::http
 }
 
 pub async fn api_purchase_order_detail(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.purchase_order.detail(id, &ctx).await {
         Ok(json) => (StatusCode::OK, json),
         Err(e) => text_error_response(e),
@@ -1413,15 +1413,15 @@ pub async fn api_purchase_order_detail(State(app): State<App>, headers: axum::ht
 }
 
 pub async fn api_purchase_order_update(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<PurchaseOrderReq>) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/purchase_order/update").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/purchase_order/update").await {
         Err(e) => return e,
         Ok(_) => {}
     }
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.purchase_order.update(req, &ctx).await {
         Ok(outcome) => {
             if let Some((target_id, detail)) = outcome.log {
-                crate::middleware::auth::log_operation(&ctx, "purchase_order.update", "purchase_order", &target_id, &detail).await;
+                crate::middleware::auth::log_operation(&app, &ctx, "purchase_order.update", "purchase_order", &target_id, &detail).await;
             }
             (StatusCode::OK, outcome.body)
         }
@@ -1430,15 +1430,15 @@ pub async fn api_purchase_order_update(State(app): State<App>, headers: axum::ht
 }
 
 pub async fn api_purchase_order_delete(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/purchase_order/delete").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/purchase_order/delete").await {
         Err(e) => return e,
         Ok(_) => {}
     }
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.purchase_order.delete(id, &ctx).await {
         Ok(outcome) => {
             if let Some((target_id, detail)) = outcome.log {
-                crate::middleware::auth::log_operation(&ctx, "purchase_order.delete", "purchase_order", &target_id, &detail).await;
+                crate::middleware::auth::log_operation(&app, &ctx, "purchase_order.delete", "purchase_order", &target_id, &detail).await;
             }
             (StatusCode::OK, outcome.body)
         }
@@ -1448,16 +1448,16 @@ pub async fn api_purchase_order_delete(State(app): State<App>, headers: axum::ht
 
 /// 设置采购订单结算状态（0=未结 1=已结），无需版本号，操作列直接调用
 pub async fn api_purchase_order_settle(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/purchase_order/settle").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/purchase_order/settle").await {
         Err(e) => return e,
         Ok(_) => {}
     }
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     let is_settled = data["is_settled"].as_i64();
     match app.purchase_order.settle(id, is_settled, &ctx).await {
         Ok(outcome) => {
             if let Some((target_id, detail)) = outcome.log {
-                crate::middleware::auth::log_operation(&ctx, "purchase_order.settle", "purchase_order", &target_id, &detail).await;
+                crate::middleware::auth::log_operation(&app, &ctx, "purchase_order.settle", "purchase_order", &target_id, &detail).await;
             }
             (StatusCode::OK, outcome.body)
         }
@@ -1474,16 +1474,16 @@ pub async fn api_purchase_order_settle(State(app): State<App>, headers: axum::ht
 /// 返回 (production_date, batch_no)；无批次数据（无采购明细/全部消耗完）返回 (None, None)。
 
 pub async fn api_purchase_order_approve(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/purchase_order/approve").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/purchase_order/approve").await {
         Err(e) => return e,
         Ok(_) => {}
     }
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     let reason = data["reason"].as_str().unwrap_or("").trim().to_string();
     match app.purchase_order.approve(id, reason, &ctx).await {
         Ok(outcome) => {
             if let Some((target_id, detail)) = outcome.log {
-                crate::middleware::auth::log_operation(&ctx, "purchase_order.approve", "purchase_order", &target_id, &detail).await;
+                crate::middleware::auth::log_operation(&app, &ctx, "purchase_order.approve", "purchase_order", &target_id, &detail).await;
             }
             (StatusCode::OK, outcome.body)
         }
@@ -1492,16 +1492,16 @@ pub async fn api_purchase_order_approve(State(app): State<App>, headers: axum::h
 }
 
 pub async fn api_purchase_order_unapprove(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/purchase_order/unapprove").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/purchase_order/unapprove").await {
         Err(e) => return e,
         Ok(_) => {}
     }
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     let reason = data["reason"].as_str().unwrap_or("").trim().to_string();
     match app.purchase_order.unapprove(id, reason, &ctx).await {
         Ok(outcome) => {
             if let Some((target_id, detail)) = outcome.log {
-                crate::middleware::auth::log_operation(&ctx, "purchase_order.unapprove", "purchase_order", &target_id, &detail).await;
+                crate::middleware::auth::log_operation(&app, &ctx, "purchase_order.unapprove", "purchase_order", &target_id, &detail).await;
             }
             (StatusCode::OK, outcome.body)
         }
@@ -1515,7 +1515,7 @@ pub async fn api_purchase_order_export(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     // 行级数据权限：supplier 只能导出自己的（强制逻辑在用例层）
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     let keyword_pattern = parse_keyword_pattern(&params);
     let supplier_id = params.get("supplier_id").and_then(|s| s.parse().ok());
     match app.purchase_order.export(&ctx, keyword_pattern, supplier_id).await {
@@ -1545,15 +1545,15 @@ pub async fn api_purchase_order_print_excel(
 }
 
 pub async fn api_purchase_order_import(State(app): State<App>, headers: axum::http::HeaderMap, content: Bytes) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/purchase_order/import").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/purchase_order/import").await {
         Err(e) => return e.into_response(),
         Ok(_) => {}
     }
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.purchase_order.import(content.to_vec(), &ctx).await {
         Ok(outcome) => {
             if let Some((target_id, detail)) = outcome.log {
-                crate::middleware::auth::log_operation(&ctx, "purchase_order.import", "purchase_order", &target_id, &detail).await;
+                crate::middleware::auth::log_operation(&app, &ctx, "purchase_order.import", "purchase_order", &target_id, &detail).await;
             }
             (StatusCode::OK, outcome.body).into_response()
         }
@@ -1562,7 +1562,7 @@ pub async fn api_purchase_order_import(State(app): State<App>, headers: axum::ht
 }
 
 pub async fn api_sales_order_detail(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.sales_order.detail(id, &ctx).await {
         Ok(json) => (StatusCode::OK, json),
         Err(e) => text_error_response(e),
@@ -1570,15 +1570,15 @@ pub async fn api_sales_order_detail(State(app): State<App>, headers: axum::http:
 }
 
 pub async fn api_sales_order_update(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<SalesOrderReq>) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/sales_order/update").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/sales_order/update").await {
         Err(e) => return e,
         Ok(_) => {}
     }
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.sales_order.update(req, &ctx).await {
         Ok(outcome) => {
             for log in &outcome.logs {
-                crate::middleware::auth::log_operation(&ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
+                crate::middleware::auth::log_operation(&app, &ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
             }
             (StatusCode::OK, outcome.body)
         }
@@ -1587,15 +1587,15 @@ pub async fn api_sales_order_update(State(app): State<App>, headers: axum::http:
 }
 
 pub async fn api_sales_order_update_prices(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/sales_order/update_prices").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/sales_order/update_prices").await {
         Err(e) => return e,
         Ok(_) => {}
     }
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.sales_order.update_prices(id, &ctx).await {
         Ok(outcome) => {
             for log in &outcome.logs {
-                crate::middleware::auth::log_operation(&ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
+                crate::middleware::auth::log_operation(&app, &ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
             }
             (StatusCode::OK, outcome.body)
         }
@@ -1604,15 +1604,15 @@ pub async fn api_sales_order_update_prices(State(app): State<App>, headers: axum
 }
 
 pub async fn api_sales_order_delete(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/sales_order/delete").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/sales_order/delete").await {
         Err(e) => return e,
         Ok(_) => {}
     }
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.sales_order.delete(id, &ctx).await {
         Ok(outcome) => {
             for log in &outcome.logs {
-                crate::middleware::auth::log_operation(&ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
+                crate::middleware::auth::log_operation(&app, &ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
             }
             (StatusCode::OK, outcome.body)
         }
@@ -1626,7 +1626,7 @@ pub async fn api_sales_order_export(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     // 行级数据权限：purchaser 只能导出自己采购单位的销售单（强制逻辑在用例层）
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     let keyword_pattern = parse_keyword_pattern(&params);
     let purchaser_id = params.get("purchaser_id").and_then(|s| s.parse().ok());
     match app.sales_order.export(&ctx, keyword_pattern, purchaser_id).await {
@@ -1643,15 +1643,15 @@ pub async fn api_sales_order_export(
 }
 
 pub async fn api_sales_order_import(State(app): State<App>, headers: axum::http::HeaderMap, content: Bytes) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/sales_order/import").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/sales_order/import").await {
         Err(e) => return e.into_response(),
         Ok(_) => {}
     }
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.sales_order.import(content.to_vec(), &ctx).await {
         Ok(outcome) => {
             for log in &outcome.logs {
-                crate::middleware::auth::log_operation(&ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
+                crate::middleware::auth::log_operation(&app, &ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
             }
             (StatusCode::OK, outcome.body).into_response()
         }
@@ -1661,7 +1661,7 @@ pub async fn api_sales_order_import(State(app): State<App>, headers: axum::http:
 
 pub async fn api_query_purchase_order(State(app): State<App>, headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     // 行级数据权限：supplier 角色强制只看自己绑定的供应商
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.query_purchase.query_orders(&ctx, &params).await {
         Ok(body) => (StatusCode::OK, body),
         Err(e) => text_error_response(e),
@@ -1670,7 +1670,7 @@ pub async fn api_query_purchase_order(State(app): State<App>, headers: axum::htt
 
 pub async fn api_query_purchase_order_export(State(app): State<App>, headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     // 行级数据权限：supplier 角色只能导出自己供应商的数据
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.query_purchase.export_orders(&ctx, &params).await {
         Ok(buf) => (
             [
@@ -1699,7 +1699,7 @@ pub async fn api_query_purchase_summary(State(app): State<App>, axum::extract::Q
 
 pub async fn api_query_supplier_balance(State(app): State<App>, headers: axum::http::HeaderMap) -> impl IntoResponse {
     // 行级数据权限：supplier 角色只能看自己绑定的供应商往来
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.query_finance.supplier_balance(&ctx).await {
         Ok(body) => (StatusCode::OK, body),
         Err(e) => text_error_response(e),
@@ -1708,7 +1708,7 @@ pub async fn api_query_supplier_balance(State(app): State<App>, headers: axum::h
 
 pub async fn api_query_supplier_balance_export(State(app): State<App>, headers: axum::http::HeaderMap) -> impl IntoResponse {
     // 行级数据权限：supplier 角色只能导出自己绑定的供应商往来
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.query_finance.export_supplier_balance(&ctx).await {
         Ok(buf) => (
             [
@@ -1723,7 +1723,7 @@ pub async fn api_query_supplier_balance_export(State(app): State<App>, headers: 
 
 pub async fn api_query_sales_order(State(app): State<App>, headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     // 行级数据权限：purchaser 角色强制只看自己绑定的采购单位
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.query_sales.query_orders(&ctx, &params).await {
         Ok(body) => (StatusCode::OK, body),
         Err(e) => text_error_response(e),
@@ -1732,7 +1732,7 @@ pub async fn api_query_sales_order(State(app): State<App>, headers: axum::http::
 
 pub async fn api_query_sales_order_export(State(app): State<App>, headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     // 行级数据权限：purchaser 角色只能导出自己采购单位的数据
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.query_sales.export_orders(&ctx, &params).await {
         Ok(buf) => (
             [
@@ -1797,7 +1797,7 @@ pub async fn api_query_allocation_source(State(app): State<App>, axum::extract::
 
 pub async fn api_query_purchaser_balance(State(app): State<App>, headers: axum::http::HeaderMap) -> impl IntoResponse {
     // 行级数据权限：purchaser 角色只能看自己绑定的采购单位往来
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.query_finance.purchaser_balance(&ctx).await {
         Ok(body) => (StatusCode::OK, body),
         Err(e) => text_error_response(e),
@@ -1806,7 +1806,7 @@ pub async fn api_query_purchaser_balance(State(app): State<App>, headers: axum::
 
 pub async fn api_query_purchaser_balance_export(State(app): State<App>, headers: axum::http::HeaderMap) -> impl IntoResponse {
     // 行级数据权限：purchaser 角色只能导出自己绑定的采购单位往来
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.query_finance.export_purchaser_balance(&ctx).await {
         Ok(buf) => (
             [
@@ -1825,16 +1825,16 @@ pub async fn api_sales_order_generate_purchase(
     Path(id): Path<i64>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/sales_order/generate_purchase").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/sales_order/generate_purchase").await {
         Err(e) => return e.into_response(),
         Ok(_) => {}
     }
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     let force = params.get("force").map(|s| s == "1").unwrap_or(false);
     match app.sales_order.generate_purchase(id, force, &ctx).await {
         Ok(outcome) => {
             for log in &outcome.logs {
-                crate::middleware::auth::log_operation(&ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
+                crate::middleware::auth::log_operation(&app, &ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
             }
             (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "application/json; charset=utf-8")], outcome.body).into_response()
         }
@@ -1962,7 +1962,7 @@ pub async fn api_query_profit_detail(State(app): State<App>, axum::extract::Quer
 
 pub async fn api_query_purchase_price_export(State(app): State<App>, headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     // 单价/金额为进价信息，仅超级管理员可见：非 super_admin 导出时这两列置空
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.query_purchase.export_price_items(&ctx, &params).await {
         Ok(buf) => xlsx_response(buf, "采购台账查询.xlsx"),
         Err(e) => text_error_response(e).into_response(),
@@ -2097,7 +2097,7 @@ pub async fn api_purchase_document_list_export(
     headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     let supplier_id = params.get("supplier_id").and_then(|s| s.parse::<i64>().ok());
     let document_date = params.get("document_date").map(|s| s.as_str()).unwrap_or("");
     match app.purchase_document.list_export(&ctx, supplier_id, document_date).await {
@@ -2107,15 +2107,15 @@ pub async fn api_purchase_document_list_export(
 }
 
 pub async fn api_sales_order_create(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<SalesOrderReq>) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/sales_order/create").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/sales_order/create").await {
         Err(e) => return e,
         Ok(_) => {}
     }
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.sales_order.create(req, &ctx).await {
         Ok(outcome) => {
             for log in &outcome.logs {
-                crate::middleware::auth::log_operation(&ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
+                crate::middleware::auth::log_operation(&app, &ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
             }
             (StatusCode::OK, outcome.body)
         }
@@ -2124,7 +2124,7 @@ pub async fn api_sales_order_create(State(app): State<App>, headers: axum::http:
 }
 
 pub async fn api_sales_order_list(State(app): State<App>, headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     let filter = SalesOrderListFilter {
         keyword_pattern: parse_keyword_pattern(&params),
         purchaser_id: params.get("purchaser_id").and_then(|s| s.parse().ok()),
@@ -2141,7 +2141,7 @@ pub async fn api_sales_order_list(State(app): State<App>, headers: axum::http::H
 }
 
 pub async fn api_sales_order_accept(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.sales_order.accept(id, &ctx).await {
         Ok(body) => (StatusCode::OK, body),
         Err(e) => text_error_response(e),
@@ -2149,7 +2149,7 @@ pub async fn api_sales_order_accept(State(app): State<App>, headers: axum::http:
 }
 
 pub async fn api_sales_order_by_purchaser(State(app): State<App>, headers: axum::http::HeaderMap, Path(purchaser_id): Path<i64>) -> impl IntoResponse {
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.sales_order.by_purchaser(purchaser_id, &ctx).await {
         Ok(json) => (StatusCode::OK, json),
         Err(e) => text_error_response(e),
@@ -2241,29 +2241,31 @@ pub async fn api_supplement_compare(State(app): State<App>, Path(order_id): Path
 }
 
 pub async fn api_sales_order_accept_excel(
+    State(app): State<App>,
     headers: axum::http::HeaderMap,
     Path(id): Path<i64>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let force = params.get("force").map(|s| s == "1").unwrap_or(false);
-    match check_sales_order_access(&headers, id).await {
+    match check_sales_order_access(&app, &headers, id).await {
         Err(e) => return e.into_response(),
         Ok(_) => {}
     }
-    build_accept_excel(&crate::middleware::auth::get_user_ctx(&headers).await, id, true, force).await.into_response()
+    build_accept_excel(&crate::middleware::auth::get_user_ctx(&app, &headers).await, id, true, force).await.into_response()
 }
 
 pub async fn api_sales_order_real_excel(
+    State(app): State<App>,
     headers: axum::http::HeaderMap,
     Path(id): Path<i64>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let force = params.get("force").map(|s| s == "1").unwrap_or(false);
-    match check_sales_order_access(&headers, id).await {
+    match check_sales_order_access(&app, &headers, id).await {
         Err(e) => return e.into_response(),
         Ok(_) => {}
     }
-    build_accept_excel(&crate::middleware::auth::get_user_ctx(&headers).await, id, false, force).await.into_response()
+    build_accept_excel(&crate::middleware::auth::get_user_ctx(&app, &headers).await, id, false, force).await.into_response()
 }
 
 pub async fn api_sales_order_sort_items(State(app): State<App>, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
@@ -2352,7 +2354,7 @@ pub async fn api_product_today_price_items(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     // 今日进价采集仅超级管理员可用
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     if ctx.role != "super_admin" {
         return (StatusCode::FORBIDDEN, serde_json::json!({ "success": false, "message": "只有超级管理员可以使用今日进价采集" }).to_string());
     }
@@ -2367,7 +2369,7 @@ pub async fn api_product_today_price_save(
     Json(data): Json<std::collections::HashMap<String, serde_json::Value>>,
 ) -> impl IntoResponse {
     // 今日进价采集仅超级管理员可录入
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     if ctx.role != "super_admin" {
         return (StatusCode::FORBIDDEN, serde_json::json!({ "success": false, "message": "只有超级管理员可以录入今日进价" }).to_string());
     }
@@ -2390,7 +2392,7 @@ pub async fn api_product_today_price_excel(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     // 今日进价采集仅超级管理员可用
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     if ctx.role != "super_admin" {
         return (StatusCode::FORBIDDEN, serde_json::json!({ "success": false, "message": "只有超级管理员可以使用今日进价采集" }).to_string()).into_response();
     }
@@ -2421,7 +2423,7 @@ pub async fn api_product_today_price_a4(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     // 今日进价采集仅超级管理员可用
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     if ctx.role != "super_admin" {
         return (StatusCode::FORBIDDEN, serde_json::json!({ "success": false, "message": "只有超级管理员可以使用今日进价采集" }).to_string()).into_response();
     }
@@ -2452,7 +2454,7 @@ pub async fn api_product_today_price_excel_by_category(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     // 今日进价采集仅超级管理员可用
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     if ctx.role != "super_admin" {
         return (StatusCode::FORBIDDEN, serde_json::json!({ "success": false, "message": "只有超级管理员可以使用今日进价采集" }).to_string()).into_response();
     }
@@ -2520,15 +2522,15 @@ pub async fn api_sales_order_sort_comprehensive_excel(State(app): State<App>, ax
 
 /// 设置销售订单结算状态（0=未结 1=已结），操作列直接调用
 pub async fn api_sales_order_settle(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/sales_order/settle").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/sales_order/settle").await {
         Err(e) => return e,
         Ok(_) => {}
     }
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.sales_order.settle(id, data["is_settled"].as_i64(), &ctx).await {
         Ok(outcome) => {
             for log in &outcome.logs {
-                crate::middleware::auth::log_operation(&ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
+                crate::middleware::auth::log_operation(&app, &ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
             }
             (StatusCode::OK, outcome.body)
         }
@@ -2537,17 +2539,17 @@ pub async fn api_sales_order_settle(State(app): State<App>, headers: axum::http:
 }
 
 pub async fn api_sales_order_update_status(State(app): State<App>, headers: axum::http::HeaderMap, Json(req): Json<std::collections::HashMap<String, String>>) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/sales_order/update_status").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/sales_order/update_status").await {
         Err(e) => return e,
         Ok(_) => {}
     }
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     let id = req.get("id").and_then(|s| s.parse::<i64>().ok());
     let new_status = req.get("status").cloned();
     match app.sales_order.update_status(id, new_status, &ctx).await {
         Ok(outcome) => {
             for log in &outcome.logs {
-                crate::middleware::auth::log_operation(&ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
+                crate::middleware::auth::log_operation(&app, &ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
             }
             (StatusCode::OK, outcome.body)
         }
@@ -2556,16 +2558,16 @@ pub async fn api_sales_order_update_status(State(app): State<App>, headers: axum
 }
 
 pub async fn api_sales_order_approve(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/sales_order/approve").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/sales_order/approve").await {
         Err(e) => return e,
         Ok(_) => {}
     }
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     let reason = data["reason"].as_str().unwrap_or("").trim().to_string();
     match app.sales_order.approve(id, reason, &ctx).await {
         Ok(outcome) => {
             for log in &outcome.logs {
-                crate::middleware::auth::log_operation(&ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
+                crate::middleware::auth::log_operation(&app, &ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
             }
             (StatusCode::OK, outcome.body)
         }
@@ -2574,16 +2576,16 @@ pub async fn api_sales_order_approve(State(app): State<App>, headers: axum::http
 }
 
 pub async fn api_sales_order_unapprove(State(app): State<App>, headers: axum::http::HeaderMap, Path(id): Path<i64>, Json(data): Json<serde_json::Value>) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/sales_order/unapprove").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/sales_order/unapprove").await {
         Err(e) => return e,
         Ok(_) => {}
     }
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     let reason = data["reason"].as_str().unwrap_or("").trim().to_string();
     match app.sales_order.unapprove(id, reason, &ctx).await {
         Ok(outcome) => {
             for log in &outcome.logs {
-                crate::middleware::auth::log_operation(&ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
+                crate::middleware::auth::log_operation(&app, &ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
             }
             (StatusCode::OK, outcome.body)
         }
@@ -2592,11 +2594,11 @@ pub async fn api_sales_order_unapprove(State(app): State<App>, headers: axum::ht
 }
 
 pub async fn api_sales_order_correction(State(app): State<App>, headers: axum::http::HeaderMap, Json(data): Json<std::collections::HashMap<String, serde_json::Value>>) -> impl IntoResponse {
-    match crate::middleware::auth::check_api_permission(&headers, "/api/sales_order/correction").await {
+    match crate::middleware::auth::check_api_permission(&app, &headers, "/api/sales_order/correction").await {
         Err(e) => return e,
         Ok(_) => {}
     }
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
 
     let corrections = match data.get("corrections") {
         None => return (StatusCode::BAD_REQUEST, "缺少修正数据".to_string()),
@@ -2606,7 +2608,7 @@ pub async fn api_sales_order_correction(State(app): State<App>, headers: axum::h
     match app.sales_order.correction(corrections, &ctx).await {
         Ok(outcome) => {
             for log in &outcome.logs {
-                crate::middleware::auth::log_operation(&ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
+                crate::middleware::auth::log_operation(&app, &ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
             }
             (StatusCode::OK, outcome.body)
         },
@@ -2640,14 +2642,14 @@ pub async fn api_price_schedule_create(
     headers: axum::http::HeaderMap,
     Json(req): Json<PriceScheduleReq>,
 ) -> impl IntoResponse {
-    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&headers, "/api/price_schedule/create").await {
+    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&app, &headers, "/api/price_schedule/create").await {
         return (code, msg).into_response();
     }
     match app.price_schedule.create(req).await {
         Ok(outcome) => {
             if let Some((target_id, detail)) = outcome.log {
-                let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
-                crate::middleware::auth::log_operation(&ctx, "录入价格策略", "price_schedule", &target_id, &detail).await;
+                let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
+                crate::middleware::auth::log_operation(&app, &ctx, "录入价格策略", "price_schedule", &target_id, &detail).await;
             }
             (StatusCode::OK, outcome.json).into_response()
         }
@@ -2661,14 +2663,14 @@ pub async fn api_price_schedule_update(
     headers: axum::http::HeaderMap,
     Json(req): Json<PriceScheduleReq>,
 ) -> impl IntoResponse {
-    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&headers, "/api/price_schedule/update").await {
+    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&app, &headers, "/api/price_schedule/update").await {
         return (code, msg).into_response();
     }
     match app.price_schedule.update(req).await {
         Ok(outcome) => {
             if let Some((target_id, detail)) = outcome.log {
-                let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
-                crate::middleware::auth::log_operation(&ctx, "更新价格策略", "price_schedule", &target_id, &detail).await;
+                let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
+                crate::middleware::auth::log_operation(&app, &ctx, "更新价格策略", "price_schedule", &target_id, &detail).await;
             }
             (StatusCode::OK, outcome.json).into_response()
         }
@@ -2682,14 +2684,14 @@ pub async fn api_price_schedule_delete(
     headers: axum::http::HeaderMap,
     Json(req): Json<DeleteReq>,
 ) -> impl IntoResponse {
-    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&headers, "/api/price_schedule/delete").await {
+    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&app, &headers, "/api/price_schedule/delete").await {
         return (code, msg).into_response();
     }
     match app.price_schedule.delete(req.id).await {
         Ok(outcome) => {
             if let Some((target_id, detail)) = outcome.log {
-                let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
-                crate::middleware::auth::log_operation(&ctx, "删除价格策略", "price_schedule", &target_id, &detail).await;
+                let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
+                crate::middleware::auth::log_operation(&app, &ctx, "删除价格策略", "price_schedule", &target_id, &detail).await;
             }
             (StatusCode::OK, outcome.json).into_response()
         }
@@ -2703,7 +2705,7 @@ pub async fn api_price_schedule_list(
     headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&headers, "/api/price_schedule/list").await {
+    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&app, &headers, "/api/price_schedule/list").await {
         return (code, msg).into_response();
     }
 
@@ -2726,13 +2728,13 @@ pub async fn api_price_schedule_batch_import(
     headers: axum::http::HeaderMap,
     Json(req): Json<PriceScheduleBatchReq>,
 ) -> impl IntoResponse {
-    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&headers, "/api/price_schedule/batch_import").await {
+    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&app, &headers, "/api/price_schedule/batch_import").await {
         return (code, msg).into_response();
     }
     let outcome = app.price_schedule.batch_import(req.items, req.conflict_policy).await;
     if let Some((target_id, detail)) = outcome.log {
-        let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
-        crate::middleware::auth::log_operation(&ctx, "批量导入价格策略", "price_schedule", &target_id, &detail).await;
+        let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
+        crate::middleware::auth::log_operation(&app, &ctx, "批量导入价格策略", "price_schedule", &target_id, &detail).await;
     }
     (StatusCode::OK, outcome.json).into_response()
 }
@@ -2743,7 +2745,7 @@ pub async fn api_price_schedule_history(
     headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&headers, "/api/price_schedule/history").await {
+    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&app, &headers, "/api/price_schedule/history").await {
         return (code, msg).into_response();
     }
     let product_id: i64 = params.get("product_id").and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -2759,7 +2761,7 @@ pub async fn api_price_schedule_get(
     headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&headers, "/api/price_schedule/lookup").await {
+    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&app, &headers, "/api/price_schedule/lookup").await {
         return (code, msg).into_response();
     }
     let id: i64 = params.get("id").and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -2777,7 +2779,7 @@ pub async fn api_price_schedule_diagnose(
     headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&headers, "/api/price_schedule/lookup").await {
+    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&app, &headers, "/api/price_schedule/lookup").await {
         return (code, msg).into_response();
     }
     let product_id: i64 = params.get("product_id").and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -2798,7 +2800,7 @@ pub async fn api_price_schedule_lookup_batch(
     headers: axum::http::HeaderMap,
     body: String,
 ) -> impl IntoResponse {
-    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&headers, "/api/price_schedule/lookup").await {
+    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&app, &headers, "/api/price_schedule/lookup").await {
         return (code, msg).into_response();
     }
     #[derive(serde::Deserialize)]
@@ -2828,7 +2830,7 @@ pub async fn api_price_schedule_lookup(
     headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&headers, "/api/price_schedule/lookup").await {
+    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&app, &headers, "/api/price_schedule/lookup").await {
         return (code, msg).into_response();
     }
     let product_id: i64 = params.get("product_id").and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -2849,7 +2851,7 @@ pub async fn api_price_schedule_export_template(
     State(app): State<App>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&headers, "/api/price_schedule/export_template").await {
+    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&app, &headers, "/api/price_schedule/export_template").await {
         return (code, msg).into_response();
     }
     match app.price_schedule.export_template().await {
@@ -2864,7 +2866,7 @@ pub async fn api_price_schedule_export(
     headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&headers, "/api/price_schedule/export").await {
+    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&app, &headers, "/api/price_schedule/export").await {
         return (code, msg).into_response();
     }
     let filter = ScheduleFilter {
@@ -2888,17 +2890,17 @@ pub async fn api_price_schedule_backfill_sales_order(
     headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&headers, "/api/price_schedule/backfill_sales_order").await {
+    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&app, &headers, "/api/price_schedule/backfill_sales_order").await {
         return (code, msg).into_response();
     }
     let order_id: i64 = params.get("order_id").and_then(|s| s.parse().ok()).unwrap_or(0);
     let force: bool = params.get("force").map(|s| s == "1" || s == "true").unwrap_or(false);
     let price_type: String = params.get("price_type").cloned().unwrap_or_else(|| "gov_procurement".to_string());
-    let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+    let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
     match app.price_schedule.backfill_sales_order(order_id, force, price_type, &ctx).await {
         Ok(outcome) => {
             if let Some((target_id, detail)) = outcome.log {
-                crate::middleware::auth::log_operation(&ctx, "补单按价重算", "sales_order", &target_id, &detail).await;
+                crate::middleware::auth::log_operation(&app, &ctx, "补单按价重算", "sales_order", &target_id, &detail).await;
             }
             (StatusCode::OK, outcome.json).into_response()
         }
@@ -2914,7 +2916,7 @@ pub async fn api_price_schedule_batch_import_excel(
     headers: axum::http::HeaderMap,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&headers, "/api/price_schedule/batch_import").await {
+    if let Err((code, msg)) = crate::middleware::auth::check_api_permission(&app, &headers, "/api/price_schedule/batch_import").await {
         return (code, msg).into_response();
     }
     // 收集上传的 xlsx 字节
@@ -2937,9 +2939,9 @@ pub async fn api_price_schedule_batch_import_excel(
 
     match app.price_schedule.batch_import_excel(bytes).await {
         Ok(outcome) => {
-            let ctx = crate::middleware::auth::get_user_ctx(&headers).await;
+            let ctx = crate::middleware::auth::get_user_ctx(&app, &headers).await;
             if let Some((target_id, detail)) = outcome.log {
-                crate::middleware::auth::log_operation(&ctx, "Excel批量导入价格策略", "price_schedule", &target_id, &detail).await;
+                crate::middleware::auth::log_operation(&app, &ctx, "Excel批量导入价格策略", "price_schedule", &target_id, &detail).await;
             }
             (StatusCode::OK, outcome.json).into_response()
         }

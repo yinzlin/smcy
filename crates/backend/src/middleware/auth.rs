@@ -1,13 +1,16 @@
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Html;
-use sqlx::Row;
 use std::collections::{HashMap, HashSet};
 
 use common::utils::layout_html;
-use database::pool;
+use domain::port::oplog::OperationLogRepo;
+use domain::port::sales_order::SalesOrderRepo;
+use domain::port::user::UserRepo;
 use domain::UserCtx;
 
-pub async fn get_user_role(headers: &HeaderMap) -> String {
+use crate::di::App;
+
+pub async fn get_user_role(app: &App, headers: &HeaderMap) -> String {
     let session_token = headers.get("cookie")
         .and_then(|v| v.to_str().ok())
         .and_then(|cookies| {
@@ -29,20 +32,11 @@ pub async fn get_user_role(headers: &HeaderMap) -> String {
         Ok(id) => id,
         Err(_) => return "anonymous".to_string(),
     };
-    
-    let rows = sqlx::query(
-        "SELECT role FROM user_account WHERE id = ? AND status = 1"
-    )
-    .bind(user_id)
-    .fetch_all(pool())
-    .await
-    .unwrap_or_default();
-    
-    if rows.is_empty() {
-        return "anonymous".to_string();
+
+    match app.user_repo.find_active_by_id(user_id).await {
+        Ok(Some(row)) => row.role,
+        _ => "anonymous".to_string(),
     }
-    
-    rows[0].get::<String, _>("role")
 }
 
 pub fn has_permission(role: &str, required_role: &str) -> bool {
@@ -99,7 +93,7 @@ pub fn has_permission_point(role: &str, permission: &str) -> bool {
 }
 
 /// 解析用户上下文：cookie session -> (role, user_id, supplier_id, purchaser_id)
-pub async fn get_user_ctx(headers: &HeaderMap) -> UserCtx {
+pub async fn get_user_ctx(app: &App, headers: &HeaderMap) -> UserCtx {
     let session_token = headers.get("cookie")
         .and_then(|v| v.to_str().ok())
         .and_then(|cookies| {
@@ -123,50 +117,28 @@ pub async fn get_user_ctx(headers: &HeaderMap) -> UserCtx {
         Err(_) => return empty,
     };
 
-    let rows = sqlx::query(
-        "SELECT role, COALESCE(supplier_id,0) as supplier_id, COALESCE(purchaser_id,0) as purchaser_id FROM user_account WHERE id = ? AND status = 1"
-    )
-    .bind(user_id)
-    .fetch_all(pool())
-    .await
-    .unwrap_or_default();
-
-    if rows.is_empty() {
-        return empty;
-    }
-    let row = &rows[0];
-    UserCtx {
-        role: row.get::<String, _>("role"),
-        user_id,
-        supplier_id: row.get::<i64, _>("supplier_id"),
-        purchaser_id: row.get::<i64, _>("purchaser_id"),
+    match app.user_repo.session_ctx(user_id).await {
+        Ok(Some(row)) => UserCtx {
+            role: row.role,
+            user_id,
+            supplier_id: row.supplier_id,
+            purchaser_id: row.purchaser_id,
+        },
+        _ => empty,
     }
 }
 
 /// 记录操作审计日志（关键写操作）
 pub async fn log_operation(
+    app: &App,
     user: &UserCtx,
     action: &str,
     target_type: &str,
     target_id: &str,
     detail: &str,
 ) {
-    let username: String = sqlx::query_scalar("SELECT COALESCE(username,'') FROM user_account WHERE id = ?")
-        .bind(user.user_id)
-        .fetch_one(pool())
-        .await
-        .unwrap_or_default();
-    let _ = sqlx::query(
-        "INSERT INTO operation_log(user_id, username, action, target_type, target_id, detail) VALUES (?, ?, ?, ?, ?, ?)"
-    )
-    .bind(user.user_id)
-    .bind(&username)
-    .bind(action)
-    .bind(target_type)
-    .bind(target_id)
-    .bind(detail)
-    .execute(pool())
-    .await;
+    // 委托仓储端口：username 解析与 operation_log 写入均在 SqliteOperationLogRepo 内完成
+    app.oplog_repo.log(user, action, target_type, target_id, detail).await;
 }
 
 /// 判断用户是否可操作该采购单（行级数据权限）：admin/super_admin 可见全部；supplier 仅可见自己绑定的供应商
@@ -314,8 +286,8 @@ pub fn check_api_route_permission(path: &str) -> Option<&str> {
 }
 
 /// 校验 API 权限：返回权限点对应的角色校验（权限点系统）
-pub async fn check_api_permission(headers: &HeaderMap, path: &str) -> Result<String, (StatusCode, String)> {
-    let ctx = get_user_ctx(headers).await;
+pub async fn check_api_permission(app: &App, headers: &HeaderMap, path: &str) -> Result<String, (StatusCode, String)> {
+    let ctx = get_user_ctx(app, headers).await;
     
     if let Some(permission) = check_api_route_permission(path) {
         if !has_permission_point(&ctx.role, permission) {
@@ -329,8 +301,8 @@ pub async fn check_api_permission(headers: &HeaderMap, path: &str) -> Result<Str
     Ok(ctx.role)
 }
 
-pub async fn check_page_permission(headers: &HeaderMap, path: &str) -> Result<String, Html<String>> {
-    let role = get_user_role(headers).await;
+pub async fn check_page_permission(app: &App, headers: &HeaderMap, path: &str) -> Result<String, Html<String>> {
+    let role = get_user_role(app, headers).await;
     
     if let Some(required_role) = get_route_required_role(path) {
         if !has_permission(&role, required_role) {
@@ -353,15 +325,12 @@ pub async fn check_page_permission(headers: &HeaderMap, path: &str) -> Result<St
 
 /// 校验用户是否有权查看/导出指定销售单（行级数据权限）
 pub async fn check_sales_order_access(
+    app: &App,
     headers: &axum::http::HeaderMap,
     id: i64,
 ) -> Result<(), (axum::http::StatusCode, String)> {
-    let ctx = get_user_ctx(headers).await;
-    let order_purchaser_id: i64 = sqlx::query_scalar("SELECT purchaser_id FROM sales_order WHERE id = ?")
-        .bind(id)
-        .fetch_one(pool())
-        .await
-        .unwrap_or(-1);
+    let ctx = get_user_ctx(app, headers).await;
+    let order_purchaser_id: i64 = app.sales_order_repo.fetch_purchaser_id_or_neg1(id).await;
     if !can_access_sales_order(&ctx, order_purchaser_id) {
         return Err((axum::http::StatusCode::FORBIDDEN, "您没有权限查看此订单".to_string()));
     }

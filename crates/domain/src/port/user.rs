@@ -49,6 +49,14 @@ pub struct SessionUserRow {
     pub role: String,
 }
 
+/// 会话上下文行：角色 + 行级数据权限关联（供中间件解析 UserCtx 用）
+#[derive(Debug, Clone)]
+pub struct SessionCtxRow {
+    pub role: String,
+    pub supplier_id: i64,
+    pub purchaser_id: i64,
+}
+
 /// 新建用户命令（密码为已哈希值，明文密码不进入领域层）
 #[derive(Debug, Clone)]
 pub struct NewUser {
@@ -86,4 +94,6 @@ pub trait UserRepo: Send + Sync {
     async fn find_login(&self, username: &str) -> Result<Option<LoginRow>, DomainError>;
     async fn touch_last_login(&self, id: i64) -> Result<(), DomainError>;
     async fn find_active_by_id(&self, id: i64) -> Result<Option<SessionUserRow>, DomainError>;
+    /// 会话上下文：role + COALESCE(supplier_id,0) + COALESCE(purchaser_id,0)，仅 status = 1
+    async fn session_ctx(&self, id: i64) -> Result<Option<SessionCtxRow>, DomainError>;
 }
