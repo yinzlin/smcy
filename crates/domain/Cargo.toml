@@ -2,7 +2,7 @@
 name = "domain"
 version = "3.7.0"
 edition = "2024"
-description = "领域模型层：业务实体与 API 请求/响应结构体，零外部框架依赖"
+description = "领域模型层：业务实体与出站端口定义（不含 HTTP 契约，仅依赖 serde）"
 
 [dependencies]
 serde = { workspace = true }
