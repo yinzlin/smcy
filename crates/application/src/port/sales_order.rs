@@ -67,4 +67,37 @@ pub trait SalesOrderUseCase: Send + Sync {
     async fn export(&self, ctx: &UserCtx, keyword_pattern: String, purchaser_id: Option<i64>) -> Result<Vec<u8>, UseCaseError>;
     /// 批量导入销售单（xlsx/csv 解析 + INSERT OR IGNORE 幂等 + base_quantity 服务端重算）
     async fn import(&self, bytes: Vec<u8>, ctx: &UserCtx) -> Result<SalesOrderOutcome, UseCaseError>;
+    /// 验收单聚合数据（真实明细 + 分摊增项合并 + 分类排序 + 重算验收金额；JSON 预序列化）
+    async fn accept(&self, id: i64, ctx: &UserCtx) -> Result<String, UseCaseError>;
+    /// 由销售单生成采购订单（warning/force 两遍法 + 快照驱动 CRUD；成功时含待补记日志）
+    async fn generate_purchase(&self, id: i64, force: bool, ctx: &UserCtx) -> Result<SalesOrderOutcome, UseCaseError>;
+    /// 上传订单图片（客户订单/签字验收单；行级权限 + 白名单校验 + 写盘 + 更新订单列）
+    /// file 为 None 表示 multipart 中无 file 字段（旧行为 400 "请选择要上传的图片"）
+    async fn upload_image(&self, order_id: i64, image_type: &str, file: Option<(String, Vec<u8>)>, ctx: &UserCtx) -> Result<SalesOrderOutcome, UseCaseError>;
+    /// 删除订单图片（移除磁盘文件并清空订单列）
+    async fn delete_image(&self, order_id: i64, image_type: &str, ctx: &UserCtx) -> Result<SalesOrderOutcome, UseCaseError>;
+
+    // ===== 分拣清单（GET 公开接口 + xlsx 导出；SQL 错误旧行为吞为空结果）=====
+    /// 分拣清单·按商品聚合（date 空=当前 pending/sorting 待分拣；JSON 预序列化）
+    async fn sort_items(&self, date: String) -> Result<String, UseCaseError>;
+    /// 分拣清单导出 xlsx（7 列含合计；返回文件名与字节）
+    async fn sort_items_excel(&self, date: String) -> Result<(String, Vec<u8>), UseCaseError>;
+    /// 分拣清单·按分类聚合
+    async fn sort_items_by_category(&self, date: String) -> Result<String, UseCaseError>;
+    /// 分拣清单·按分类导出 xlsx（分类彩色分组；空数据时返回空缓冲由 HTTP 层出 JSON 提示）
+    async fn sort_items_by_category_excel(&self, date: String) -> Result<(String, Vec<u8>), UseCaseError>;
+    /// 分拣清单·按供应商聚合
+    async fn sort_items_by_supplier(&self, date: String) -> Result<String, UseCaseError>;
+    /// 分拣清单·按供应商导出 xlsx（每供应商一 sheet；print_values 决定实量/单价/金额列）
+    async fn sort_items_by_supplier_excel(&self, date: String, print_values: bool) -> Result<(String, Vec<u8>), UseCaseError>;
+    /// 分拣清单·按采购单位聚合
+    async fn sort_items_by_purchaser(&self, date: String) -> Result<String, UseCaseError>;
+    /// 分拣清单·按采购单位导出 xlsx（含历史最高/最低/最近与售价四列）
+    async fn sort_items_by_purchaser_excel(&self, date: String) -> Result<(String, Vec<u8>), UseCaseError>;
+    /// 综合分拣聚合
+    async fn sort_comprehensive(&self, date: String) -> Result<String, UseCaseError>;
+    /// 综合分拣导出 xlsx
+    async fn sort_comprehensive_excel(&self, date: String) -> Result<(String, Vec<u8>), UseCaseError>;
+    /// 分拣修正（数量/售价/进价；数量与单价服务端 round 两位；purchase_price 回写商品并联动自动售价）
+    async fn correction(&self, corrections: Vec<serde_json::Value>, ctx: &UserCtx) -> Result<SalesOrderOutcome, UseCaseError>;
 }

@@ -140,6 +140,130 @@ pub struct SalesOrderImportItem {
     pub remark: String,
 }
 
+/// 验收单聚合主表行（JOIN purchaser）
+#[derive(Debug, Clone)]
+pub struct SalesOrderAcceptOrderRow {
+    pub id: i64,
+    pub purchaser_id: i64,
+    pub order_no: String,
+    pub order_date: String,
+    pub total_amount: f64,
+    pub discount_rate: f64,
+    pub final_amount: f64,
+    pub remark: Option<String>,
+    pub purchaser_name: String,
+    pub purchaser_address: Option<String>,
+}
+
+/// 验收单真实明细行（LEFT JOIN 分类，用于排序键计算）
+#[derive(Debug, Clone)]
+pub struct SalesOrderAcceptItemRow {
+    pub id: i64,
+    pub product_id: i64,
+    pub product_name: String,
+    pub alias2: Option<String>,
+    pub spec: Option<String>,
+    pub unit: Option<String>,
+    pub unit_price: f64,
+    pub quantity: f64,
+    pub amount: f64,
+    pub remark: Option<String>,
+    pub category_name: Option<String>,
+    pub parent_name: Option<String>,
+}
+
+/// 验收单增项行（order_supplement_item）
+#[derive(Debug, Clone)]
+pub struct SalesOrderAcceptSupplementRow {
+    pub id: i64,
+    pub operation_type: String,
+    pub target_order_item_id: Option<i64>,
+    pub product_id: i64,
+    pub product_name: String,
+    pub alias2: Option<String>,
+    pub spec: Option<String>,
+    pub unit: String,
+    pub unit_price: f64,
+    pub quantity: f64,
+    pub amount: f64,
+}
+
+/// 生成采购单：销售单主表行
+#[derive(Debug, Clone)]
+pub struct SalesOrderGenerateRow {
+    pub order_date: String,
+    pub warehouse_id: i64,
+    pub warehouse_name: String,
+    pub purchaser_id: i64,
+}
+
+/// 生成采购单：已存在关联/兜底命中 PO 行
+#[derive(Debug, Clone)]
+pub struct GenerateExistedPo {
+    pub id: i64,
+    pub order_no: String,
+    pub status: String,
+    pub supplier_name: String,
+}
+
+/// 生成采购单：销售明细行（purchase_price = COALESCE(psp.price, p.purchase_price)）
+#[derive(Debug, Clone)]
+pub struct GenerateItemRow {
+    pub product_id: i64,
+    pub product_name: String,
+    pub alias1: Option<String>,
+    pub alias2: Option<String>,
+    pub spec: Option<String>,
+    pub unit: Option<String>,
+    pub quantity: f64,
+    pub pre_sale_quantity: Option<f64>,
+    pub supplier_id: i64,
+    pub remark: Option<String>,
+    pub purchase_price: f64,
+    pub base_unit: Option<String>,
+    pub base_price: f64,
+}
+
+/// 生成采购单：force 快照明细行（仅 source=本单 的快照 id 翻译结果）
+#[derive(Debug, Clone)]
+pub struct GenerateSnapshotRow {
+    pub id: i64,
+    pub product_id: i64,
+    pub unit_key: String,
+    pub warehouse_id: i64,
+}
+
+/// 生成采购单：force 旧明细行（PO 中 source=本单，待 diff）
+#[derive(Debug, Clone)]
+pub struct GenerateOldItemRow {
+    pub id: i64,
+    pub product_id: i64,
+    pub unit_key: String,
+    pub quantity: f64,
+    pub amount: f64,
+}
+
+/// 生成采购单：PO 明细写入参数（快照 UPDATE / 孤儿复用 UPDATE / INSERT 共用字段集）
+#[derive(Debug, Clone)]
+pub struct GeneratePoItemWrite {
+    pub product_id: i64,
+    pub product_name: String,
+    pub alias1: String,
+    pub alias2: String,
+    pub spec: String,
+    pub unit: String,
+    pub unit_price: f64,
+    pub quantity: f64,
+    pub base_quantity: f64,
+    pub amount: f64,
+    pub ordered_quantity: f64,
+    pub remark: String,
+    pub warehouse_id: i64,
+    pub warehouse_name: String,
+    pub sales_unit: String,
+}
+
+
 /// 列表筛选条件（purchaser_id 为 HTTP 原始值，角色强制在用例层完成）
 #[derive(Debug, Clone, Default)]
 pub struct SalesOrderListFilter {
@@ -243,4 +367,285 @@ pub trait SalesOrderRepo: Send + Sync {
     async fn unit_ratio(&self, product_id: i64, unit: &str) -> Result<Option<f64>, DomainError>;
     /// 导入：插入明细（旧行为吞错，由用例层 let _ 忽略）
     async fn insert_import_item(&self, order_id: i64, item: &SalesOrderImportItem) -> Result<(), DomainError>;
+    /// 验收单聚合主表行（JOIN purchaser；错误吞为 None 由用例层 404）
+    async fn accept_order_row(&self, id: i64) -> Result<Option<SalesOrderAcceptOrderRow>, DomainError>;
+    /// 验收单真实明细行（LEFT JOIN 分类；错误吞为空）
+    async fn accept_item_rows(&self, id: i64) -> Result<Vec<SalesOrderAcceptItemRow>, DomainError>;
+    /// 验收单增项行（错误吞为空）
+    async fn accept_supplement_rows(&self, id: i64) -> Result<Vec<SalesOrderAcceptSupplementRow>, DomainError>;
+    /// 增项排序分类反查：(category_name, parent_name)（错误吞为 None，用例层兜底空串）
+    async fn product_category_names(&self, product_id: i64) -> Result<Option<(Option<String>, Option<String>)>, DomainError>;
+    /// 生成采购单前置读：销售单主表行（错误吞为 None 由用例层 404）
+    async fn generate_order_row(&self, id: i64) -> Result<Option<SalesOrderGenerateRow>, DomainError>;
+    /// 生成采购单：已存在关联 PO（主表 source OR 明细 source；错误吞为空）
+    async fn existing_po_rows(&self, id: i64) -> Result<Vec<GenerateExistedPo>, DomainError>;
+    /// 生成采购单兜底：本单涉及的供应商 id（DISTINCT，supplier_id > 0；错误吞为空）
+    async fn involved_supplier_ids(&self, id: i64) -> Result<Vec<i64>, DomainError>;
+    /// 生成采购单兜底：当天同供应商 pending PO（supplier_ids 动态 IN；错误吞为空）
+    async fn pending_po_pool(&self, order_date: &str, supplier_ids: &[i64]) -> Result<Vec<GenerateExistedPo>, DomainError>;
+    /// force 路径：当天全部 pending PO（id, supplier_id；错误吞为空）
+    async fn po_pool_for_date(&self, order_date: &str) -> Result<Vec<(i64, i64)>, DomainError>;
+    /// force 路径：本单涉及的全部明细 supplier_id（不做过滤，用例层筛 >0；错误吞为空）
+    async fn supplier_ids_of_order(&self, id: i64) -> Result<Vec<i64>, DomainError>;
+    /// force 路径：PO 中 source=本单 的旧明细（错误吞为空）
+    async fn old_items_by_po(&self, po_id: i64, so_id: i64) -> Result<Vec<GenerateOldItemRow>, DomainError>;
+    /// force 路径：读取本单快照列原文（错误吞为 None）
+    async fn snapshot_str(&self, id: i64) -> Option<String>;
+    /// force 路径：快照 id 翻译为 (P,U,wh) 索引行（错误吞为空）
+    async fn snapshot_rows(&self, so_id: i64, ids: &[i64]) -> Result<Vec<GenerateSnapshotRow>, DomainError>;
+    /// 生成采购单：销售明细行（含分供应商进价 JOIN，按品名排序；错误吞为空）
+    async fn generate_item_rows(&self, id: i64) -> Result<Vec<GenerateItemRow>, DomainError>;
+    /// 辅助单位 (ratio, purchase_price COALESCE 0)（错误吞为 None）
+    async fn unit_ratio_price(&self, product_id: i64, unit: &str) -> Result<Option<(f64, f64)>, DomainError>;
+    /// 当天同供应商 pending PO id（ORDER BY id LIMIT 1；错误吞为 None）
+    async fn find_pending_po_of_supplier(&self, supplier_id: i64, order_date: &str) -> Result<Option<i64>, DomainError>;
+    /// 供应商名称（错误吞为 None，用例层兜底"未知供应商"）
+    async fn supplier_name(&self, supplier_id: i64) -> Result<Option<String>, DomainError>;
+    /// 新建采购单主表（金额 0 初始化，source=本销售单），返回 last_insert_rowid
+    async fn insert_po_main(&self, supplier_id: i64, order_no: &str, order_date: &str, main_wh_id: i64, main_wh_name: &str, so_id: i64) -> Result<i64, DomainError>;
+    /// PO 中 source=本单 的既有明细 (product_id, quantity, sales_unit)（错误吞为空）
+    async fn existing_po_items(&self, po_id: i64, so_id: i64) -> Result<Vec<(i64, f64, String)>, DomainError>;
+    /// PO 明细旧金额（COALESCE 0；错误吞为 0.0）
+    async fn po_item_amount(&self, po_item_id: i64, po_id: i64) -> f64;
+    /// 快照命中按主键 UPDATE（15 列，不动 source），返回 rows_affected（错误吞为 0）
+    async fn update_po_item_via_snapshot(&self, po_id: i64, po_item_id: i64, w: &GeneratePoItemWrite) -> u64;
+    /// 孤儿匹配：同 (P,U,warehouse) 任意 source，排除本轮已写入 id（动态 SQL），错误吞为 None
+    async fn find_orphan_item(&self, po_id: i64, product_id: i64, unit_trim: &str, main_wh_id: i64, exclude_ids: &[i64], so_id: i64) -> Option<i64>;
+    /// 孤儿复用 UPDATE（16 列含 source=本单），返回 rows_affected（错误吞为 0）
+    async fn update_po_item_orphan(&self, po_id: i64, orphan_po_id: i64, so_id: i64, w: &GeneratePoItemWrite) -> u64;
+    /// 插入 PO 明细（17 列含 source=本单），返回 last_insert_rowid
+    async fn insert_po_item(&self, po_id: i64, so_id: i64, w: &GeneratePoItemWrite) -> Result<i64, DomainError>;
+    /// 差量调整 PO 主表金额（错误吞掉）
+    async fn adjust_po_totals(&self, po_id: i64, delta: f64);
+    /// 回写本单快照列（错误吞掉）
+    async fn write_snapshot(&self, so_id: i64, json: &str);
+    /// 图片上传前置读：采购方名称与订单日期（fetch_optional 错误吞为 None，用例层兜底 "purchaser"/"nodate"）
+    async fn image_purchaser_info(&self, order_id: i64) -> Option<(Option<String>, Option<String>)>;
+    /// 图片上传写库：动态列名 UPDATE（旧行为 let _ 吞错）
+    async fn update_image_column(&self, order_id: i64, column: &str, value: &str);
+    /// 图片删除前置读：动态列名读图片 URL（错误吞为 None）
+    async fn image_url_of(&self, order_id: i64, column: &str) -> Option<Option<String>>;
+    /// 图片删除清列：动态列名 UPDATE 置 NULL（旧行为 let _ 吞错）
+    async fn clear_image_column(&self, order_id: i64, column: &str);
+
+    // ===== 分拣清单（sort*）：旧 handler 对 SQL 错误 unwrap_or_default 吞为空结果，用例层照旧吞错 =====
+    /// 分拣清单·按商品聚合行（date 空查 pending/sorting 待分拣，非空查该日期）
+    async fn sort_item_rows(&self, date: &str) -> Result<Vec<SortItemRow>, DomainError>;
+    /// 分拣清单·按商品导出行（含 spec，display_name 规格优先在用例层）
+    async fn sort_item_excel_rows(&self, date: &str) -> Result<Vec<SortItemExcelRow>, DomainError>;
+    /// 分拣清单·按分类聚合行
+    async fn sort_category_rows(&self, date: &str) -> Result<Vec<SortCategoryRow>, DomainError>;
+    /// 分拣清单·按分类导出行（含 spec/pre_sale_quantity，amount 可空）
+    async fn sort_category_excel_rows(&self, date: &str) -> Result<Vec<SortCategoryExcelRow>, DomainError>;
+    /// 分拣清单·按供应商聚合行
+    async fn sort_supplier_rows(&self, date: &str) -> Result<Vec<SortSupplierRow>, DomainError>;
+    /// 分拣清单·按供应商导出行
+    async fn sort_supplier_excel_rows(&self, date: &str) -> Result<Vec<SortSupplierExcelRow>, DomainError>;
+    /// 分拣清单·按采购单位聚合行
+    async fn sort_purchaser_rows(&self, date: &str) -> Result<Vec<SortPurchaserRow>, DomainError>;
+    /// 分拣清单·按采购单位导出行（含分类排序键来源 category/parent 名）
+    async fn sort_purchaser_excel_rows(&self, date: &str) -> Result<Vec<SortPurchaserExcelRow>, DomainError>;
+    /// 采购历史价（MAX/MIN/最新一条）——by_purchaser_excel 第二查询
+    async fn sort_purchaser_price_rows(&self) -> Result<Vec<SortPurchaserPriceRow>, DomainError>;
+    /// 综合分拣聚合行
+    async fn sort_comprehensive_rows(&self, date: &str) -> Result<Vec<SortComprehensiveRow>, DomainError>;
+    /// 综合分拣导出行
+    async fn sort_comprehensive_excel_rows(&self, date: &str) -> Result<Vec<SortComprehensiveExcelRow>, DomainError>;
+
+    // ===== 分拣修正（correction）：旧代码逐条吞错（.ok() / if let Ok）=====
+    /// 由明细 id 反查 product_id（错误吞为 None）
+    async fn correction_product_id_by_item(&self, item_id: i64) -> Option<i64>;
+    /// 回写商品进价，返回 rows_affected（错误吞为 None）
+    async fn correction_update_product_price(&self, purchase_price: f64, product_id: i64) -> Option<u64>;
+    /// 按 item_id 修正明细数量/单价（amount=ROUND(price*qty,2)），错误吞为 None
+    async fn correction_update_item_by_id(&self, quantity: Option<f64>, unit_price: Option<f64>, item_id: i64) -> Option<u64>;
+    /// 按 product_id 修正明细（同上 SQL），错误吞为 None
+    async fn correction_update_item_by_product(&self, quantity: Option<f64>, unit_price: Option<f64>, product_id: i64) -> Option<u64>;
+}
+
+// ===== 分拣清单（sort*）行 DTO：字段可空性与旧 handler decode 方式逐字对应 =====
+
+/// 分拣清单·按商品聚合行（GET sort_items）
+#[derive(Debug, Clone)]
+pub struct SortItemRow {
+    pub id: i64,
+    pub product_id: i64,
+    pub product_name: String,
+    pub unit: Option<String>,
+    pub unit_price: f64,
+    pub quantity: f64,
+    pub amount: f64,
+    pub remark: Option<String>,
+    pub purchaser_name: Option<String>,
+    pub order_no: Option<String>,
+}
+
+/// 分拣清单·按商品导出行（sort_items_excel）
+#[derive(Debug, Clone)]
+pub struct SortItemExcelRow {
+    pub id: i64,
+    pub product_id: i64,
+    pub product_name: String,
+    pub spec: Option<String>,
+    pub unit: Option<String>,
+    pub unit_price: f64,
+    pub quantity: f64,
+    pub amount: f64,
+    pub remark: Option<String>,
+    pub purchaser_name: Option<String>,
+    pub order_no: Option<String>,
+}
+
+/// 分拣清单·按分类聚合行（purchaser_name decode 为 String：NULL 令整批查询失败 → 旧行为空结果）
+#[derive(Debug, Clone)]
+pub struct SortCategoryRow {
+    pub item_id: i64,
+    pub product_id: i64,
+    pub product_name: String,
+    pub unit: Option<String>,
+    pub unit_price: f64,
+    pub quantity: f64,
+    pub amount: f64,
+    pub remark: Option<String>,
+    pub purchaser_name: String,
+    pub purchaser_id: i64,
+    pub order_no: Option<String>,
+    pub category_name: Option<String>,
+    pub category_id: i64,
+}
+
+/// 分拣清单·按分类导出行
+#[derive(Debug, Clone)]
+pub struct SortCategoryExcelRow {
+    pub product_id: i64,
+    pub product_name: String,
+    pub spec: Option<String>,
+    pub unit: Option<String>,
+    pub quantity: f64,
+    pub pre_sale_quantity: Option<f64>,
+    pub amount: Option<f64>,
+    pub remark: Option<String>,
+    pub purchaser_name: String,
+    pub purchaser_id: i64,
+    pub order_no: Option<String>,
+    pub category_name: Option<String>,
+    pub category_id: i64,
+}
+
+/// 分拣清单·按供应商聚合行
+#[derive(Debug, Clone)]
+pub struct SortSupplierRow {
+    pub item_id: i64,
+    pub order_id: i64,
+    pub product_id: i64,
+    pub product_name: String,
+    pub unit: Option<String>,
+    pub unit_price: f64,
+    pub quantity: f64,
+    pub amount: f64,
+    pub remark: Option<String>,
+    pub supplier_id: i64,
+    pub supplier_name: Option<String>,
+    pub purchaser_name: String,
+    pub purchaser_id: i64,
+    pub order_no: Option<String>,
+    pub purchase_price: f64,
+}
+
+/// 分拣清单·按供应商导出行
+#[derive(Debug, Clone)]
+pub struct SortSupplierExcelRow {
+    pub product_id: i64,
+    pub product_name: String,
+    pub spec: Option<String>,
+    pub unit: Option<String>,
+    pub quantity: f64,
+    pub pre_sale_quantity: Option<f64>,
+    pub amount: Option<f64>,
+    pub remark: Option<String>,
+    pub supplier_id: i64,
+    pub supplier_name: Option<String>,
+    pub purchaser_name: String,
+    pub purchaser_id: i64,
+    pub order_no: Option<String>,
+    pub purchase_price: f64,
+}
+
+/// 分拣清单·按采购单位聚合行
+#[derive(Debug, Clone)]
+pub struct SortPurchaserRow {
+    pub id: i64,
+    pub product_id: i64,
+    pub product_name: String,
+    pub unit: Option<String>,
+    pub unit_price: f64,
+    pub quantity: f64,
+    pub amount: f64,
+    pub remark: Option<String>,
+    pub purchaser_id: i64,
+    pub purchaser_name: Option<String>,
+    pub order_no: Option<String>,
+}
+
+/// 分拣清单·按采购单位导出行
+#[derive(Debug, Clone)]
+pub struct SortPurchaserExcelRow {
+    pub id: i64,
+    pub product_id: i64,
+    pub product_name: String,
+    pub spec: Option<String>,
+    pub unit: Option<String>,
+    pub unit_price: f64,
+    pub quantity: f64,
+    pub amount: f64,
+    pub remark: Option<String>,
+    pub purchaser_id: i64,
+    pub purchaser_name: Option<String>,
+    pub order_no: Option<String>,
+    pub category_name: Option<String>,
+    pub parent_name: Option<String>,
+}
+
+/// 采购历史价行（MAX/MIN/最新一条）
+#[derive(Debug, Clone)]
+pub struct SortPurchaserPriceRow {
+    pub product_id: i64,
+    pub max_price: Option<f64>,
+    pub min_price: Option<f64>,
+    pub latest_price: Option<f64>,
+}
+
+/// 综合分拣聚合行
+#[derive(Debug, Clone)]
+pub struct SortComprehensiveRow {
+    pub id: i64,
+    pub product_id: i64,
+    pub product_name: String,
+    pub unit: Option<String>,
+    pub unit_price: f64,
+    pub quantity: f64,
+    pub amount: f64,
+    pub remark: Option<String>,
+    pub purchaser_id: i64,
+    pub purchaser_name: Option<String>,
+    pub order_no: Option<String>,
+    pub category_name: Option<String>,
+    pub category_id: i64,
+}
+
+/// 综合分拣导出行
+#[derive(Debug, Clone)]
+pub struct SortComprehensiveExcelRow {
+    pub id: i64,
+    pub product_id: i64,
+    pub product_name: String,
+    pub spec: Option<String>,
+    pub unit: Option<String>,
+    pub quantity: f64,
+    pub remark: Option<String>,
+    pub purchaser_id: i64,
+    pub purchaser_name: Option<String>,
+    pub order_no: Option<String>,
+    pub category_name: Option<String>,
+    pub category_id: i64,
 }

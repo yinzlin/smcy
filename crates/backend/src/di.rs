@@ -5,26 +5,46 @@
 
 use application::service::basic_audit::BasicAuditService;
 use application::service::category::CategoryService;
+use application::service::food_accept::FoodAcceptService;
 use application::service::inventory::InventoryService;
+use application::service::order_allocation::OrderAllocationService;
+use application::service::order_supplement::OrderSupplementService;
 use application::service::price_schedule::PriceScheduleService;
 use application::service::product::ProductService;
+use application::service::purchase_document::PurchaseDocumentService;
 use application::service::purchase_order::PurchaseOrderService;
 use application::service::purchaser::PurchaserService;
+use application::service::query_finance::QueryFinanceService;
+use application::service::query_purchase::QueryPurchaseService;
+use application::service::query_sales::QuerySalesService;
+use application::service::query_stats::QueryStatsService;
+use application::service::query_stock::QueryStockService;
 use application::service::sales_order::SalesOrderService;
 use application::service::supplier::SupplierService;
+use application::service::system_mgmt::SystemMgmtService;
 use application::service::today_price::TodayPriceService;
 use application::service::user::UserService;
 use application::service::warehouse::WarehouseService;
 use database::sqlite::repo::audit::SqliteBasicAuditRepo;
 use database::sqlite::repo::category::SqliteCategoryRepo;
+use database::sqlite::repo::food_accept::SqliteFoodAcceptRepo;
 use database::sqlite::repo::inventory::SqliteInventoryRepo;
 use database::sqlite::repo::oplog::SqliteOperationLogRepo;
+use database::sqlite::repo::order_allocation::SqliteOrderAllocationRepo;
+use database::sqlite::repo::order_supplement::SqliteOrderSupplementRepo;
 use database::sqlite::repo::price_schedule::SqlitePriceScheduleRepo;
 use database::sqlite::repo::product::SqliteProductRepo;
+use database::sqlite::repo::purchase_document::SqlitePurchaseDocumentRepo;
 use database::sqlite::repo::purchase_order::SqlitePurchaseOrderRepo;
 use database::sqlite::repo::purchaser::SqlitePurchaserRepo;
+use database::sqlite::repo::query_finance::SqliteQueryFinanceRepo;
+use database::sqlite::repo::query_purchase::SqliteQueryPurchaseRepo;
+use database::sqlite::repo::query_sales::SqliteQuerySalesRepo;
+use database::sqlite::repo::query_stats::SqliteQueryStatsRepo;
+use database::sqlite::repo::query_stock::SqliteQueryStockRepo;
 use database::sqlite::repo::sales_order::SqliteSalesOrderRepo;
 use database::sqlite::repo::supplier::SqliteSupplierRepo;
+use database::sqlite::repo::system_mgmt::SqliteSystemMgmtRepo;
 use database::sqlite::repo::today_price::SqliteTodayPriceRepo;
 use database::sqlite::repo::user::SqliteUserRepo;
 use database::sqlite::repo::warehouse::SqliteWarehouseRepo;
@@ -76,11 +96,21 @@ pub struct App {
     pub supplier: SupplierService<SqliteSupplierRepo>,
     pub purchaser: PurchaserService<SqlitePurchaserRepo>,
     pub product: ProductService<SqliteProductRepo, BackendImageStore>,
+    pub purchase_document: PurchaseDocumentService<SqlitePurchaseDocumentRepo>,
     pub today_price: TodayPriceService<SqliteTodayPriceRepo>,
     pub price_schedule: PriceScheduleService<SqlitePriceScheduleRepo>,
     pub inventory: InventoryService<SqliteInventoryRepo>,
     pub purchase_order: PurchaseOrderService<SqlitePurchaseOrderRepo>,
     pub sales_order: SalesOrderService<SqliteSalesOrderRepo>,
+    pub order_allocation: OrderAllocationService<SqliteOrderAllocationRepo>,
+    pub order_supplement: OrderSupplementService<SqliteOrderSupplementRepo>,
+    pub query_finance: QueryFinanceService<SqliteQueryFinanceRepo>,
+    pub query_purchase: QueryPurchaseService<SqliteQueryPurchaseRepo>,
+    pub query_sales: QuerySalesService<SqliteQuerySalesRepo>,
+    pub query_stats: QueryStatsService<SqliteQueryStatsRepo>,
+    pub query_stock: QueryStockService<SqliteQueryStockRepo>,
+    pub system_mgmt: SystemMgmtService<SqliteSystemMgmtRepo>,
+    pub food_accept: FoodAcceptService<SqliteFoodAcceptRepo>,
 }
 
 /// 初始化数据库；如有待重建的 price_schedule 时段则补跑重建，完成后升级 user_version
@@ -103,10 +133,20 @@ pub async fn bootstrap() -> App {
             SqliteProductRepo::new(database::pool().clone()),
             BackendImageStore,
         ),
+        purchase_document: PurchaseDocumentService::new(SqlitePurchaseDocumentRepo::new(database::pool().clone())),
         today_price: TodayPriceService::new(SqliteTodayPriceRepo::new(database::pool().clone())),
         price_schedule: PriceScheduleService::new(SqlitePriceScheduleRepo::new(database::pool().clone())),
         inventory: InventoryService::new(SqliteInventoryRepo::new(database::pool().clone())),
         purchase_order: PurchaseOrderService::new(SqlitePurchaseOrderRepo::new(database::pool().clone())),
         sales_order: SalesOrderService::new(SqliteSalesOrderRepo::new(database::pool().clone())),
+        order_allocation: OrderAllocationService::new(SqliteOrderAllocationRepo::new(database::pool().clone())),
+        order_supplement: OrderSupplementService::new(SqliteOrderSupplementRepo::new(database::pool().clone())),
+        query_finance: QueryFinanceService::new(SqliteQueryFinanceRepo::new(database::pool().clone())),
+        query_purchase: QueryPurchaseService::new(SqliteQueryPurchaseRepo::new(database::pool().clone())),
+        query_sales: QuerySalesService::new(SqliteQuerySalesRepo::new(database::pool().clone())),
+        query_stats: QueryStatsService::new(SqliteQueryStatsRepo::new(database::pool().clone())),
+        query_stock: QueryStockService::new(SqliteQueryStockRepo::new(database::pool().clone())),
+        system_mgmt: SystemMgmtService::new(SqliteSystemMgmtRepo::new(database::pool().clone())),
+        food_accept: FoodAcceptService::new(SqliteFoodAcceptRepo::new(database::pool().clone())),
     }
 }

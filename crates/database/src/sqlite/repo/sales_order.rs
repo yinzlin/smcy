@@ -731,4 +731,1002 @@ impl SalesOrderRepo for SqliteSalesOrderRepo {
         .map_err(storage)?;
         Ok(())
     }
+
+    async fn accept_order_row(&self, id: i64) -> Result<Option<SalesOrderAcceptOrderRow>, DomainError> {
+        let row = sqlx::query(
+            "SELECT so.id, so.purchaser_id, so.order_no, so.order_date, so.total_amount, so.discount_rate, so.final_amount, so.remark,
+                    p.name as purchaser_name, p.address as purchaser_address
+             FROM sales_order so JOIN purchaser p ON so.purchaser_id = p.id WHERE so.id = ?"
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(row.map(|r| SalesOrderAcceptOrderRow {
+            id: r.get("id"),
+            purchaser_id: r.get("purchaser_id"),
+            order_no: r.get("order_no"),
+            order_date: r.get("order_date"),
+            total_amount: r.get("total_amount"),
+            discount_rate: r.get("discount_rate"),
+            final_amount: r.get("final_amount"),
+            remark: r.get("remark"),
+            purchaser_name: r.get("purchaser_name"),
+            purchaser_address: r.get("purchaser_address"),
+        }))
+    }
+
+    async fn accept_item_rows(&self, id: i64) -> Result<Vec<SalesOrderAcceptItemRow>, DomainError> {
+        let rows = sqlx::query(
+            "SELECT soi.id, soi.product_id, soi.product_name, soi.alias1, soi.alias2, soi.spec, soi.unit, soi.unit_price, soi.quantity, soi.amount, soi.remark,
+                    p.category_id, pc.name as category_name, pc2.name as parent_name
+             FROM sales_order_item soi
+             LEFT JOIN product p ON soi.product_id = p.id
+             LEFT JOIN category pc ON p.category_id = pc.id
+             LEFT JOIN category pc2 ON pc.parent_id = pc2.id
+             WHERE soi.order_id = ?"
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(rows.iter().map(|r| SalesOrderAcceptItemRow {
+            id: r.get("id"),
+            product_id: r.get("product_id"),
+            product_name: r.get("product_name"),
+            alias2: r.get("alias2"),
+            spec: r.get("spec"),
+            unit: r.get("unit"),
+            unit_price: r.get("unit_price"),
+            quantity: r.get("quantity"),
+            amount: r.get("amount"),
+            remark: r.get("remark"),
+            category_name: r.get("category_name"),
+            parent_name: r.get("parent_name"),
+        }).collect())
+    }
+
+    async fn accept_supplement_rows(&self, id: i64) -> Result<Vec<SalesOrderAcceptSupplementRow>, DomainError> {
+        let rows = sqlx::query(
+            "SELECT id, target_order_id, source_order_id, product_id, product_name, alias1, alias2, spec, unit, unit_price, quantity, amount, operation_type, target_order_item_id
+             FROM order_supplement_item WHERE target_order_id = ?"
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(rows.iter().map(|r| SalesOrderAcceptSupplementRow {
+            id: r.get("id"),
+            operation_type: r.get("operation_type"),
+            target_order_item_id: r.get("target_order_item_id"),
+            product_id: r.get("product_id"),
+            product_name: r.get("product_name"),
+            alias2: r.get("alias2"),
+            spec: r.get("spec"),
+            unit: r.get("unit"),
+            unit_price: r.get("unit_price"),
+            quantity: r.get("quantity"),
+            amount: r.get("amount"),
+        }).collect())
+    }
+
+    async fn product_category_names(&self, product_id: i64) -> Result<Option<(Option<String>, Option<String>)>, DomainError> {
+        let row = sqlx::query(
+            "SELECT pc.name as category_name, pc2.name as parent_name
+             FROM product p
+             LEFT JOIN category pc ON p.category_id = pc.id
+             LEFT JOIN category pc2 ON pc.parent_id = pc2.id
+             WHERE p.id = ?"
+        )
+        .bind(product_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(row.map(|r| (r.get::<Option<String>, _>("category_name"), r.get::<Option<String>, _>("parent_name"))))
+    }
+
+    async fn generate_order_row(&self, id: i64) -> Result<Option<SalesOrderGenerateRow>, DomainError> {
+        let row = sqlx::query(
+            "SELECT so.id, so.order_date, so.warehouse_id, so.warehouse_name, so.purchaser_id
+             FROM sales_order so WHERE so.id = ?"
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(row.map(|r| SalesOrderGenerateRow {
+            order_date: r.get("order_date"),
+            warehouse_id: r.get("warehouse_id"),
+            warehouse_name: r.get::<Option<String>, _>("warehouse_name").unwrap_or_default(),
+            purchaser_id: r.get("purchaser_id"),
+        }))
+    }
+
+    async fn existing_po_rows(&self, id: i64) -> Result<Vec<GenerateExistedPo>, DomainError> {
+        let rows = sqlx::query(
+            "SELECT po.id, po.order_no, po.status, COALESCE(s.name, '未知供应商') as supplier_name
+             FROM purchase_order po LEFT JOIN supplier s ON po.supplier_id = s.id
+             WHERE po.source_sales_order_id = ?
+                OR EXISTS (SELECT 1 FROM purchase_order_item poi
+                           WHERE poi.order_id = po.id AND poi.source_sales_order_id = ?)
+             ORDER BY po.id"
+        )
+        .bind(id)
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(rows.iter().map(|r| GenerateExistedPo {
+            id: r.get("id"),
+            order_no: r.get("order_no"),
+            status: r.get("status"),
+            supplier_name: r.get("supplier_name"),
+        }).collect())
+    }
+
+    async fn involved_supplier_ids(&self, id: i64) -> Result<Vec<i64>, DomainError> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT supplier_id FROM sales_order_item WHERE order_id = ? AND supplier_id > 0"
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(rows.iter().map(|r| r.get::<i64, _>("supplier_id")).collect())
+    }
+
+    async fn pending_po_pool(&self, order_date: &str, supplier_ids: &[i64]) -> Result<Vec<GenerateExistedPo>, DomainError> {
+        if supplier_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat("?")
+            .take(supplier_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT po.id, po.order_no, po.status, COALESCE(s.name, '未知供应商') as supplier_name
+             FROM purchase_order po LEFT JOIN supplier s ON po.supplier_id = s.id
+             WHERE po.order_date = ? AND po.status = 'pending'
+               AND po.supplier_id IN ({})
+             ORDER BY po.id",
+            placeholders
+        );
+        let mut q = sqlx::query(AssertSqlSafe(sql.as_str())).bind(order_date);
+        for sid in supplier_ids {
+            q = q.bind(sid);
+        }
+        let rows = q.fetch_all(&self.pool).await.map_err(storage)?;
+        Ok(rows.iter().map(|r| GenerateExistedPo {
+            id: r.get("id"),
+            order_no: r.get("order_no"),
+            status: r.get("status"),
+            supplier_name: r.get("supplier_name"),
+        }).collect())
+    }
+
+    async fn po_pool_for_date(&self, order_date: &str) -> Result<Vec<(i64, i64)>, DomainError> {
+        let rows = sqlx::query(
+            "SELECT po.id, po.supplier_id, po.status FROM purchase_order po WHERE po.order_date = ? AND po.status = 'pending'"
+        )
+        .bind(order_date)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(rows.iter().map(|r| (r.get::<i64, _>("id"), r.get::<i64, _>("supplier_id"))).collect())
+    }
+
+    async fn supplier_ids_of_order(&self, id: i64) -> Result<Vec<i64>, DomainError> {
+        let rows = sqlx::query(
+            "SELECT supplier_id FROM sales_order_item WHERE order_id = ?"
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(rows.iter().map(|r| r.get::<i64, _>("supplier_id")).collect())
+    }
+
+    async fn old_items_by_po(&self, po_id: i64, so_id: i64) -> Result<Vec<GenerateOldItemRow>, DomainError> {
+        let rows = sqlx::query(
+            "SELECT id, product_id, COALESCE(NULLIF(TRIM(COALESCE(sales_unit, '')), ''), unit, '') as unit_key, quantity, COALESCE(amount, 0) as amount
+             FROM purchase_order_item
+             WHERE order_id = ? AND source_sales_order_id = ?"
+        )
+        .bind(po_id)
+        .bind(so_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(rows.iter().map(|r| GenerateOldItemRow {
+            id: r.get("id"),
+            product_id: r.get("product_id"),
+            unit_key: r.get("unit_key"),
+            quantity: r.get("quantity"),
+            amount: r.get("amount"),
+        }).collect())
+    }
+
+    async fn snapshot_str(&self, id: i64) -> Option<String> {
+        let row = sqlx::query("SELECT generated_purchase_item_ids FROM sales_order WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()??;
+        row.try_get::<Option<String>, _>("generated_purchase_item_ids")
+            .ok()
+            .flatten()
+    }
+
+    async fn snapshot_rows(&self, so_id: i64, ids: &[i64]) -> Result<Vec<GenerateSnapshotRow>, DomainError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat("?")
+            .take(ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, product_id, COALESCE(NULLIF(TRIM(COALESCE(sales_unit, '')), ''), unit, '') as unit_key, warehouse_id
+             FROM purchase_order_item
+             WHERE source_sales_order_id = ? AND id IN ({})",
+            placeholders
+        );
+        let mut q = sqlx::query(AssertSqlSafe(sql.as_str())).bind(so_id);
+        for iid in ids {
+            q = q.bind(iid);
+        }
+        let rows = q.fetch_all(&self.pool).await.map_err(storage)?;
+        Ok(rows.iter().map(|r| GenerateSnapshotRow {
+            id: r.get("id"),
+            product_id: r.get("product_id"),
+            unit_key: r.get("unit_key"),
+            warehouse_id: r.get("warehouse_id"),
+        }).collect())
+    }
+
+    async fn generate_item_rows(&self, id: i64) -> Result<Vec<GenerateItemRow>, DomainError> {
+        let rows = sqlx::query(
+            "SELECT soi.product_id, soi.product_name, soi.alias1, soi.alias2, soi.spec, soi.unit, soi.quantity, soi.pre_sale_quantity, soi.supplier_id, soi.supplier_name, soi.remark,
+                    COALESCE(psp.price, p.purchase_price) as purchase_price,
+                    p.base_unit, p.base_price
+             FROM sales_order_item soi
+             LEFT JOIN product p ON soi.product_id = p.id
+             LEFT JOIN product_supplier_price psp ON psp.product_id = soi.product_id AND psp.supplier_id = soi.supplier_id
+             WHERE soi.order_id = ?
+             ORDER BY soi.product_name, soi.id"
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(rows.iter().map(|r| GenerateItemRow {
+            product_id: r.get("product_id"),
+            product_name: r.get("product_name"),
+            alias1: r.get("alias1"),
+            alias2: r.get("alias2"),
+            spec: r.get("spec"),
+            unit: r.get("unit"),
+            quantity: r.get("quantity"),
+            pre_sale_quantity: r.get("pre_sale_quantity"),
+            supplier_id: r.get("supplier_id"),
+            remark: r.get("remark"),
+            purchase_price: r.get("purchase_price"),
+            base_unit: r.get("base_unit"),
+            base_price: r.get("base_price"),
+        }).collect())
+    }
+
+    async fn unit_ratio_price(&self, product_id: i64, unit: &str) -> Result<Option<(f64, f64)>, DomainError> {
+        let row = sqlx::query(
+            "SELECT ratio, COALESCE(purchase_price, 0) as pp FROM product_unit WHERE product_id = ? AND unit_name = ?"
+        )
+        .bind(product_id)
+        .bind(unit)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(row.map(|r| (r.get::<f64, _>("ratio"), r.get::<f64, _>("pp"))))
+    }
+
+    async fn find_pending_po_of_supplier(&self, supplier_id: i64, order_date: &str) -> Result<Option<i64>, DomainError> {
+        let row = sqlx::query(
+            "SELECT id FROM purchase_order WHERE supplier_id = ? AND order_date = ? AND status = 'pending' ORDER BY id LIMIT 1"
+        )
+        .bind(supplier_id)
+        .bind(order_date)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(row.map(|r| r.get::<i64, _>("id")))
+    }
+
+    async fn supplier_name(&self, supplier_id: i64) -> Result<Option<String>, DomainError> {
+        let row = sqlx::query("SELECT name FROM supplier WHERE id = ?")
+            .bind(supplier_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?;
+        Ok(row.map(|r| r.get::<String, _>("name")))
+    }
+
+    async fn insert_po_main(&self, supplier_id: i64, order_no: &str, order_date: &str, main_wh_id: i64, main_wh_name: &str, so_id: i64) -> Result<i64, DomainError> {
+        let res = sqlx::query(
+            "INSERT INTO purchase_order(supplier_id, order_no, order_date, total_amount, discount_rate, amount_reduction, final_amount, warehouse_id, warehouse_name, remark, source_sales_order_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(supplier_id)
+        .bind(order_no)
+        .bind(order_date)
+        .bind(0.0)
+        .bind(0.0)
+        .bind(0.0)
+        .bind(0.0)
+        .bind(main_wh_id)
+        .bind(main_wh_name)
+        .bind(None::<String>)
+        .bind(so_id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(res.last_insert_rowid())
+    }
+
+    async fn existing_po_items(&self, po_id: i64, so_id: i64) -> Result<Vec<(i64, f64, String)>, DomainError> {
+        let rows = sqlx::query(
+            "SELECT product_id, quantity, COALESCE(sales_unit, '') as sales_unit
+             FROM purchase_order_item WHERE order_id = ? AND source_sales_order_id = ?"
+        )
+        .bind(po_id)
+        .bind(so_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(rows.iter().map(|r| (
+            r.get::<i64, _>("product_id"),
+            r.get::<f64, _>("quantity"),
+            r.get::<String, _>("sales_unit"),
+        )).collect())
+    }
+
+    async fn po_item_amount(&self, po_item_id: i64, po_id: i64) -> f64 {
+        sqlx::query(
+            "SELECT COALESCE(amount, 0) as amount FROM purchase_order_item WHERE id = ? AND order_id = ?"
+        )
+        .bind(po_item_id)
+        .bind(po_id)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|r| r.get::<f64, _>("amount"))
+        .unwrap_or(0.0)
+    }
+
+    async fn update_po_item_via_snapshot(&self, po_id: i64, po_item_id: i64, w: &GeneratePoItemWrite) -> u64 {
+        sqlx::query(
+            "UPDATE purchase_order_item SET product_id = ?, product_name = ?, alias1 = ?, alias2 = ?, spec = ?, unit = ?, unit_price = ?, quantity = ?, base_quantity = ?, amount = ?, ordered_quantity = ?, remark = ?, warehouse_id = ?, warehouse_name = ?, sales_unit = ? WHERE order_id = ? AND id = ?"
+        )
+        .bind(w.product_id)
+        .bind(&w.product_name)
+        .bind(&w.alias1)
+        .bind(&w.alias2)
+        .bind(&w.spec)
+        .bind(&w.unit)
+        .bind(w.unit_price)
+        .bind(w.quantity)
+        .bind(w.base_quantity)
+        .bind(w.amount)
+        .bind(w.ordered_quantity)
+        .bind(&w.remark)
+        .bind(w.warehouse_id)
+        .bind(&w.warehouse_name)
+        .bind(&w.sales_unit)
+        .bind(po_id)
+        .bind(po_item_id)
+        .execute(&self.pool)
+        .await
+        .map(|r| r.rows_affected())
+        .unwrap_or(0)
+    }
+
+    async fn find_orphan_item(&self, po_id: i64, product_id: i64, unit_trim: &str, main_wh_id: i64, exclude_ids: &[i64], so_id: i64) -> Option<i64> {
+        // id 为内部主键（i64），直接拼入 SQL 安全
+        let exclude_sql = if exclude_ids.is_empty() {
+            String::new()
+        } else {
+            let ids = exclude_ids.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ");
+            format!(" AND id NOT IN ({})", ids)
+        };
+        let orphan_sql = format!(
+            "SELECT id FROM purchase_order_item
+             WHERE order_id = ? AND product_id = ?
+               AND COALESCE(NULLIF(TRIM(COALESCE(sales_unit, '')), ''), unit, '') = ?
+               AND warehouse_id = {}
+             {}
+             ORDER BY (CASE WHEN source_sales_order_id = ? THEN 0 ELSE 1 END), id
+             LIMIT 1",
+            main_wh_id, exclude_sql
+        );
+        sqlx::query(AssertSqlSafe(orphan_sql.as_str()))
+            .bind(po_id)
+            .bind(product_id)
+            .bind(unit_trim)
+            .bind(so_id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.get::<i64, _>("id"))
+    }
+
+    async fn update_po_item_orphan(&self, po_id: i64, orphan_po_id: i64, so_id: i64, w: &GeneratePoItemWrite) -> u64 {
+        sqlx::query(
+            "UPDATE purchase_order_item SET product_id = ?, product_name = ?, alias1 = ?, alias2 = ?, spec = ?, unit = ?, unit_price = ?, quantity = ?, base_quantity = ?, amount = ?, ordered_quantity = ?, remark = ?, warehouse_id = ?, warehouse_name = ?, sales_unit = ?, source_sales_order_id = ? WHERE order_id = ? AND id = ?"
+        )
+        .bind(w.product_id)
+        .bind(&w.product_name)
+        .bind(&w.alias1)
+        .bind(&w.alias2)
+        .bind(&w.spec)
+        .bind(&w.unit)
+        .bind(w.unit_price)
+        .bind(w.quantity)
+        .bind(w.base_quantity)
+        .bind(w.amount)
+        .bind(w.ordered_quantity)
+        .bind(&w.remark)
+        .bind(w.warehouse_id)
+        .bind(&w.warehouse_name)
+        .bind(&w.sales_unit)
+        .bind(so_id)
+        .bind(po_id)
+        .bind(orphan_po_id)
+        .execute(&self.pool)
+        .await
+        .map(|r| r.rows_affected())
+        .unwrap_or(0)
+    }
+
+    async fn insert_po_item(&self, po_id: i64, so_id: i64, w: &GeneratePoItemWrite) -> Result<i64, DomainError> {
+        let res = sqlx::query(
+            "INSERT INTO purchase_order_item(order_id, product_id, product_name, alias1, alias2, spec, unit, unit_price, quantity, base_quantity, amount, ordered_quantity, remark, warehouse_id, warehouse_name, sales_unit, source_sales_order_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(po_id)
+        .bind(w.product_id)
+        .bind(&w.product_name)
+        .bind(&w.alias1)
+        .bind(&w.alias2)
+        .bind(&w.spec)
+        .bind(&w.unit)
+        .bind(w.unit_price)
+        .bind(w.quantity)
+        .bind(w.base_quantity)
+        .bind(w.amount)
+        .bind(w.ordered_quantity)
+        .bind(&w.remark)
+        .bind(w.warehouse_id)
+        .bind(&w.warehouse_name)
+        .bind(&w.sales_unit)
+        .bind(so_id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(res.last_insert_rowid())
+    }
+
+    async fn adjust_po_totals(&self, po_id: i64, delta: f64) {
+        let _ = sqlx::query(
+            "UPDATE purchase_order SET total_amount = COALESCE(total_amount, 0) + ?, final_amount = COALESCE(final_amount, 0) + ? WHERE id = ?"
+        )
+        .bind(delta)
+        .bind(delta)
+        .bind(po_id)
+        .execute(&self.pool)
+        .await;
+    }
+
+    async fn write_snapshot(&self, so_id: i64, json: &str) {
+        let _ = sqlx::query("UPDATE sales_order SET generated_purchase_item_ids = ? WHERE id = ?")
+            .bind(json)
+            .bind(so_id)
+            .execute(&self.pool)
+            .await;
+    }
+
+    async fn image_purchaser_info(&self, order_id: i64) -> Option<(Option<String>, Option<String>)> {
+        let row = sqlx::query(
+            "SELECT p.name, so.order_date FROM sales_order so LEFT JOIN purchaser p ON so.purchaser_id = p.id WHERE so.id = ?"
+        )
+        .bind(order_id)
+        .fetch_optional(&self.pool)
+        .await
+        .unwrap_or(None)?;
+        Some((row.get("name"), row.get("order_date")))
+    }
+
+    async fn update_image_column(&self, order_id: i64, column: &str, value: &str) {
+        let update_sql = format!("UPDATE sales_order SET {} = ? WHERE id = ?", column);
+        let _ = sqlx::query(AssertSqlSafe(update_sql.as_str()))
+            .bind(value)
+            .bind(order_id)
+            .execute(&self.pool)
+            .await;
+    }
+
+    async fn image_url_of(&self, order_id: i64, column: &str) -> Option<Option<String>> {
+        let select_sql = format!("SELECT {} as img FROM sales_order WHERE id = ?", column);
+        let row = sqlx::query(AssertSqlSafe(select_sql.as_str()))
+            .bind(order_id)
+            .fetch_optional(&self.pool)
+            .await
+            .unwrap_or(None)?;
+        row.try_get::<Option<String>, _>("img").ok()
+    }
+
+    async fn clear_image_column(&self, order_id: i64, column: &str) {
+        let update_sql = format!("UPDATE sales_order SET {} = NULL WHERE id = ?", column);
+        let _ = sqlx::query(AssertSqlSafe(update_sql.as_str()))
+            .bind(order_id)
+            .execute(&self.pool)
+            .await;
+    }
+
+    // ===== 分拣清单（sort*）：SQL 与旧 api_sales_order_sort_* handler 逐字一致 =====
+
+    async fn sort_item_rows(&self, date: &str) -> Result<Vec<SortItemRow>, DomainError> {
+        let has_date = !date.is_empty();
+        let where_sql = if has_date {
+            "WHERE so.order_date = ?"
+        } else {
+            "WHERE so.status IN ('pending', 'sorting')"
+        };
+        let sql = format!(
+            "SELECT soi.id, soi.product_id, soi.product_name, soi.unit, soi.unit_price, soi.quantity, soi.amount, soi.remark,
+                    p.name as purchaser_name, so.order_no
+             FROM sales_order_item soi
+             LEFT JOIN sales_order so ON soi.order_id = so.id
+             LEFT JOIN purchaser p ON so.purchaser_id = p.id
+             {}
+             ORDER BY soi.product_name, so.id, soi.id",
+            where_sql
+        );
+        let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
+        if has_date { q = q.bind(date); }
+        let rows = q.fetch_all(&self.pool).await.map_err(storage)?;
+        Ok(rows.iter().map(|r| SortItemRow {
+            id: r.get("id"),
+            product_id: r.get("product_id"),
+            product_name: r.get("product_name"),
+            unit: r.get("unit"),
+            unit_price: r.get("unit_price"),
+            quantity: r.get("quantity"),
+            amount: r.get("amount"),
+            remark: r.get("remark"),
+            purchaser_name: r.get("purchaser_name"),
+            order_no: r.get("order_no"),
+        }).collect())
+    }
+
+    async fn sort_item_excel_rows(&self, date: &str) -> Result<Vec<SortItemExcelRow>, DomainError> {
+        let has_date = !date.is_empty();
+        let where_sql = if has_date {
+            "WHERE so.order_date = ?"
+        } else {
+            "WHERE so.status IN ('pending', 'sorting')"
+        };
+        let sql = format!(
+            "SELECT soi.id, soi.product_id, soi.product_name, soi.spec, soi.unit, soi.unit_price, soi.quantity, soi.amount, soi.remark,
+                    p.name as purchaser_name, so.order_no
+             FROM sales_order_item soi
+             LEFT JOIN sales_order so ON soi.order_id = so.id
+             LEFT JOIN purchaser p ON so.purchaser_id = p.id
+             {}
+             ORDER BY soi.product_name, so.id, soi.id",
+            where_sql
+        );
+        let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
+        if has_date { q = q.bind(date); }
+        let rows = q.fetch_all(&self.pool).await.map_err(storage)?;
+        Ok(rows.iter().map(|r| SortItemExcelRow {
+            id: r.get("id"),
+            product_id: r.get("product_id"),
+            product_name: r.get("product_name"),
+            spec: r.get("spec"),
+            unit: r.get("unit"),
+            unit_price: r.get("unit_price"),
+            quantity: r.get("quantity"),
+            amount: r.get("amount"),
+            remark: r.get("remark"),
+            purchaser_name: r.get("purchaser_name"),
+            order_no: r.get("order_no"),
+        }).collect())
+    }
+
+    async fn sort_category_rows(&self, date: &str) -> Result<Vec<SortCategoryRow>, DomainError> {
+        let has_date = !date.is_empty();
+        let where_sql = if has_date {
+            "WHERE so.order_date = ?"
+        } else {
+            "WHERE so.status IN ('pending', 'sorting')"
+        };
+        let sql = format!(
+            "SELECT soi.id as item_id, soi.product_id, soi.product_name, soi.unit, soi.unit_price, soi.quantity, soi.amount, soi.remark,
+                    p.name as purchaser_name, p.id as purchaser_id, so.order_no, c.name as category_name, COALESCE(c.id, 0) as category_id
+             FROM sales_order_item soi
+             LEFT JOIN sales_order so ON soi.order_id = so.id
+             LEFT JOIN purchaser p ON so.purchaser_id = p.id
+             LEFT JOIN product pr ON soi.product_id = pr.id
+             LEFT JOIN category c ON pr.category_id = c.id
+             {}
+             ORDER BY c.name, p.name, soi.product_name, so.id, soi.id",
+            where_sql
+        );
+        let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
+        if has_date { q = q.bind(date); }
+        let rows = q.fetch_all(&self.pool).await.map_err(storage)?;
+        Ok(rows.iter().map(|r| SortCategoryRow {
+            item_id: r.get("item_id"),
+            product_id: r.get("product_id"),
+            product_name: r.get("product_name"),
+            unit: r.get("unit"),
+            unit_price: r.get("unit_price"),
+            quantity: r.get("quantity"),
+            amount: r.get("amount"),
+            remark: r.get("remark"),
+            purchaser_name: r.get("purchaser_name"),
+            purchaser_id: r.get("purchaser_id"),
+            order_no: r.get("order_no"),
+            category_name: r.get("category_name"),
+            category_id: r.get("category_id"),
+        }).collect())
+    }
+
+    async fn sort_category_excel_rows(&self, date: &str) -> Result<Vec<SortCategoryExcelRow>, DomainError> {
+        let has_date = !date.is_empty();
+        let where_sql = if has_date {
+            "WHERE so.order_date = ?"
+        } else {
+            "WHERE so.status IN ('pending', 'sorting')"
+        };
+        let sql = format!(
+            "SELECT soi.product_id, soi.product_name, soi.spec, soi.unit, soi.quantity, soi.pre_sale_quantity, soi.amount, soi.remark,
+                    p.name as purchaser_name, p.id as purchaser_id, so.order_no, c.name as category_name, COALESCE(c.id, 0) as category_id
+             FROM sales_order_item soi
+             LEFT JOIN sales_order so ON soi.order_id = so.id
+             LEFT JOIN purchaser p ON so.purchaser_id = p.id
+             LEFT JOIN product pr ON soi.product_id = pr.id
+             LEFT JOIN category c ON pr.category_id = c.id
+             {}
+             ORDER BY c.name, p.name, soi.product_name, so.id, soi.id",
+            where_sql
+        );
+        let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
+        if has_date { q = q.bind(date); }
+        let rows = q.fetch_all(&self.pool).await.map_err(storage)?;
+        Ok(rows.iter().map(|r| SortCategoryExcelRow {
+            product_id: r.get("product_id"),
+            product_name: r.get("product_name"),
+            spec: r.get("spec"),
+            unit: r.get("unit"),
+            quantity: r.get("quantity"),
+            pre_sale_quantity: r.get("pre_sale_quantity"),
+            amount: r.get("amount"),
+            remark: r.get("remark"),
+            purchaser_name: r.get("purchaser_name"),
+            purchaser_id: r.get("purchaser_id"),
+            order_no: r.get("order_no"),
+            category_name: r.get("category_name"),
+            category_id: r.get("category_id"),
+        }).collect())
+    }
+
+    async fn sort_supplier_rows(&self, date: &str) -> Result<Vec<SortSupplierRow>, DomainError> {
+        let has_date = !date.is_empty();
+        let where_sql = if has_date {
+            "WHERE so.order_date = ?"
+        } else {
+            "WHERE so.status IN ('pending', 'sorting')"
+        };
+        let sql = format!(
+            "SELECT soi.id as item_id, soi.order_id, soi.product_id, soi.product_name, soi.unit, soi.unit_price, soi.quantity, soi.amount, soi.remark,
+                    COALESCE(soi.supplier_id, 0) as supplier_id, s.name as supplier_name, p.name as purchaser_name, p.id as purchaser_id, so.order_no,
+                    COALESCE(pr.purchase_price, 0.0) as purchase_price
+             FROM sales_order_item soi
+             LEFT JOIN sales_order so ON soi.order_id = so.id
+             LEFT JOIN purchaser p ON so.purchaser_id = p.id
+             LEFT JOIN supplier s ON soi.supplier_id = s.id
+             LEFT JOIN product pr ON soi.product_id = pr.id
+             {}
+             ORDER BY s.name, p.name, soi.product_name, so.id, soi.id", where_sql
+        );
+        let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
+        if has_date { q = q.bind(date); }
+        let rows = q.fetch_all(&self.pool).await.map_err(storage)?;
+        Ok(rows.iter().map(|r| SortSupplierRow {
+            item_id: r.get("item_id"),
+            order_id: r.get("order_id"),
+            product_id: r.get("product_id"),
+            product_name: r.get("product_name"),
+            unit: r.get("unit"),
+            unit_price: r.get("unit_price"),
+            quantity: r.get("quantity"),
+            amount: r.get("amount"),
+            remark: r.get("remark"),
+            supplier_id: r.get("supplier_id"),
+            supplier_name: r.get("supplier_name"),
+            purchaser_name: r.get("purchaser_name"),
+            purchaser_id: r.get("purchaser_id"),
+            order_no: r.get("order_no"),
+            purchase_price: r.get("purchase_price"),
+        }).collect())
+    }
+
+    async fn sort_supplier_excel_rows(&self, date: &str) -> Result<Vec<SortSupplierExcelRow>, DomainError> {
+        let has_date = !date.is_empty();
+        let where_sql = if has_date {
+            "WHERE so.order_date = ?"
+        } else {
+            "WHERE so.status IN ('pending', 'sorting')"
+        };
+        let sql = format!(
+            "SELECT soi.product_id, soi.product_name, soi.spec, soi.unit, soi.quantity, soi.pre_sale_quantity, soi.amount, soi.remark,
+                    COALESCE(soi.supplier_id, 0) as supplier_id, s.name as supplier_name, p.name as purchaser_name, p.id as purchaser_id, so.order_no,
+                    COALESCE(pr.purchase_price, 0.0) as purchase_price
+             FROM sales_order_item soi
+             LEFT JOIN sales_order so ON soi.order_id = so.id
+             LEFT JOIN purchaser p ON so.purchaser_id = p.id
+             LEFT JOIN supplier s ON soi.supplier_id = s.id
+             LEFT JOIN product pr ON soi.product_id = pr.id
+             {}
+             ORDER BY s.name, p.name, soi.product_name, so.id, soi.id", where_sql
+        );
+        let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
+        if has_date { q = q.bind(date); }
+        let rows = q.fetch_all(&self.pool).await.map_err(storage)?;
+        Ok(rows.iter().map(|r| SortSupplierExcelRow {
+            product_id: r.get("product_id"),
+            product_name: r.get("product_name"),
+            spec: r.get("spec"),
+            unit: r.get("unit"),
+            quantity: r.get("quantity"),
+            pre_sale_quantity: r.get("pre_sale_quantity"),
+            amount: r.get("amount"),
+            remark: r.get("remark"),
+            supplier_id: r.get("supplier_id"),
+            supplier_name: r.get("supplier_name"),
+            purchaser_name: r.get("purchaser_name"),
+            purchaser_id: r.get("purchaser_id"),
+            order_no: r.get("order_no"),
+            purchase_price: r.get("purchase_price"),
+        }).collect())
+    }
+
+    async fn sort_purchaser_rows(&self, date: &str) -> Result<Vec<SortPurchaserRow>, DomainError> {
+        let has_date = !date.is_empty();
+        let where_sql = if has_date {
+            "WHERE so.order_date = ?"
+        } else {
+            "WHERE so.status IN ('pending', 'sorting')"
+        };
+        let sql = format!(
+            "SELECT soi.id, soi.product_id, soi.product_name, soi.unit, soi.unit_price, soi.quantity, soi.amount, soi.remark,
+                    p.id as purchaser_id, p.name as purchaser_name, so.order_no
+             FROM sales_order_item soi
+             LEFT JOIN sales_order so ON soi.order_id = so.id
+             LEFT JOIN purchaser p ON so.purchaser_id = p.id
+             {}
+             ORDER BY p.name, p.id, soi.product_name, soi.product_id, so.id, soi.id",
+            where_sql
+        );
+        let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
+        if has_date { q = q.bind(date); }
+        let rows = q.fetch_all(&self.pool).await.map_err(storage)?;
+        Ok(rows.iter().map(|r| SortPurchaserRow {
+            id: r.get("id"),
+            product_id: r.get("product_id"),
+            product_name: r.get("product_name"),
+            unit: r.get("unit"),
+            unit_price: r.get("unit_price"),
+            quantity: r.get("quantity"),
+            amount: r.get("amount"),
+            remark: r.get("remark"),
+            purchaser_id: r.get("purchaser_id"),
+            purchaser_name: r.get("purchaser_name"),
+            order_no: r.get("order_no"),
+        }).collect())
+    }
+
+    async fn sort_purchaser_excel_rows(&self, date: &str) -> Result<Vec<SortPurchaserExcelRow>, DomainError> {
+        let has_date = !date.is_empty();
+        let where_sql = if has_date {
+            "WHERE so.order_date = ?"
+        } else {
+            "WHERE so.status IN ('pending', 'sorting')"
+        };
+        let sql = format!(
+            "SELECT soi.id, soi.product_id, soi.product_name, soi.spec, soi.unit, soi.unit_price, soi.quantity, soi.amount, soi.remark,
+                    p.id as purchaser_id, p.name as purchaser_name, so.order_no,
+                    pc.name as category_name, pc.parent_id, pc2.name as parent_name
+             FROM sales_order_item soi
+             LEFT JOIN sales_order so ON soi.order_id = so.id
+             LEFT JOIN purchaser p ON so.purchaser_id = p.id
+             LEFT JOIN product pr ON soi.product_id = pr.id
+             LEFT JOIN category pc ON pr.category_id = pc.id
+             LEFT JOIN category pc2 ON pc.parent_id = pc2.id
+             {}
+             ORDER BY p.name, p.id, soi.product_name, soi.product_id, so.id, soi.id",
+            where_sql
+        );
+        let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
+        if has_date { q = q.bind(date); }
+        let rows = q.fetch_all(&self.pool).await.map_err(storage)?;
+        Ok(rows.iter().map(|r| SortPurchaserExcelRow {
+            id: r.get("id"),
+            product_id: r.get("product_id"),
+            product_name: r.get("product_name"),
+            spec: r.get("spec"),
+            unit: r.get("unit"),
+            unit_price: r.get("unit_price"),
+            quantity: r.get("quantity"),
+            amount: r.get("amount"),
+            remark: r.get("remark"),
+            purchaser_id: r.get("purchaser_id"),
+            purchaser_name: r.get("purchaser_name"),
+            order_no: r.get("order_no"),
+            category_name: r.get("category_name"),
+            parent_name: r.get("parent_name"),
+        }).collect())
+    }
+
+    async fn sort_purchaser_price_rows(&self) -> Result<Vec<SortPurchaserPriceRow>, DomainError> {
+        let rows = sqlx::query(
+            "SELECT poi.product_id, MAX(poi.unit_price) as max_price, MIN(poi.unit_price) as min_price,
+                    (SELECT unit_price FROM purchase_order_item WHERE product_id = poi.product_id ORDER BY id DESC LIMIT 1) as latest_price
+             FROM purchase_order_item poi
+             GROUP BY poi.product_id"
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(rows.iter().map(|r| SortPurchaserPriceRow {
+            product_id: r.get("product_id"),
+            max_price: r.get("max_price"),
+            min_price: r.get("min_price"),
+            latest_price: r.get("latest_price"),
+        }).collect())
+    }
+
+    async fn sort_comprehensive_rows(&self, date: &str) -> Result<Vec<SortComprehensiveRow>, DomainError> {
+        let has_date = !date.is_empty();
+        let where_sql = if has_date {
+            "WHERE so.order_date = ?"
+        } else {
+            "WHERE so.status IN ('pending', 'sorting')"
+        };
+        let sql = format!(
+            "SELECT soi.id, soi.product_id, soi.product_name, soi.unit, soi.unit_price, soi.quantity, soi.amount, soi.remark,
+                    p.id as purchaser_id, p.name as purchaser_name, so.order_no,
+                    c.name as category_name, COALESCE(c.id, 0) as category_id
+             FROM sales_order_item soi
+             LEFT JOIN sales_order so ON soi.order_id = so.id
+             LEFT JOIN purchaser p ON so.purchaser_id = p.id
+             LEFT JOIN product pr ON soi.product_id = pr.id
+             LEFT JOIN category c ON pr.category_id = c.id
+             {}
+             ORDER BY p.name, p.id, c.name, c.id, soi.product_name, soi.product_id, so.id, soi.id",
+            where_sql
+        );
+        let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
+        if has_date { q = q.bind(date); }
+        let rows = q.fetch_all(&self.pool).await.map_err(storage)?;
+        Ok(rows.iter().map(|r| SortComprehensiveRow {
+            id: r.get("id"),
+            product_id: r.get("product_id"),
+            product_name: r.get("product_name"),
+            unit: r.get("unit"),
+            unit_price: r.get("unit_price"),
+            quantity: r.get("quantity"),
+            amount: r.get("amount"),
+            remark: r.get("remark"),
+            purchaser_id: r.get("purchaser_id"),
+            purchaser_name: r.get("purchaser_name"),
+            order_no: r.get("order_no"),
+            category_name: r.get("category_name"),
+            category_id: r.get("category_id"),
+        }).collect())
+    }
+
+    async fn sort_comprehensive_excel_rows(&self, date: &str) -> Result<Vec<SortComprehensiveExcelRow>, DomainError> {
+        let has_date = !date.is_empty();
+        let where_sql = if has_date {
+            "WHERE so.order_date = ?"
+        } else {
+            "WHERE so.status IN ('pending', 'sorting')"
+        };
+        let sql = format!(
+            "SELECT soi.id, soi.product_id, soi.product_name, soi.spec, soi.unit, soi.quantity, soi.remark,
+                    p.id as purchaser_id, p.name as purchaser_name, so.order_no,
+                    c.name as category_name, COALESCE(c.id, 0) as category_id
+             FROM sales_order_item soi
+             LEFT JOIN sales_order so ON soi.order_id = so.id
+             LEFT JOIN purchaser p ON so.purchaser_id = p.id
+             LEFT JOIN product pr ON soi.product_id = pr.id
+             LEFT JOIN category c ON pr.category_id = c.id
+             {}
+             ORDER BY p.name, p.id, c.name, c.id, soi.product_name, soi.product_id, so.id, soi.id",
+            where_sql
+        );
+        let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
+        if has_date { q = q.bind(date); }
+        let rows = q.fetch_all(&self.pool).await.map_err(storage)?;
+        Ok(rows.iter().map(|r| SortComprehensiveExcelRow {
+            id: r.get("id"),
+            product_id: r.get("product_id"),
+            product_name: r.get("product_name"),
+            spec: r.get("spec"),
+            unit: r.get("unit"),
+            quantity: r.get("quantity"),
+            remark: r.get("remark"),
+            purchaser_id: r.get("purchaser_id"),
+            purchaser_name: r.get("purchaser_name"),
+            order_no: r.get("order_no"),
+            category_name: r.get("category_name"),
+            category_id: r.get("category_id"),
+        }).collect())
+    }
+
+    // ===== 分拣修正（correction）=====
+
+    async fn correction_product_id_by_item(&self, item_id: i64) -> Option<i64> {
+        sqlx::query_scalar("SELECT product_id FROM sales_order_item WHERE id = ?")
+            .bind(item_id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    async fn correction_update_product_price(&self, purchase_price: f64, product_id: i64) -> Option<u64> {
+        let upd = sqlx::query("UPDATE product SET purchase_price = ? WHERE id = ?")
+            .bind(purchase_price)
+            .bind(product_id)
+            .execute(&self.pool)
+            .await;
+        upd.ok().map(|r| r.rows_affected())
+    }
+
+    async fn correction_update_item_by_id(&self, quantity: Option<f64>, unit_price: Option<f64>, item_id: i64) -> Option<u64> {
+        let result = sqlx::query(
+            "UPDATE sales_order_item
+             SET quantity = COALESCE(?, quantity),
+                 unit_price = COALESCE(?, unit_price),
+                 amount = ROUND(COALESCE(?, unit_price) * COALESCE(?, quantity), 2)
+             WHERE id = ?"
+        )
+        .bind(quantity)
+        .bind(unit_price)
+        .bind(unit_price)
+        .bind(quantity)
+        .bind(item_id)
+        .execute(&self.pool)
+        .await;
+        result.ok().map(|r| r.rows_affected())
+    }
+
+    async fn correction_update_item_by_product(&self, quantity: Option<f64>, unit_price: Option<f64>, product_id: i64) -> Option<u64> {
+        let result = sqlx::query(
+            "UPDATE sales_order_item
+             SET quantity = COALESCE(?, quantity),
+                 unit_price = COALESCE(?, unit_price),
+                 amount = ROUND(COALESCE(?, unit_price) * COALESCE(?, quantity), 2)
+             WHERE product_id = ?"
+        )
+        .bind(quantity)
+        .bind(unit_price)
+        .bind(unit_price)
+        .bind(quantity)
+        .bind(product_id)
+        .execute(&self.pool)
+        .await;
+        result.ok().map(|r| r.rows_affected())
+    }
 }
