@@ -90,6 +90,28 @@ pub struct SlowStockExportRow {
     pub last_sale_date: String,
 }
 
+/// 出入库统计：采购入库按日+仓库聚合行
+#[derive(Debug, Clone)]
+pub struct StockSummaryPurchaseRow {
+    pub day: String,
+    pub warehouse_id: i64,
+    pub warehouse_name: String,
+    pub amount: f64,
+    pub item_count: i64,
+    pub order_count: i64,
+}
+
+/// 出入库统计：销售出库明细行（含订单下浮率，金额下浮在用例层按行计算）
+#[derive(Debug, Clone)]
+pub struct StockSummarySalesRow {
+    pub day: String,
+    pub warehouse_id: i64,
+    pub warehouse_name: String,
+    pub amount: f64,
+    pub order_id: i64,
+    pub discount_rate: f64,
+}
+
 pub trait QueryStockRepo: Send + Sync {
     /// 库存余额总数（历史时点口径；category_id 非空时追加分类条件与绑定，行为保持：用例层 unwrap_or(0)）
     async fn count_stock_balance_history(&self, start_bound: &str, end_bound: &str, pattern: &str, category_id: &str) -> Result<i64, DomainError>;
@@ -127,4 +149,12 @@ pub trait QueryStockRepo: Send + Sync {
     async fn list_slow_stock(&self, days: i64) -> Result<Vec<SlowStockRow>, DomainError>;
     /// 呆滞库存（导出版：含库存金额）
     async fn list_slow_stock_export(&self, days: i64) -> Result<Vec<SlowStockExportRow>, DomainError>;
+    /// 出入库统计：采购入库按日+仓库聚合（失败吞为空）
+    async fn stock_summary_purchase_rows(&self, start_date: &str, end_date: &str) -> Vec<StockSummaryPurchaseRow>;
+    /// 出入库统计：销售出库明细（失败吞为空）
+    async fn stock_summary_sales_rows(&self, start_date: &str, end_date: &str) -> Vec<StockSummarySalesRow>;
+    /// 出入库统计（报销口径）：分摊增项（目标单增项金额；失败吞为空）
+    async fn stock_summary_adj_target_rows(&self, start_date: &str, end_date: &str) -> Vec<StockSummarySalesRow>;
+    /// 出入库统计（报销口径）：来源耗材单真实金额（失败吞为空）
+    async fn stock_summary_adj_source_rows(&self, start_date: &str, end_date: &str) -> Vec<StockSummarySalesRow>;
 }

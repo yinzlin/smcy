@@ -755,4 +755,19 @@ impl PurchaseOrderRepo for SqlitePurchaseOrderRepo {
         .ok();
         Ok(())
     }
+
+    async fn max_seq_for_date(&self, order_date: &str) -> Result<i64, DomainError> {
+        // 行为保持：查询失败旧 unwrap_or(0) → 序号从 1 起
+        Ok(sqlx::query_scalar(
+            "SELECT COALESCE(MAX(CAST(SUBSTR(order_no, 11, 3) AS INTEGER)), 0) FROM purchase_order WHERE order_date = ?",
+        )
+        .bind(order_date)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0))
+    }
+
+    async fn compute_base_quantities(&self, items: &[(i64, String, f64, f64)]) -> Vec<f64> {
+        stock_writer::compute_base_quantities(&self.pool, items).await
+    }
 }

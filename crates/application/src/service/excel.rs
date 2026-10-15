@@ -3,53 +3,44 @@ use axum::{
     response::IntoResponse,
 };
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook, XlsxError};
-use sqlx::Row;
 
 use common::utils::*;
-use database::*;
+use domain::port::sales_order::SalesOrderRepo;
+use domain::port::user::UserRepo;
 use domain::*;
 use super::*;
 
-pub async fn build_accept_excel(ctx: &UserCtx, id: i64, reimburse: bool, force: bool) -> impl IntoResponse {
+pub async fn build_accept_excel<S: SalesOrderRepo, U: UserRepo>(
+    ctx: &UserCtx,
+    id: i64,
+    reimburse: bool,
+    force: bool,
+    sales: &S,
+    users: &U,
+) -> impl IntoResponse {
     // 食材供应人员① 的联系方式：取当前登录用户最近一次保存的"联系方式"（user_account.contact_phone）。
     // 用户未保存过联系方式时为空白，xlsx 中该 cell 保持空。
-    let contact_phone: String = sqlx::query("SELECT COALESCE(contact_phone, '') as cp FROM user_account WHERE id = ?")
-        .bind(ctx.user_id)
-        .fetch_optional(pool())
-        .await
-        .ok()
-        .flatten()
-        .and_then(|r| r.try_get("cp").ok())
-        .unwrap_or_default();
+    // 行为保持：查询失败旧链路吞为空白
+    let contact_phone: String = users.get_contact_phone(ctx.user_id).await.unwrap_or_default();
 
-    let order_row = sqlx::query(
-        "SELECT so.id, so.purchaser_id, so.order_no, so.order_date, so.total_amount, so.discount_rate, so.final_amount, so.remark,
-                so.supplier_company, so.truck_plate,
-                p.name as purchaser_name, p.address as purchaser_address
-         FROM sales_order so JOIN purchaser p ON so.purchaser_id = p.id WHERE so.id = ?"
-    )
-    .bind(id)
-    .fetch_optional(pool())
-    .await
-    .unwrap_or(None);
+    // 行为保持：查询失败旧 unwrap_or(None) → 订单不存在
+    let order_row = sales.accept_excel_order_row(id).await.unwrap_or(None);
 
     if order_row.is_none() {
         return (StatusCode::NOT_FOUND, "订单不存在").into_response();
     }
 
     let row = order_row.unwrap();
-    let order_no = row.get::<String, _>("order_no");
-    let order_date = row.get::<String, _>("order_date");
-    let _total_amount = row.get::<f64, _>("total_amount");
-    let discount_rate = row.get::<f64, _>("discount_rate");
-    let _final_amount = row.get::<f64, _>("final_amount");
-    let purchaser_name = row.get::<String, _>("purchaser_name");
+    let order_no = row.order_no;
+    let order_date = row.order_date;
+    let discount_rate = row.discount_rate;
+    let purchaser_name = row.purchaser_name;
 
     // 供应商名称与供货车牌号：取自主表字段（前端在新建时默认填充），
     // 主表为空时回退到与前端默认填充完全一致的文本，避免历史数据导出为空白
     // 或与前端显示不一致。
-    let supplier_name_raw: Option<String> = row.try_get("supplier_company").ok().flatten();
-    let car_no_raw: Option<String> = row.try_get("truck_plate").ok().flatten();
+    let supplier_name_raw: Option<String> = row.supplier_company;
+    let car_no_raw: Option<String> = row.truck_plate;
     let supplier_name = supplier_name_raw
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -59,28 +50,13 @@ pub async fn build_accept_excel(ctx: &UserCtx, id: i64, reimburse: bool, force: 
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "湘A·BE9312".to_string());
 
-    let item_rows = sqlx::query(
-        "SELECT soi.id, soi.product_id, soi.product_name, soi.alias1, soi.alias2, soi.spec, p.spec as product_spec, soi.unit, p.unit as product_unit, p.base_unit as product_base_unit, soi.unit_price, soi.quantity, soi.amount, soi.remark,
-                soi.production_date, soi.batch_no, p.shelf_life, p.gov_status,
-                p.category_id, pc.name as category_name, pc.parent_id, pc2.name as parent_name
-         FROM sales_order_item soi LEFT JOIN product p ON soi.product_id = p.id
-         LEFT JOIN category pc ON p.category_id = pc.id
-         LEFT JOIN category pc2 ON pc.parent_id = pc2.id
-         WHERE soi.order_id = ?
-         ORDER BY soi.id ASC"
-    )
-    .bind(id)
-    .fetch_all(pool())
-    .await
-    .unwrap_or_default();
+    // 行为保持：查询失败旧 unwrap_or_default() → 空明细
+    let item_rows = sales.accept_excel_item_rows(id).await.unwrap_or_default();
 
     // 检查是否有金额为零的明细，存在则禁止导出
     if !force {
         let zero_amount_items: Vec<_> = item_rows.iter()
-            .filter(|r| {
-                let amount: f64 = r.get("amount");
-                amount.abs() < 0.001
-            })
+            .filter(|r| r.amount.abs() < 0.001)
             .collect();
         if !zero_amount_items.is_empty() {
             return (
@@ -96,21 +72,9 @@ pub async fn build_accept_excel(ctx: &UserCtx, id: i64, reimburse: bool, force: 
     }
 
     // 真实口径不合并分摊增项，仅报销口径需要
+    // 行为保持：查询失败旧 unwrap_or_default() → 空增项
     let supplement_rows = if reimburse {
-        sqlx::query(
-            "SELECT soi.id, soi.target_order_id, soi.source_order_id, soi.source_remark, soi.product_id, soi.product_name, soi.alias1, soi.alias2, soi.spec, p.spec as product_spec, soi.unit, p.unit as product_unit, p.base_unit as product_base_unit, soi.unit_price, soi.quantity, soi.amount, soi.allocate_date, soi.operation_type, soi.target_order_item_id,
-                    p.shelf_life, p.gov_status,
-                    pc.name as category_name, pc2.name as parent_name
-             FROM order_supplement_item soi
-             LEFT JOIN product p ON soi.product_id = p.id
-             LEFT JOIN category pc ON p.category_id = pc.id
-             LEFT JOIN category pc2 ON pc.parent_id = pc2.id
-             WHERE soi.target_order_id = ?"
-        )
-        .bind(id)
-        .fetch_all(pool())
-        .await
-        .unwrap_or_default()
+        sales.accept_excel_supplement_rows(id).await.unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -121,14 +85,14 @@ pub async fn build_accept_excel(ctx: &UserCtx, id: i64, reimburse: bool, force: 
     // product_id -> 真实明细行 id，用于分摊增项 target_order_item_id 失效时回退匹配
     let mut product_to_key: HashMap<i64, i64> = HashMap::new();
     for r in &item_rows {
-        let rid = r.get::<i64, _>("id");
-        let pid = r.get::<i64, _>("product_id");
+        let rid = r.id;
+        let pid = r.product_id;
         product_to_key.entry(pid).or_insert(rid);
-        let alias2 = r.get::<Option<String>, _>("alias2").unwrap_or_default();
-        let product_name = r.get::<String, _>("product_name");
-        let mut spec = r.get::<Option<String>, _>("spec").unwrap_or_default();
+        let alias2 = r.alias2.clone().unwrap_or_default();
+        let product_name = r.product_name.clone();
+        let mut spec = r.spec.clone().unwrap_or_default();
         if spec.is_empty() {
-            spec = r.get::<Option<String>, _>("product_spec").unwrap_or_default();
+            spec = r.product_spec.clone().unwrap_or_default();
         }
         // 导出名称优先级：别称2 -> 规格 -> 名称（仅当别称2与规格都为空时才用名称）
         let food_name = if !alias2.is_empty() {
@@ -138,15 +102,15 @@ pub async fn build_accept_excel(ctx: &UserCtx, id: i64, reimburse: bool, force: 
         } else {
             product_name
         };
-        let unit = r.get::<Option<String>, _>("unit").unwrap_or_default();
+        let unit = r.unit.clone().unwrap_or_default();
         // 打印模板的"规格"列实际为真实订单的"单位"列（件/卷等）
         // 订单明细的 unit 为空时，回退到商品表的基础单位 base_unit
         let unit_for_spec = if !unit.is_empty() {
             unit
         } else {
-            r.get::<Option<String>, _>("product_base_unit").unwrap_or_default()
+            r.product_base_unit.clone().unwrap_or_default()
         };
-        let original_remark = r.get::<Option<String>, _>("remark").unwrap_or_default();
+        let original_remark = r.remark.clone().unwrap_or_default();
         // 名称优先级（别称2->规格->名称）三选一独立取值：名称已采用规格时，备注不再重复并入规格
         let remark = if spec.is_empty() || food_name == spec {
             original_remark
@@ -155,27 +119,27 @@ pub async fn build_accept_excel(ctx: &UserCtx, id: i64, reimburse: bool, force: 
         } else {
             format!("{}; {}", spec, original_remark)
         };
-        let category_name = r.get::<Option<String>, _>("category_name").unwrap_or_default();
-        let parent_name = r.get::<Option<String>, _>("parent_name").unwrap_or_default();
+        let category_name = r.category_name.clone().unwrap_or_default();
+        let parent_name = r.parent_name.clone().unwrap_or_default();
         let sort_key = get_category_sort_key(&category_name, &parent_name);
-        let prod_date: Option<String> = r.try_get("production_date").ok().flatten();
-        let batch_no: Option<String> = r.try_get("batch_no").ok().flatten();
-        let shelf_life: Option<String> = r.try_get("shelf_life").ok().flatten();
+        let prod_date: Option<String> = r.production_date.clone();
+        let batch_no: Option<String> = r.batch_no.clone();
+        let shelf_life: Option<String> = r.shelf_life.clone();
         // 政采商品在品名规格前置标记：★=有指导价 ☆=无指导价
-        let food_name = match r.try_get::<i64, _>("gov_status").unwrap_or(0) {
+        let food_name = match r.gov_status {
             1 => format!("★{}", food_name),
             2 => format!("☆{}", food_name),
             _ => food_name,
         };
-        item_map.insert(rid, (sort_key, food_name, unit_for_spec, r.get::<f64, _>("unit_price"), r.get::<f64, _>("quantity"), r.get::<f64, _>("amount"), remark, prod_date, batch_no, shelf_life));
+        item_map.insert(rid, (sort_key, food_name, unit_for_spec, r.unit_price, r.quantity, r.amount, remark, prod_date, batch_no, shelf_life));
     }
 
     for r in &supplement_rows {
-        let op_type = r.get::<String, _>("operation_type");
-        let target_item_id = r.get::<Option<i64>, _>("target_order_item_id");
-        let supp_product_id = r.get::<i64, _>("product_id");
-        let qty = r.get::<f64, _>("quantity");
-        let amt = r.get::<f64, _>("amount");
+        let op_type = r.operation_type.clone();
+        let target_item_id = r.target_order_item_id;
+        let supp_product_id = r.product_id;
+        let qty = r.quantity;
+        let amt = r.amount;
 
         // 解析目标明细行 key：优先用 target_order_item_id，失效时用 product_id 回退匹配
         // （销售订单更新会 DELETE+INSERT 导致 sales_order_item.id 变化，旧 target_order_item_id 会失效）
@@ -212,11 +176,11 @@ pub async fn build_accept_excel(ctx: &UserCtx, id: i64, reimburse: bool, force: 
             }
         } else {
             // new_item 或 replace_add：作为新明细导出，按商品类别归类排序
-            let alias2 = r.get::<Option<String>, _>("alias2").unwrap_or_default();
-            let product_name = r.get::<String, _>("product_name");
-            let mut spec = r.get::<Option<String>, _>("spec").unwrap_or_default();
+            let alias2 = r.alias2.clone().unwrap_or_default();
+            let product_name = r.product_name.clone();
+            let mut spec = r.spec.clone().unwrap_or_default();
             if spec.is_empty() {
-                spec = r.get::<Option<String>, _>("product_spec").unwrap_or_default();
+                spec = r.product_spec.clone().unwrap_or_default();
             }
             // 导出名称优先级：别称2 -> 规格 -> 名称（仅当别称2与规格都为空时才用名称）
             let food_name = if !alias2.is_empty() {
@@ -229,15 +193,15 @@ pub async fn build_accept_excel(ctx: &UserCtx, id: i64, reimburse: bool, force: 
             // 打印模板的"规格"列实际为真实订单的"单位"列（件/卷等）
             // 优先取分摊增项的 unit，为空时回退到商品表的基础单位 base_unit
             let unit = {
-                let u = r.get::<String, _>("unit");
+                let u = r.unit.clone().unwrap_or_default();
                 if !u.is_empty() {
                     u
                 } else {
-                    r.get::<Option<String>, _>("product_base_unit").unwrap_or_default()
+                    r.product_base_unit.clone().unwrap_or_default()
                 }
             };
-            let category_name = r.get::<Option<String>, _>("category_name").unwrap_or_default();
-            let parent_name = r.get::<Option<String>, _>("parent_name").unwrap_or_default();
+            let category_name = r.category_name.clone().unwrap_or_default();
+            let parent_name = r.parent_name.clone().unwrap_or_default();
             let sort_key = get_category_sort_key(&category_name, &parent_name);
             // 名称优先级（别称2->规格->名称）三选一独立取值：名称已采用规格时，备注不再重复并入规格
             let remark = if op_type == "replace_add" {
@@ -245,7 +209,7 @@ pub async fn build_accept_excel(ctx: &UserCtx, id: i64, reimburse: bool, force: 
                 if food_name == spec { String::new() } else { spec.clone() }
             } else {
                 // 普通新增增项：保留标记
-                let source_remark = r.get::<Option<String>, _>("source_remark").unwrap_or_default();
+                let source_remark = r.source_remark.clone().unwrap_or_default();
                 if spec.is_empty() || food_name == spec {
                     format!("[增项] {}", source_remark)
                 } else {
@@ -254,14 +218,14 @@ pub async fn build_accept_excel(ctx: &UserCtx, id: i64, reimburse: bool, force: 
             };
             // 规格列（C列）填单位（打印模板的"规格"列实际是单位列）
             // 增项无 FIFO 批次快照，生产日期/批号留空；保质期取商品属性（如有）
-            let supp_shelf: Option<String> = r.try_get("shelf_life").ok().flatten();
+            let supp_shelf: Option<String> = r.shelf_life.clone();
             // 政采商品在品名规格前置标记：★=有指导价 ☆=无指导价
-            let food_name = match r.try_get::<i64, _>("gov_status").unwrap_or(0) {
+            let food_name = match r.gov_status {
                 1 => format!("★{}", food_name),
                 2 => format!("☆{}", food_name),
                 _ => food_name,
             };
-            item_map.insert(-r.get::<i64, _>("id"), (sort_key, food_name, unit, r.get::<f64, _>("unit_price"), qty, amt, remark, None, None, supp_shelf));
+            item_map.insert(-r.id, (sort_key, food_name, unit, r.unit_price, qty, amt, remark, None, None, supp_shelf));
         }
     }
 

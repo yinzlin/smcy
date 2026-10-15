@@ -86,6 +86,19 @@ pub struct BackfillItemRow {
     pub amount: f64,
 }
 
+/// 采购明细进价更新输入（domain 自有类型，不含 serde）
+///
+/// 供 `PriceScheduleRepo::update_product_purchase_prices` 使用：由 application 层把
+/// HTTP 契约（`PurchaseOrderItemReq`）映射为本结构体后送入端口。
+#[derive(Debug, Clone)]
+pub struct PurchasePriceInput {
+    pub product_id: i64,
+    pub unit_price: f64,
+    pub quantity: f64,
+    pub base_quantity: Option<f64>,
+    pub amount: f64,
+}
+
 /// 列表/导出筛选条件（空串/0 表示不过滤）
 #[derive(Debug, Clone, Default)]
 pub struct ScheduleFilter {
@@ -169,4 +182,13 @@ pub trait PriceScheduleRepo: Send + Sync {
     async fn update_sales_order_amounts(&self, order_id: i64, total: f64, reduction: f64, final_amount: f64) -> Result<(), DomainError>;
     /// Excel 导入商品匹配四步回退：name+spec → name+alias1 → name+alias2 → name only（查询失败吞为 None）
     async fn find_product_id(&self, name: &str, spec: &str, alias1: &str, alias2: &str) -> Result<Option<i64>, DomainError>;
+    /// 采购明细进价更新：换算基础单位价后回写 product 当前/最高/最低进价，
+    /// 记价格日志并在开启自动更新售价时按加成率重算（逐条吞错，与旧 free fn 一致）
+    async fn update_product_purchase_prices(&self, items: &[PurchasePriceInput]) -> Result<(), DomainError>;
+    /// 采购单删除后从剩余采购明细历史重算商品最近/最高/最低进价；无明细则三项置 0
+    async fn recalc_product_purchase_prices_from_history(&self, product_id: i64) -> Result<(), DomainError>;
+    /// 单商品开启/关闭自动更新售价，并立即按加成率重算 base_price（吞错）
+    async fn set_auto_update_price(&self, product_id: i64, auto: i64) -> Result<(), DomainError>;
+    /// 批量开启/关闭自动更新售价；开启时对所有进价>0 的商品按加成率重算（吞错）
+    async fn batch_set_auto_update_price(&self, auto: i64) -> Result<(), DomainError>;
 }

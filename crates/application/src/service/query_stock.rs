@@ -528,7 +528,7 @@ impl<R: QueryStockRepo> QueryStockUseCase for QueryStockService<R> {
     async fn stock_summary(&self, params: &HashMap<String, String>) -> Result<String, UseCaseError> {
         let start_date = params.get("start_date").map(|s| s.as_str()).unwrap_or("");
         let end_date = params.get("end_date").map(|s| s.as_str()).unwrap_or("");
-        let (rows, total_in, total_out, total_discounted_out) = compute_stock_summary(start_date, end_date).await;
+        let (rows, total_in, total_out, total_discounted_out) = compute_stock_summary(&self.repo, start_date, end_date).await;
 
         // 收集所有仓库列表（保持原有兼容性，虽然导出不再需要）
         use std::collections::BTreeMap;
@@ -575,7 +575,7 @@ impl<R: QueryStockRepo> QueryStockUseCase for QueryStockService<R> {
     async fn export_stock_summary(&self, params: &HashMap<String, String>) -> Result<Vec<u8>, UseCaseError> {
         let start_date = params.get("start_date").map(|s| s.as_str()).unwrap_or("");
         let end_date = params.get("end_date").map(|s| s.as_str()).unwrap_or("");
-        let (rows, total_in, total_out, total_discounted_out) = compute_stock_summary(start_date, end_date).await;
+        let (rows, total_in, total_out, total_discounted_out) = compute_stock_summary(&self.repo, start_date, end_date).await;
 
         let mut workbook = rust_xlsxwriter::Workbook::new();
         let worksheet = workbook.add_worksheet();
@@ -667,7 +667,7 @@ impl<R: QueryStockRepo> QueryStockUseCase for QueryStockService<R> {
     async fn stock_summary_reimburse(&self, params: &HashMap<String, String>) -> Result<String, UseCaseError> {
         let start_date = params.get("start_date").map(|s| s.as_str()).unwrap_or("");
         let end_date = params.get("end_date").map(|s| s.as_str()).unwrap_or("");
-        let (rows, total_in, total_out, total_discounted_out) = compute_stock_summary_reimburse(start_date, end_date).await;
+        let (rows, total_in, total_out, total_discounted_out) = compute_stock_summary_reimburse(&self.repo, start_date, end_date).await;
 
         let items: Vec<serde_json::Value> = rows.iter().map(|r| {
             serde_json::json!({
@@ -700,7 +700,7 @@ impl<R: QueryStockRepo> QueryStockUseCase for QueryStockService<R> {
     async fn export_stock_summary_reimburse(&self, params: &HashMap<String, String>) -> Result<Vec<u8>, UseCaseError> {
         let start_date = params.get("start_date").map(|s| s.as_str()).unwrap_or("");
         let end_date = params.get("end_date").map(|s| s.as_str()).unwrap_or("");
-        let (rows, total_in, total_out, total_discounted_out) = compute_stock_summary_reimburse(start_date, end_date).await;
+        let (rows, total_in, total_out, total_discounted_out) = compute_stock_summary_reimburse(&self.repo, start_date, end_date).await;
 
         let mut workbook = rust_xlsxwriter::Workbook::new();
         let worksheet = workbook.add_worksheet();

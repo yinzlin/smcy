@@ -7,23 +7,27 @@ use calamine::{open_workbook_auto_from_rs, Data, Reader};
 use chrono::Local;
 use common::utils::sanitize_xlsx_string;
 use domain::error::DomainError;
+use domain::port::price_schedule::PriceScheduleRepo;
+use domain::port::purchase_order::PurchaseOrderRepo;
 use domain::port::sales_order::*;
 use domain::{SalesOrderItemReq, SalesOrderReq, UserCtx};
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook, XlsxError};
 
 use super::get_category_sort_key;
-use super::price::recalc_base_price_by_markup;
+use super::order_no::generate_order_no;
 use crate::error::UseCaseError;
 use crate::port::sales_order::{SalesOrderLog, SalesOrderOutcome, SalesOrderUseCase};
 
 #[derive(Clone)]
-pub struct SalesOrderService<R: SalesOrderRepo> {
+pub struct SalesOrderService<R: SalesOrderRepo, P: PurchaseOrderRepo, S: PriceScheduleRepo> {
     repo: R,
+    po: P,
+    price: S,
 }
 
-impl<R: SalesOrderRepo> SalesOrderService<R> {
-    pub fn new(repo: R) -> Self {
-        Self { repo }
+impl<R: SalesOrderRepo, P: PurchaseOrderRepo, S: PriceScheduleRepo> SalesOrderService<R, P, S> {
+    pub fn new(repo: R, po: P, price: S) -> Self {
+        Self { repo, po, price }
     }
 }
 
@@ -54,7 +58,7 @@ fn base_inputs_of(items: &[SalesOrderItemReq]) -> Vec<(i64, String, f64, f64)> {
         .collect()
 }
 
-impl<R: SalesOrderRepo> SalesOrderService<R> {
+impl<R: SalesOrderRepo, P: PurchaseOrderRepo, S: PriceScheduleRepo> SalesOrderService<R, P, S> {
     /// 详情/更新/调价/删除/结算/审核/反审核共用护栏：订单存在性 + 行级数据权限
     async fn guard(&self, id: i64, ctx: &UserCtx) -> Result<(i64, String), UseCaseError> {
         let order = self.repo.get_purchaser_status(id).await.ok().flatten();
@@ -85,11 +89,11 @@ impl<R: SalesOrderRepo> SalesOrderService<R> {
         if product_ids.is_empty() {
             return (order_date_short, 0);
         }
-        let gov_map = crate::service::price::batch_lookup_effective_prices(&product_ids, "gov_procurement", &order_date_short).await;
-        let sup1_map = crate::service::price::batch_lookup_effective_prices(&product_ids, "supermarket_1", &order_date_short).await;
-        let sup2_map = crate::service::price::batch_lookup_effective_prices(&product_ids, "supermarket_2", &order_date_short).await;
-        let sup3_map = crate::service::price::batch_lookup_effective_prices(&product_ids, "supermarket_3", &order_date_short).await;
-        let ai_map = crate::service::price::batch_lookup_effective_prices(&product_ids, "ai_realtime", &order_date_short).await;
+        let gov_map = self.price.batch_lookup_effective(&product_ids, "gov_procurement", &order_date_short).await.unwrap_or_default();
+        let sup1_map = self.price.batch_lookup_effective(&product_ids, "supermarket_1", &order_date_short).await.unwrap_or_default();
+        let sup2_map = self.price.batch_lookup_effective(&product_ids, "supermarket_2", &order_date_short).await.unwrap_or_default();
+        let sup3_map = self.price.batch_lookup_effective(&product_ids, "supermarket_3", &order_date_short).await.unwrap_or_default();
+        let ai_map = self.price.batch_lookup_effective(&product_ids, "ai_realtime", &order_date_short).await.unwrap_or_default();
         let mut auto_filled = 0;
         for it in items.iter_mut() {
             if it.product_id > 0 && it.unit_price <= 0.0 {
@@ -124,7 +128,7 @@ impl<R: SalesOrderRepo> SalesOrderService<R> {
     }
 }
 
-impl<R: SalesOrderRepo> SalesOrderUseCase for SalesOrderService<R> {
+impl<R: SalesOrderRepo, P: PurchaseOrderRepo, S: PriceScheduleRepo> SalesOrderUseCase for SalesOrderService<R, P, S> {
     async fn create(&self, mut req: SalesOrderReq, ctx: &UserCtx) -> Result<SalesOrderOutcome, UseCaseError> {
         // 仅已审核的采购方与商品允许下单（id<=0 视为通过，避免误伤无关联的零值）
         if req.purchaser_id > 0 {
@@ -175,8 +179,7 @@ impl<R: SalesOrderRepo> SalesOrderUseCase for SalesOrderService<R> {
         };
 
         if !req.items.is_empty() {
-            let base_qtys = database::sqlite::repo::stock_writer::compute_base_quantities(
-                database::pool(), &base_inputs_of(&req.items)).await;
+            let base_qtys = self.repo.compute_base_quantities(&base_inputs_of(&req.items)).await;
             let _ = self.repo.insert_items_batch(order_id, &req.items, &base_qtys).await;
         }
 
@@ -417,8 +420,7 @@ impl<R: SalesOrderRepo> SalesOrderUseCase for SalesOrderService<R> {
         let old_final = req.final_amount;
 
         // 服务端按当前单位换算比例统一计算基础数量，不信任前端值
-        let base_qtys = database::sqlite::repo::stock_writer::compute_base_quantities(
-            database::pool(), &base_inputs_of(&req.items)).await;
+        let base_qtys = self.repo.compute_base_quantities(&base_inputs_of(&req.items)).await;
 
         match self.repo.update_order_with_items(&req, ver, &base_qtys).await {
             Ok(SalesOrderUpdateTx::Committed) => {
@@ -1261,7 +1263,7 @@ impl<R: SalesOrderRepo> SalesOrderUseCase for SalesOrderService<R> {
                     None => "未知供应商".to_string(),
                 };
 
-                let order_no = crate::service::order_no::generate_order_no("purchase", &order_date).await;
+                let order_no = generate_order_no("purchase", &order_date, &self.repo, &self.po).await;
 
                 match self.repo.insert_po_main(supplier_id, &order_no, &order_date, main_wh_id, &main_wh_name, id).await {
                     Ok(new_id) => {
@@ -3165,7 +3167,7 @@ impl<R: SalesOrderRepo> SalesOrderUseCase for SalesOrderService<R> {
                         updated_count += n as i64;
                     }
                     // 若商品开启了自动售价更新，按新进价联动重算售价
-                    recalc_base_price_by_markup(pid, "sales_order_correction", None).await;
+                    let _ = self.price.recalc_base_price_by_markup(pid, "sales_order_correction", None).await;
                 }
             }
 

@@ -6,8 +6,8 @@ use sqlx::{AssertSqlSafe, Row};
 use domain::PriceScheduleReq;
 use domain::error::DomainError;
 use domain::port::price_schedule::{
-    BackfillItemRow, DiagnoseRow, HistoryRow, PriceScheduleRepo, ScheduleExportRow, ScheduleFilter,
-    ScheduleListRow,
+    BackfillItemRow, DiagnoseRow, HistoryRow, PriceScheduleRepo, PurchasePriceInput,
+    ScheduleExportRow, ScheduleFilter, ScheduleListRow,
 };
 
 #[derive(Clone)]
@@ -832,5 +832,216 @@ impl PriceScheduleRepo for SqlitePriceScheduleRepo {
             .bind(name)
             .fetch_optional(&self.pool).await.map_err(storage)?;
         Ok(row.map(|r| r.get("id")))
+    }
+
+    async fn update_product_purchase_prices(&self, items: &[PurchasePriceInput]) -> Result<(), DomainError> {
+        for item in items {
+            if item.product_id == 0 {
+                continue;
+            }
+            // 换算为基础单位单价（四舍五入保留两位小数，避免 amount/base_quantity 除法产生浮点长尾）
+            let base_unit_price = ((if let Some(bq) = item.base_quantity {
+                if bq > 0.0 && item.quantity > 0.0 {
+                    // amount / base_quantity 得到基础单位单价
+                    if item.amount > 0.0 { item.amount / bq } else { item.unit_price }
+                } else {
+                    item.unit_price
+                }
+            } else {
+                item.unit_price
+            }) * 100.0).round() / 100.0;
+            if base_unit_price <= 0.0 {
+                continue;
+            }
+
+            // 读取商品当前的最高/最低进价
+            let row = sqlx::query(
+                "SELECT purchase_price, max_purchase_price, min_purchase_price FROM product WHERE id = ?"
+            )
+            .bind(item.product_id)
+            .fetch_optional(&self.pool)
+            .await
+            .unwrap_or(None);
+
+            if let Some(r) = row {
+                let old_purchase: f64 = r.get::<f64, _>("purchase_price");
+                let old_max: f64 = r.get::<f64, _>("max_purchase_price");
+                let old_min: f64 = r.get::<f64, _>("min_purchase_price");
+
+                // 若历史最高/最低为0（新品或首次采购），则以本次价格初始化（四舍五入保留两位小数）
+                let new_max = ((if old_max <= 0.0 { base_unit_price } else { old_max.max(base_unit_price) }) * 100.0).round() / 100.0;
+                let new_min = ((if old_min <= 0.0 { base_unit_price } else { old_min.min(base_unit_price) }) * 100.0).round() / 100.0;
+
+                let _ = sqlx::query(
+                    "UPDATE product SET purchase_price = ?, max_purchase_price = ?, min_purchase_price = ? WHERE id = ?"
+                )
+                .bind(base_unit_price)
+                .bind(new_max)
+                .bind(new_min)
+                .bind(item.product_id)
+                .execute(&self.pool)
+                .await;
+
+                // 记录进价变更日志
+                let _ = self.log_price_change(
+                    item.product_id,
+                    "purchase_price",
+                    old_purchase,
+                    base_unit_price,
+                    "purchase_order",
+                    None,
+                    Some("采购单更新进价"),
+                ).await;
+
+                // 进价变化后，若开启自动售价更新则按加成率重算 base_price
+                eprintln!(
+                    "[采购单进价更新] 商品ID={} 基础单位进价={:.4} 触发售价重算",
+                    item.product_id, base_unit_price
+                );
+                let _ = self.recalc_base_price_by_markup(item.product_id, "purchase_order", None).await;
+            }
+        }
+        Ok(())
+    }
+
+    async fn recalc_product_purchase_prices_from_history(&self, product_id: i64) -> Result<(), DomainError> {
+        // 现存所有采购明细（含已审核与待审核订单），换算为基础单位单价
+        let rows = sqlx::query(
+            "SELECT poi.unit_price, poi.quantity, poi.base_quantity, poi.amount, po.order_date
+             FROM purchase_order_item poi
+             JOIN purchase_order po ON poi.order_id = po.id
+             WHERE poi.product_id = ?
+             ORDER BY po.order_date DESC, po.id DESC, poi.id DESC"
+        )
+        .bind(product_id)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+
+        let mut prices: Vec<f64> = Vec::new();
+        let mut latest_price: f64 = 0.0;
+        for r in &rows {
+            let unit_price: f64 = r.get("unit_price");
+            let quantity: f64 = r.get("quantity");
+            let base_quantity: f64 = r.try_get("base_quantity").unwrap_or(0.0);
+            let amount: f64 = r.get("amount");
+            // 与 update_product_purchase_prices 保持一致的换算逻辑
+            let base_unit_price = if base_quantity > 0.0 && quantity > 0.0 && amount > 0.0 {
+                amount / base_quantity
+            } else {
+                unit_price
+            };
+            if base_unit_price <= 0.0 {
+                continue;
+            }
+            if latest_price <= 0.0 {
+                latest_price = base_unit_price;
+            }
+            prices.push(base_unit_price);
+        }
+
+        let new_purchase = ((latest_price) * 100.0).round() / 100.0;
+        let new_max = ((prices.iter().cloned().fold(0.0, f64::max)) * 100.0).round() / 100.0;
+        let new_min = ((prices.iter().cloned().fold(f64::INFINITY, f64::min)) * 100.0).round() / 100.0;
+        let new_min = if new_min.is_infinite() { 0.0 } else { new_min };
+
+        let row = sqlx::query(
+            "SELECT purchase_price, max_purchase_price, min_purchase_price FROM product WHERE id = ?"
+        )
+        .bind(product_id)
+        .fetch_optional(&self.pool)
+        .await
+        .unwrap_or(None);
+
+        if let Some(r) = row {
+            let old_purchase: f64 = r.get("purchase_price");
+
+            let _ = sqlx::query(
+                "UPDATE product SET purchase_price = ?, max_purchase_price = ?, min_purchase_price = ? WHERE id = ?"
+            )
+            .bind(new_purchase)
+            .bind(new_max)
+            .bind(new_min)
+            .bind(product_id)
+            .execute(&self.pool)
+            .await;
+
+            if (old_purchase - new_purchase).abs() >= 0.001 {
+                let _ = self.log_price_change(
+                    product_id,
+                    "purchase_price",
+                    old_purchase,
+                    new_purchase,
+                    "purchase_order_delete",
+                    None,
+                    Some("采购单删除后从历史重算"),
+                ).await;
+                // 进价变化后，若开启自动售价更新则按加成率重算 base_price
+                let _ = self.recalc_base_price_by_markup(product_id, "purchase_order_delete", None).await;
+            }
+            eprintln!(
+                "[采购单删除回滚] 商品ID={} 最近进价={:.4} 最高={:.4} 最低={:.4}",
+                product_id, new_purchase, new_max, new_min
+            );
+        }
+        Ok(())
+    }
+
+    async fn set_auto_update_price(&self, product_id: i64, auto: i64) -> Result<(), DomainError> {
+        let _ = sqlx::query("UPDATE product SET auto_update_price = ? WHERE id = ?")
+            .bind(auto)
+            .bind(product_id)
+            .execute(&self.pool)
+            .await;
+
+        let _ = self.recalc_base_price_by_markup(product_id, "set_auto_update_price", None).await;
+        Ok(())
+    }
+
+    async fn batch_set_auto_update_price(&self, auto: i64) -> Result<(), DomainError> {
+        let _ = sqlx::query("UPDATE product SET auto_update_price = ?")
+            .bind(auto)
+            .execute(&self.pool)
+            .await;
+
+        if auto == 1 {
+            eprintln!("[批量售价自动更新] 开始处理所有商品（auto=开启）");
+            // 开启时，对所有进价>0 的商品按加成率重算售价
+            let rows = sqlx::query("SELECT id, purchase_price, base_price, markup_rate FROM product WHERE purchase_price > 0")
+                .fetch_all(&self.pool)
+                .await
+                .unwrap_or_default();
+            eprintln!("[批量售价自动更新] 共 {} 个商品需要重算", rows.len());
+            for r in rows {
+                let pid: i64 = r.get("id");
+                let old_base: f64 = r.get("base_price");
+                let purchase: f64 = r.get("purchase_price");
+                let markup: f64 = r.get("markup_rate");
+                let raw = purchase * (1.0 + markup);
+                // 保留两位小数（四舍五入），不做末位数字限制
+                let new_base = round2(raw);
+                eprintln!(
+                    "[批量售价自动更新] 商品ID={} 进价={:.4} 加成率={:.4} 计算售价={:.6} 旧售价={:.4}",
+                    pid, purchase, markup, new_base, old_base
+                );
+                if (old_base - new_base).abs() >= 0.001 {
+                    let _ = sqlx::query("UPDATE product SET base_price = ? WHERE id = ?")
+                        .bind(new_base)
+                        .bind(pid)
+                        .execute(&self.pool)
+                        .await;
+                    let _ = self.log_price_change(
+                        pid,
+                        "base_price",
+                        old_base,
+                        new_base,
+                        "batch_set_auto_update_price",
+                        None,
+                        Some("批量开启自动更新售价"),
+                    ).await;
+                }
+            }
+        }
+        Ok(())
     }
 }

@@ -260,7 +260,7 @@ impl<R: OrderAllocationRepo> OrderAllocationUseCase for OrderAllocationService<R
     }
 }
 
-/// repo 将 sqlx::Error 原文存入 DomainError::Storage，此处取回原文拼接旧文案
+/// repo 将存储层错误原文存入 DomainError::Storage，此处取回原文拼接旧文案
 fn storage_msg(e: DomainError) -> String {
     match e {
         DomainError::Storage(m) => m,

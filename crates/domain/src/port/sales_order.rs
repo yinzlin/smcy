@@ -188,6 +188,63 @@ pub struct SalesOrderAcceptSupplementRow {
     pub amount: f64,
 }
 
+/// 验收单导出（Excel）主表行：含供应商名称/车牌号快照
+#[derive(Debug, Clone)]
+pub struct AcceptExcelOrderRow {
+    pub order_no: String,
+    pub order_date: String,
+    pub discount_rate: f64,
+    pub purchaser_name: String,
+    pub supplier_company: Option<String>,
+    pub truck_plate: Option<String>,
+}
+
+/// 验收单导出真实明细行（含商品规格快照、生产日期/批号、政采状态与分类名）
+#[derive(Debug, Clone)]
+pub struct AcceptExcelItemRow {
+    pub id: i64,
+    pub product_id: i64,
+    pub product_name: String,
+    pub alias2: Option<String>,
+    pub spec: Option<String>,
+    pub product_spec: Option<String>,
+    pub unit: Option<String>,
+    pub product_base_unit: Option<String>,
+    pub unit_price: f64,
+    pub quantity: f64,
+    pub amount: f64,
+    pub remark: Option<String>,
+    pub production_date: Option<String>,
+    pub batch_no: Option<String>,
+    pub shelf_life: Option<String>,
+    pub gov_status: i64,
+    pub category_name: Option<String>,
+    pub parent_name: Option<String>,
+}
+
+/// 验收单导出增项行（order_supplement_item，含来源备注、商品分类与政采状态）
+#[derive(Debug, Clone)]
+pub struct AcceptExcelSupplementRow {
+    pub id: i64,
+    pub operation_type: String,
+    pub target_order_item_id: Option<i64>,
+    pub product_id: i64,
+    pub product_name: String,
+    pub alias2: Option<String>,
+    pub spec: Option<String>,
+    pub product_spec: Option<String>,
+    pub unit: Option<String>,
+    pub product_base_unit: Option<String>,
+    pub unit_price: f64,
+    pub quantity: f64,
+    pub amount: f64,
+    pub source_remark: Option<String>,
+    pub shelf_life: Option<String>,
+    pub gov_status: i64,
+    pub category_name: Option<String>,
+    pub parent_name: Option<String>,
+}
+
 /// 生成采购单：销售单主表行
 #[derive(Debug, Clone)]
 pub struct SalesOrderGenerateRow {
@@ -373,6 +430,16 @@ pub trait SalesOrderRepo: Send + Sync {
     async fn accept_item_rows(&self, id: i64) -> Result<Vec<SalesOrderAcceptItemRow>, DomainError>;
     /// 验收单增项行（错误吞为空）
     async fn accept_supplement_rows(&self, id: i64) -> Result<Vec<SalesOrderAcceptSupplementRow>, DomainError>;
+    /// 验收单导出（Excel）主表行：含供应商名称/车牌号快照（错误吞为 None 由用例层 404）
+    async fn accept_excel_order_row(&self, id: i64) -> Result<Option<AcceptExcelOrderRow>, DomainError>;
+    /// 验收单导出（Excel）真实明细行（错误吞为空）
+    async fn accept_excel_item_rows(&self, id: i64) -> Result<Vec<AcceptExcelItemRow>, DomainError>;
+    /// 验收单导出（Excel）增项行（错误吞为空）
+    async fn accept_excel_supplement_rows(&self, id: i64) -> Result<Vec<AcceptExcelSupplementRow>, DomainError>;
+    /// 当日 sales_order 最大单号序号（失败吞为 0）
+    async fn max_seq_for_date(&self, order_date: &str) -> Result<i64, DomainError>;
+    /// 按 product_unit.ratio 批量换算明细基础单位数量（失败回退前端基础数量/quantity）
+    async fn compute_base_quantities(&self, items: &[(i64, String, f64, f64)]) -> Vec<f64>;
     /// 增项排序分类反查：(category_name, parent_name)（错误吞为 None，用例层兜底空串）
     async fn product_category_names(&self, product_id: i64) -> Result<Option<(Option<String>, Option<String>)>, DomainError>;
     /// 生成采购单前置读：销售单主表行（错误吞为 None 由用例层 404）

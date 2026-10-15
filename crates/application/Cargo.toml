@@ -7,8 +7,6 @@ description = "应用服务层：价格策略、库存汇总、采购/验收导�
 [dependencies]
 common = { workspace = true }
 domain = { workspace = true }
-database = { workspace = true }
-sqlx = { workspace = true }
 rust_xlsxwriter = { workspace = true }
 calamine = { workspace = true }
 axum = { workspace = true }

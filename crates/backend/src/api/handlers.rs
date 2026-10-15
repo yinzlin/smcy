@@ -1322,13 +1322,13 @@ pub async fn api_warehouse_delete(State(app): State<App>, Json(req): Json<std::c
     }
 }
 
-pub async fn api_order_generate_no(axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+pub async fn api_order_generate_no(State(app): State<App>, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     let default_type = "purchase".to_string();
     let order_type = params.get("type").unwrap_or(&default_type);
     let default_date = Local::now().format("%Y-%m-%d").to_string();
     let order_date = params.get("date").unwrap_or(&default_date);
     
-    let order_no = generate_order_no(order_type, order_date).await;
+    let order_no = generate_order_no(order_type, order_date, &app.sales_order_repo, &app.purchase_order_repo).await;
     
     (StatusCode::OK, serde_json::to_string(&serde_json::json!({ "order_no": order_no })).unwrap())
 }
@@ -2251,7 +2251,7 @@ pub async fn api_sales_order_accept_excel(
         Err(e) => return e.into_response(),
         Ok(_) => {}
     }
-    build_accept_excel(&crate::middleware::auth::get_user_ctx(&app, &headers).await, id, true, force).await.into_response()
+    build_accept_excel(&crate::middleware::auth::get_user_ctx(&app, &headers).await, id, true, force, &app.sales_order_repo, &app.user_repo).await.into_response()
 }
 
 pub async fn api_sales_order_real_excel(
@@ -2265,7 +2265,7 @@ pub async fn api_sales_order_real_excel(
         Err(e) => return e.into_response(),
         Ok(_) => {}
     }
-    build_accept_excel(&crate::middleware::auth::get_user_ctx(&app, &headers).await, id, false, force).await.into_response()
+    build_accept_excel(&crate::middleware::auth::get_user_ctx(&app, &headers).await, id, false, force, &app.sales_order_repo, &app.user_repo).await.into_response()
 }
 
 pub async fn api_sales_order_sort_items(State(app): State<App>, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {

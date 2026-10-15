@@ -810,6 +810,119 @@ impl SalesOrderRepo for SqliteSalesOrderRepo {
         }).collect())
     }
 
+    async fn accept_excel_order_row(&self, id: i64) -> Result<Option<AcceptExcelOrderRow>, DomainError> {
+        // 行为保持：查询失败旧 unwrap_or(None) → 用例层 404
+        let row = sqlx::query(
+            "SELECT so.id, so.purchaser_id, so.order_no, so.order_date, so.total_amount, so.discount_rate, so.final_amount, so.remark,
+                    so.supplier_company, so.truck_plate,
+                    p.name as purchaser_name, p.address as purchaser_address
+             FROM sales_order so JOIN purchaser p ON so.purchaser_id = p.id WHERE so.id = ?"
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .unwrap_or(None);
+        Ok(row.map(|r| AcceptExcelOrderRow {
+            order_no: r.get("order_no"),
+            order_date: r.get("order_date"),
+            discount_rate: r.get("discount_rate"),
+            purchaser_name: r.get("purchaser_name"),
+            supplier_company: r.try_get("supplier_company").ok().flatten(),
+            truck_plate: r.try_get("truck_plate").ok().flatten(),
+        }))
+    }
+
+    async fn accept_excel_item_rows(&self, id: i64) -> Result<Vec<AcceptExcelItemRow>, DomainError> {
+        // 行为保持：查询失败旧 unwrap_or_default() → 空明细
+        let rows = sqlx::query(
+            "SELECT soi.id, soi.product_id, soi.product_name, soi.alias1, soi.alias2, soi.spec, p.spec as product_spec, soi.unit, p.unit as product_unit, p.base_unit as product_base_unit, soi.unit_price, soi.quantity, soi.amount, soi.remark,
+                    soi.production_date, soi.batch_no, p.shelf_life, p.gov_status,
+                    p.category_id, pc.name as category_name, pc.parent_id, pc2.name as parent_name
+             FROM sales_order_item soi LEFT JOIN product p ON soi.product_id = p.id
+             LEFT JOIN category pc ON p.category_id = pc.id
+             LEFT JOIN category pc2 ON pc.parent_id = pc2.id
+             WHERE soi.order_id = ?
+             ORDER BY soi.id ASC"
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        Ok(rows.iter().map(|r| AcceptExcelItemRow {
+            id: r.get("id"),
+            product_id: r.get("product_id"),
+            product_name: r.get("product_name"),
+            alias2: r.get("alias2"),
+            spec: r.get("spec"),
+            product_spec: r.try_get("product_spec").ok().flatten(),
+            unit: r.get("unit"),
+            product_base_unit: r.try_get("product_base_unit").ok().flatten(),
+            unit_price: r.get("unit_price"),
+            quantity: r.get("quantity"),
+            amount: r.get("amount"),
+            remark: r.get("remark"),
+            production_date: r.try_get("production_date").ok().flatten(),
+            batch_no: r.try_get("batch_no").ok().flatten(),
+            shelf_life: r.try_get("shelf_life").ok().flatten(),
+            gov_status: r.try_get("gov_status").unwrap_or(0),
+            category_name: r.get("category_name"),
+            parent_name: r.get("parent_name"),
+        }).collect())
+    }
+
+    async fn accept_excel_supplement_rows(&self, id: i64) -> Result<Vec<AcceptExcelSupplementRow>, DomainError> {
+        // 行为保持：查询失败旧 unwrap_or_default() → 空增项
+        let rows = sqlx::query(
+            "SELECT soi.id, soi.target_order_id, soi.source_order_id, soi.source_remark, soi.product_id, soi.product_name, soi.alias1, soi.alias2, soi.spec, p.spec as product_spec, soi.unit, p.unit as product_unit, p.base_unit as product_base_unit, soi.unit_price, soi.quantity, soi.amount, soi.allocate_date, soi.operation_type, soi.target_order_item_id,
+                    p.shelf_life, p.gov_status,
+                    pc.name as category_name, pc2.name as parent_name
+             FROM order_supplement_item soi
+             LEFT JOIN product p ON soi.product_id = p.id
+             LEFT JOIN category pc ON p.category_id = pc.id
+             LEFT JOIN category pc2 ON pc.parent_id = pc2.id
+             WHERE soi.target_order_id = ?"
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        Ok(rows.iter().map(|r| AcceptExcelSupplementRow {
+            id: r.get("id"),
+            operation_type: r.get("operation_type"),
+            target_order_item_id: r.get("target_order_item_id"),
+            product_id: r.get("product_id"),
+            product_name: r.get("product_name"),
+            alias2: r.get("alias2"),
+            spec: r.get("spec"),
+            product_spec: r.try_get("product_spec").ok().flatten(),
+            unit: r.get("unit"),
+            product_base_unit: r.try_get("product_base_unit").ok().flatten(),
+            unit_price: r.get("unit_price"),
+            quantity: r.get("quantity"),
+            amount: r.get("amount"),
+            source_remark: r.get("source_remark"),
+            shelf_life: r.try_get("shelf_life").ok().flatten(),
+            gov_status: r.try_get("gov_status").unwrap_or(0),
+            category_name: r.get("category_name"),
+            parent_name: r.get("parent_name"),
+        }).collect())
+    }
+
+    async fn max_seq_for_date(&self, order_date: &str) -> Result<i64, DomainError> {
+        // 行为保持：查询失败旧 unwrap_or(0) → 序号从 1 起
+        Ok(sqlx::query_scalar(
+            "SELECT COALESCE(MAX(CAST(SUBSTR(order_no, 11, 3) AS INTEGER)), 0) FROM sales_order WHERE order_date = ?",
+        )
+        .bind(order_date)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0))
+    }
+
+    async fn compute_base_quantities(&self, items: &[(i64, String, f64, f64)]) -> Vec<f64> {
+        stock_writer::compute_base_quantities(&self.pool, items).await
+    }
+
     async fn product_category_names(&self, product_id: i64) -> Result<Option<(Option<String>, Option<String>)>, DomainError> {
         let row = sqlx::query(
             "SELECT pc.name as category_name, pc2.name as parent_name

@@ -5,6 +5,7 @@
 
 use calamine::{open_workbook_auto_from_rs, Data, Reader};
 use domain::error::DomainError;
+use domain::port::price_schedule::{PriceScheduleRepo, PurchasePriceInput};
 use domain::port::purchase_order::*;
 use domain::{PurchaseOrderReq, UserCtx};
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook, Worksheet, XlsxError};
@@ -13,13 +14,14 @@ use crate::error::UseCaseError;
 use crate::port::purchase_order::{PurchaseOrderOutcome, PurchaseOrderUseCase};
 
 #[derive(Clone)]
-pub struct PurchaseOrderService<R: PurchaseOrderRepo> {
+pub struct PurchaseOrderService<R: PurchaseOrderRepo, P: PriceScheduleRepo> {
     repo: R,
+    price: P,
 }
 
-impl<R: PurchaseOrderRepo> PurchaseOrderService<R> {
-    pub fn new(repo: R) -> Self {
-        Self { repo }
+impl<R: PurchaseOrderRepo, P: PriceScheduleRepo> PurchaseOrderService<R, P> {
+    pub fn new(repo: R, price: P) -> Self {
+        Self { repo, price }
     }
 }
 
@@ -55,7 +57,20 @@ fn base_inputs_of(items: &[domain::PurchaseOrderItemReq]) -> Vec<(i64, String, f
         .collect()
 }
 
-impl<R: PurchaseOrderRepo> PurchaseOrderService<R> {
+/// 采购明细 → 进价更新输入映射（domain 自有类型，端口不依赖 HTTP 契约）
+fn price_inputs_of(items: &[domain::PurchaseOrderItemReq]) -> Vec<PurchasePriceInput> {
+    items.iter()
+        .map(|it| PurchasePriceInput {
+            product_id: it.product_id,
+            unit_price: it.unit_price,
+            quantity: it.quantity,
+            base_quantity: it.base_quantity,
+            amount: it.amount,
+        })
+        .collect()
+}
+
+impl<R: PurchaseOrderRepo, P: PriceScheduleRepo> PurchaseOrderService<R, P> {
     /// 详情/更新/删除/结算/审核/反审核共用护栏：订单存在性 + 行级数据权限
     async fn guard(&self, id: i64, ctx: &UserCtx, not_found: &str, forbidden: &str) -> Result<(i64, String), UseCaseError> {
         let order = self.repo.get_supplier_status(id).await.ok().flatten();
@@ -70,7 +85,7 @@ impl<R: PurchaseOrderRepo> PurchaseOrderService<R> {
     }
 }
 
-impl<R: PurchaseOrderRepo> PurchaseOrderUseCase for PurchaseOrderService<R> {
+impl<R: PurchaseOrderRepo, P: PriceScheduleRepo> PurchaseOrderUseCase for PurchaseOrderService<R, P> {
     async fn create(&self, req: PurchaseOrderReq, ctx: &UserCtx) -> Result<PurchaseOrderOutcome, UseCaseError> {
         // 仅已审核的供应商允许下单（id<=0 视为通过，避免误伤无关联的零值）
         if req.supplier_id > 0 {
@@ -96,11 +111,10 @@ impl<R: PurchaseOrderRepo> PurchaseOrderUseCase for PurchaseOrderService<R> {
         };
 
         if !req.items.is_empty() {
-            let base_qtys = database::sqlite::repo::stock_writer::compute_base_quantities(
-                database::pool(), &base_inputs_of(&req.items)).await;
+            let base_qtys = self.repo.compute_base_quantities(&base_inputs_of(&req.items)).await;
             let _ = self.repo.insert_items_batch(order_id, &req.items, &base_qtys).await;
             // 采购入库后更新商品进价（当前/最高/最低）
-            crate::service::price::update_product_purchase_prices(&req.items).await;
+            let _ = self.price.update_product_purchase_prices(&price_inputs_of(&req.items)).await;
         }
 
         Ok(PurchaseOrderOutcome::with_log(
@@ -267,8 +281,7 @@ impl<R: PurchaseOrderRepo> PurchaseOrderUseCase for PurchaseOrderService<R> {
         let (main_wh_id, main_wh_name) = derive_main_warehouse(&req.items);
 
         // base_quantity 服务端统一重算（product_unit.ratio 权威），不信任前端值——与销售单同一规则
-        let base_qtys = database::sqlite::repo::stock_writer::compute_base_quantities(
-            database::pool(), &base_inputs_of(&req.items)).await;
+        let base_qtys = self.repo.compute_base_quantities(&base_inputs_of(&req.items)).await;
 
         match self.repo.update_order_with_items(&req, main_wh_id, &main_wh_name, ver, &base_qtys).await {
             Ok(()) => {}
@@ -285,7 +298,7 @@ impl<R: PurchaseOrderRepo> PurchaseOrderUseCase for PurchaseOrderService<R> {
 
         if !req.items.is_empty() {
             // 采购单更新后同步商品进价（当前/最高/最低）
-            crate::service::price::update_product_purchase_prices(&req.items).await;
+            let _ = self.price.update_product_purchase_prices(&price_inputs_of(&req.items)).await;
         }
         Ok(PurchaseOrderOutcome::with_log(
             "更新成功".to_string(),
@@ -310,7 +323,7 @@ impl<R: PurchaseOrderRepo> PurchaseOrderUseCase for PurchaseOrderService<R> {
             Ok(()) => {
                 // 删除成功后，对涉及的商品从剩余采购历史重算进价（回滚/刷新最高/最低/最近价）
                 for pid in affected_products {
-                    crate::service::price::recalc_product_purchase_prices_from_history(pid).await;
+                    let _ = self.price.recalc_product_purchase_prices_from_history(pid).await;
                 }
                 Ok(PurchaseOrderOutcome::with_log(
                     "删除成功".to_string(),

@@ -48,6 +48,7 @@ use database::sqlite::repo::system_mgmt::SqliteSystemMgmtRepo;
 use database::sqlite::repo::today_price::SqliteTodayPriceRepo;
 use database::sqlite::repo::user::SqliteUserRepo;
 use database::sqlite::repo::warehouse::SqliteWarehouseRepo;
+use domain::port::price_schedule::PriceScheduleRepo;
 use domain::port::product::{ProductImageStore, RemoteImageStore};
 
 /// 远程图片转存基础设施适配器：导入商品时下载网络图片到本地 uploads（复用旧实现）
@@ -88,26 +89,28 @@ impl ProductImageStore for BackendImageStore {
 
 /// 应用容器：按业务域聚合全部用例服务（axum State 要求 Clone，池为 Arc 克隆零成本）
 ///
-/// `user_repo` / `oplog_repo` / `sales_order_repo` 为中间件（如 auth.rs 的会话解析、
-/// 操作日志、行级数据权限）共享的仓储句柄：中间件不得直连 pool，一律经端口取数。
+/// `user_repo` / `oplog_repo` / `sales_order_repo` / `purchase_order_repo` 为中间件与
+/// 用例（如 auth.rs 的会话解析、操作日志、行级数据权限、单号生成）共享的仓储句柄：
+/// 中间件不得直连 pool，一律经端口取数。
 #[derive(Clone)]
 pub struct App {
     pub user_repo: SqliteUserRepo,
     pub oplog_repo: SqliteOperationLogRepo,
     pub sales_order_repo: SqliteSalesOrderRepo,
+    pub purchase_order_repo: SqlitePurchaseOrderRepo,
     pub user: UserService<SqliteUserRepo>,
     pub category: CategoryService<SqliteCategoryRepo>,
     pub warehouse: WarehouseService<SqliteWarehouseRepo>,
     pub audit: BasicAuditService<SqliteBasicAuditRepo, SqliteOperationLogRepo>,
     pub supplier: SupplierService<SqliteSupplierRepo>,
     pub purchaser: PurchaserService<SqlitePurchaserRepo>,
-    pub product: ProductService<SqliteProductRepo, BackendImageStore>,
+    pub product: ProductService<SqliteProductRepo, BackendImageStore, SqlitePriceScheduleRepo>,
     pub purchase_document: PurchaseDocumentService<SqlitePurchaseDocumentRepo>,
-    pub today_price: TodayPriceService<SqliteTodayPriceRepo>,
+    pub today_price: TodayPriceService<SqliteTodayPriceRepo, SqlitePriceScheduleRepo>,
     pub price_schedule: PriceScheduleService<SqlitePriceScheduleRepo>,
     pub inventory: InventoryService<SqliteInventoryRepo>,
-    pub purchase_order: PurchaseOrderService<SqlitePurchaseOrderRepo>,
-    pub sales_order: SalesOrderService<SqliteSalesOrderRepo>,
+    pub purchase_order: PurchaseOrderService<SqlitePurchaseOrderRepo, SqlitePriceScheduleRepo>,
+    pub sales_order: SalesOrderService<SqliteSalesOrderRepo, SqlitePurchaseOrderRepo, SqlitePriceScheduleRepo>,
     pub order_allocation: OrderAllocationService<SqliteOrderAllocationRepo>,
     pub order_supplement: OrderSupplementService<SqliteOrderSupplementRepo>,
     pub query_finance: QueryFinanceService<SqliteQueryFinanceRepo>,
@@ -121,20 +124,24 @@ pub struct App {
 
 /// 初始化数据库；如有待重建的 price_schedule 时段则补跑重建，完成后升级 user_version
 pub async fn bootstrap() -> App {
-    if let Some(pending) = database::init_pool().await {
+    let pending = database::init_pool().await;
+    let pool = database::pool().clone();
+    let price_repo = SqlitePriceScheduleRepo::new(pool.clone());
+    if let Some(pending) = pending {
         for (product_id, price_type) in pending {
-            let _ = application::service::price::rebuild_price_schedule_end_dates(product_id, &price_type).await;
+            let _ = price_repo.rebuild_end_dates(product_id, &price_type).await;
         }
         database::finalize_schedule_rebuild().await;
     }
-    let pool = database::pool().clone();
     let user_repo = SqliteUserRepo::new(pool.clone());
     let oplog_repo = SqliteOperationLogRepo::new(pool.clone());
     let sales_order_repo = SqliteSalesOrderRepo::new(pool.clone());
+    let purchase_order_repo = SqlitePurchaseOrderRepo::new(pool.clone());
     App {
         user_repo: user_repo.clone(),
         oplog_repo: oplog_repo.clone(),
         sales_order_repo: sales_order_repo.clone(),
+        purchase_order_repo: purchase_order_repo.clone(),
         user: UserService::new(user_repo.clone()),
         category: CategoryService::new(SqliteCategoryRepo::new(pool.clone())),
         warehouse: WarehouseService::new(SqliteWarehouseRepo::new(pool.clone())),
@@ -144,13 +151,14 @@ pub async fn bootstrap() -> App {
         product: ProductService::new(
             SqliteProductRepo::new(pool.clone()),
             BackendImageStore,
+            price_repo.clone(),
         ),
         purchase_document: PurchaseDocumentService::new(SqlitePurchaseDocumentRepo::new(pool.clone())),
-        today_price: TodayPriceService::new(SqliteTodayPriceRepo::new(pool.clone())),
+        today_price: TodayPriceService::new(SqliteTodayPriceRepo::new(pool.clone()), price_repo.clone()),
         price_schedule: PriceScheduleService::new(SqlitePriceScheduleRepo::new(pool.clone())),
         inventory: InventoryService::new(SqliteInventoryRepo::new(pool.clone())),
-        purchase_order: PurchaseOrderService::new(SqlitePurchaseOrderRepo::new(pool.clone())),
-        sales_order: SalesOrderService::new(sales_order_repo.clone()),
+        purchase_order: PurchaseOrderService::new(SqlitePurchaseOrderRepo::new(pool.clone()), price_repo.clone()),
+        sales_order: SalesOrderService::new(sales_order_repo.clone(), purchase_order_repo.clone(), price_repo.clone()),
         order_allocation: OrderAllocationService::new(SqliteOrderAllocationRepo::new(pool.clone())),
         order_supplement: OrderSupplementService::new(SqliteOrderSupplementRepo::new(pool.clone())),
         query_finance: QueryFinanceService::new(SqliteQueryFinanceRepo::new(pool.clone())),

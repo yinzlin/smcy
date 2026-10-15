@@ -10,7 +10,8 @@ use sqlx::{AssertSqlSafe, Row};
 use domain::error::DomainError;
 use domain::port::query_stock::{
     QueryStockRepo, SlowStockExportRow, SlowStockRow, StockBalanceHistoryRow,
-    StockBalanceRealtimeRow, StockFlowOpeningRow, StockFlowRow, StockWarningRow,
+    StockBalanceRealtimeRow, StockFlowOpeningRow, StockFlowRow, StockSummaryPurchaseRow,
+    StockSummarySalesRow, StockWarningRow,
 };
 
 #[derive(Clone)]
@@ -425,6 +426,161 @@ impl QueryStockRepo for SqliteQueryStockRepo {
                 last_sale_date: row.get::<String, _>("last_sale_date"),
             })
             .collect())
+    }
+
+    async fn stock_summary_purchase_rows(&self, start_date: &str, end_date: &str) -> Vec<StockSummaryPurchaseRow> {
+        // 行为保持：查询失败旧 unwrap_or_default() → 空
+        let mut purchase_where = String::from("WHERE 1=1");
+        if !start_date.is_empty() {
+            purchase_where.push_str(&format!(" AND po.order_date >= '{}'", start_date));
+        }
+        if !end_date.is_empty() {
+            purchase_where.push_str(&format!(" AND po.order_date <= '{}'", end_date));
+        }
+        let purchase_sql = format!(
+            "WITH src AS (
+                SELECT po.order_date as day,
+                       COALESCE(poi.warehouse_id, po.warehouse_id, 0) as warehouse_id,
+                       COALESCE(NULLIF(TRIM(poi.warehouse_name), ''), po.warehouse_name, '未指定') as warehouse_name,
+                       poi.amount as amount,
+                       po.id as po_id
+                FROM purchase_order po
+                JOIN purchase_order_item poi ON poi.order_id = po.id
+                {}
+             )
+             SELECT day,
+                    warehouse_id,
+                    warehouse_name,
+                    COALESCE(SUM(amount), 0.0) as in_amount,
+                    COUNT(*) as in_item_count,
+                    COUNT(DISTINCT po_id) as in_order_count
+             FROM src
+             GROUP BY day, warehouse_id, warehouse_name",
+            purchase_where
+        );
+        let rows = sqlx::query(AssertSqlSafe(purchase_sql.as_str()))
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_default();
+        rows.iter()
+            .map(|row| StockSummaryPurchaseRow {
+                day: row.get("day"),
+                warehouse_id: row.get::<i64, _>("warehouse_id"),
+                warehouse_name: row.get::<String, _>("warehouse_name"),
+                amount: row.get::<f64, _>("in_amount"),
+                item_count: row.get::<i64, _>("in_item_count"),
+                order_count: row.get::<i64, _>("in_order_count"),
+            })
+            .collect()
+    }
+
+    async fn stock_summary_sales_rows(&self, start_date: &str, end_date: &str) -> Vec<StockSummarySalesRow> {
+        // 行为保持：查询失败旧 unwrap_or_default() → 空
+        let mut sales_where = String::from("WHERE 1=1");
+        if !start_date.is_empty() {
+            sales_where.push_str(&format!(" AND so.order_date >= '{}'", start_date));
+        }
+        if !end_date.is_empty() {
+            sales_where.push_str(&format!(" AND so.order_date <= '{}'", end_date));
+        }
+        let sales_sql = format!(
+            "SELECT so.order_date as day,
+                    COALESCE(so.warehouse_id, 0) as warehouse_id,
+                    COALESCE(so.warehouse_name, '未指定') as warehouse_name,
+                    soi.amount as out_amount,
+                    so.id as order_id,
+                    COALESCE(so.discount_rate, 0) as discount_rate
+             FROM sales_order so
+             JOIN sales_order_item soi ON soi.order_id = so.id
+             {}",
+            sales_where
+        );
+        let rows = sqlx::query(AssertSqlSafe(sales_sql.as_str()))
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_default();
+        rows.iter().map(map_stock_summary_sales_row).collect()
+    }
+
+    async fn stock_summary_adj_target_rows(&self, start_date: &str, end_date: &str) -> Vec<StockSummarySalesRow> {
+        // 行为保持：查询失败旧 unwrap_or_default() → 空
+        let mut sales_where = String::from("WHERE 1=1");
+        if !start_date.is_empty() {
+            sales_where.push_str(&format!(" AND so.order_date >= '{}'", start_date));
+        }
+        if !end_date.is_empty() {
+            sales_where.push_str(&format!(" AND so.order_date <= '{}'", end_date));
+        }
+        let adj1_sql = format!(
+            "SELECT so.order_date as day,
+                    COALESCE(so.warehouse_id, 0) as warehouse_id,
+                    COALESCE(so.warehouse_name, '未指定') as warehouse_name,
+                    osi.amount as out_amount,
+                    COALESCE(so.discount_rate, 0) as discount_rate
+             FROM order_supplement_item osi
+             JOIN sales_order so ON osi.target_order_id = so.id
+             {}",
+            sales_where
+        );
+        let rows = sqlx::query(AssertSqlSafe(adj1_sql.as_str()))
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_default();
+        rows.iter()
+            .map(|row| map_stock_summary_sales_row_adj(row))
+            .collect()
+    }
+
+    async fn stock_summary_adj_source_rows(&self, start_date: &str, end_date: &str) -> Vec<StockSummarySalesRow> {
+        // 行为保持：查询失败旧 unwrap_or_default() → 空
+        let mut sales_where = String::from("WHERE 1=1");
+        if !start_date.is_empty() {
+            sales_where.push_str(&format!(" AND so.order_date >= '{}'", start_date));
+        }
+        if !end_date.is_empty() {
+            sales_where.push_str(&format!(" AND so.order_date <= '{}'", end_date));
+        }
+        let adj2_sql = format!(
+            "SELECT so.order_date as day,
+                    COALESCE(so.warehouse_id, 0) as warehouse_id,
+                    COALESCE(so.warehouse_name, '未指定') as warehouse_name,
+                    soi.amount as out_amount,
+                    so.id as order_id,
+                    COALESCE(so.discount_rate, 0) as discount_rate
+             FROM sales_order so
+             JOIN sales_order_item soi ON soi.order_id = so.id
+             {} AND so.id IN (SELECT DISTINCT source_order_id FROM consumable_allocation)",
+            sales_where
+        );
+        let rows = sqlx::query(AssertSqlSafe(adj2_sql.as_str()))
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_default();
+        rows.iter().map(map_stock_summary_sales_row).collect()
+    }
+}
+
+/// 出入库统计：销售明细行映射（adj 目标单口径无 order_id 列，固定 0）
+fn map_stock_summary_sales_row(row: &sqlx::sqlite::SqliteRow) -> StockSummarySalesRow {
+    StockSummarySalesRow {
+        day: row.get("day"),
+        warehouse_id: row.get::<i64, _>("warehouse_id"),
+        warehouse_name: row.get::<String, _>("warehouse_name"),
+        amount: row.get::<f64, _>("out_amount"),
+        order_id: row.get::<i64, _>("order_id"),
+        discount_rate: row.get::<f64, _>("discount_rate"),
+    }
+}
+
+/// 出入库统计：分摊目标单明细行映射（SQL 未选 order_id，旧行为不参与去重计数）
+fn map_stock_summary_sales_row_adj(row: &sqlx::sqlite::SqliteRow) -> StockSummarySalesRow {
+    StockSummarySalesRow {
+        day: row.get("day"),
+        warehouse_id: row.get::<i64, _>("warehouse_id"),
+        warehouse_name: row.get::<String, _>("warehouse_name"),
+        amount: row.get::<f64, _>("out_amount"),
+        order_id: 0,
+        discount_rate: row.get::<f64, _>("discount_rate"),
     }
 }
 

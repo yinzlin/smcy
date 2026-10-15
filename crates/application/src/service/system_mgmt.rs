@@ -35,7 +35,7 @@ fn parse_operation_log_filter(params: &HashMap<String, String>) -> OperationLogF
     }
 }
 
-/// VACUUM INTO 失败 → 携带原始 sqlx 错误消息的 500（文案由调用场景决定）
+/// VACUUM INTO 失败 → 携带原始存储层错误消息的 500（文案由调用场景决定）
 fn vacuum_into_error(e: DomainError, prefix: &str) -> UseCaseError {
     match e {
         DomainError::Storage(m) => UseCaseError::Storage(format!("{}{}", prefix, m)),

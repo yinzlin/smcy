@@ -1,6 +1,7 @@
 //! 今日进价采集用例：聚合查询 / 保存联动 / 三种导出（按供应商、A4 三栏、按分类）
 
 use chrono::Local;
+use domain::port::price_schedule::PriceScheduleRepo;
 use domain::port::today_price::{TodayPriceRepo, TodayPriceSaveItem};
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook, XlsxError};
 
@@ -8,13 +9,14 @@ use crate::error::UseCaseError;
 use crate::port::today_price::TodayPriceUseCase;
 
 #[derive(Clone)]
-pub struct TodayPriceService<R: TodayPriceRepo> {
+pub struct TodayPriceService<R: TodayPriceRepo, P: PriceScheduleRepo> {
     repo: R,
+    price: P,
 }
 
-impl<R: TodayPriceRepo> TodayPriceService<R> {
-    pub fn new(repo: R) -> Self {
-        Self { repo }
+impl<R: TodayPriceRepo, P: PriceScheduleRepo> TodayPriceService<R, P> {
+    pub fn new(repo: R, price: P) -> Self {
+        Self { repo, price }
     }
 }
 
@@ -24,7 +26,7 @@ fn fmt_qty(v: f64) -> String {
     s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
-impl<R: TodayPriceRepo> TodayPriceUseCase for TodayPriceService<R> {
+impl<R: TodayPriceRepo, P: PriceScheduleRepo> TodayPriceUseCase for TodayPriceService<R, P> {
     async fn items(&self, date: Option<String>) -> String {
         // 行为保持：查询失败旧 unwrap_or_default → 空数组
         let rows = self.repo.fetch_items(date.as_deref()).await.unwrap_or_default();
@@ -129,8 +131,8 @@ impl<R: TodayPriceRepo> TodayPriceUseCase for TodayPriceService<R> {
                 // 行为保持：UPDATE 成功才计数 + 记日志 + 触发加成率重算
                 if self.repo.update_price_range(pid, price, new_max, new_min).await.is_ok() {
                     updated += 1;
-                    crate::service::price::log_price_change(pid, "purchase_price", old_purchase, price, "today_price_collect", None, Some("今日进价采集录入")).await;
-                    crate::service::price::recalc_base_price_by_markup(pid, "today_price_collect", None).await;
+                    let _ = self.price.log_price_change(pid, "purchase_price", old_purchase, price, "today_price_collect", None, Some("今日进价采集录入")).await;
+                    let _ = self.price.recalc_base_price_by_markup(pid, "today_price_collect", None).await;
                 }
             }
         }

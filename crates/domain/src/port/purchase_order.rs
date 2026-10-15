@@ -225,4 +225,8 @@ pub trait PurchaseOrderRepo: Send + Sync {
     async fn unit_ratio(&self, product_id: i64, unit: &str) -> Result<Option<f64>, DomainError>;
     /// 导入：插入明细（旧行为吞错，实现内部忽略错误）
     async fn insert_import_item(&self, order_id: i64, item: &PurchaseOrderImportItem) -> Result<(), DomainError>;
+    /// 当日 purchase_order 最大单号序号（失败吞为 0）
+    async fn max_seq_for_date(&self, order_date: &str) -> Result<i64, DomainError>;
+    /// 按 product_unit.ratio 批量换算明细基础单位数量（失败回退前端基础数量/quantity）
+    async fn compute_base_quantities(&self, items: &[(i64, String, f64, f64)]) -> Vec<f64>;
 }

@@ -3,6 +3,7 @@
 use chrono::Local;
 use common::utils::{round2, sanitize_filename_prefix};
 use domain::error::DomainError;
+use domain::port::price_schedule::PriceScheduleRepo;
 use domain::port::product::{
     DeleteCascadeError, ImportInsertOutcome, ImportProduct, NewProduct, NewProductUnit, PriceSnapshot,
     ProductExportRow, ProductImageStore, ProductListFilter, ProductRepo, RemoteImageStore, UpdateProduct,
@@ -20,14 +21,15 @@ fn storage_msg(e: &DomainError) -> String {
 }
 
 #[derive(Clone)]
-pub struct ProductService<R: ProductRepo, S: RemoteImageStore + ProductImageStore> {
+pub struct ProductService<R: ProductRepo, S: RemoteImageStore + ProductImageStore, P: PriceScheduleRepo> {
     repo: R,
     image: S,
+    price: P,
 }
 
-impl<R: ProductRepo, S: RemoteImageStore + ProductImageStore> ProductService<R, S> {
-    pub fn new(repo: R, image: S) -> Self {
-        Self { repo, image }
+impl<R: ProductRepo, S: RemoteImageStore + ProductImageStore, P: PriceScheduleRepo> ProductService<R, S, P> {
+    pub fn new(repo: R, image: S, price: P) -> Self {
+        Self { repo, image, price }
     }
 
     /// 行为保持：旧 check_basic_not_confirmed 的吞错与文案逻辑
@@ -67,7 +69,7 @@ impl<R: ProductRepo, S: RemoteImageStore + ProductImageStore> ProductService<R, 
     }
 }
 
-impl<R: ProductRepo, S: RemoteImageStore + ProductImageStore> ProductUseCase for ProductService<R, S> {
+impl<R: ProductRepo, S: RemoteImageStore + ProductImageStore, P: PriceScheduleRepo> ProductUseCase for ProductService<R, S, P> {
     async fn list(&self, is_super_admin: bool, f: ProductListFilter) -> Result<serde_json::Value, UseCaseError> {
         // 行为保持：总数查询失败旧 unwrap panic → 500；数据查询失败返回空数组
         let (rows, total) = self
@@ -350,7 +352,7 @@ impl<R: ProductRepo, S: RemoteImageStore + ProductImageStore> ProductUseCase for
                 let new_base = req.base_price.unwrap_or(old_base);
                 // 记录进价变更
                 if (old_purchase - new_purchase).abs() >= 0.001 {
-                    crate::service::price::log_price_change(
+                    let _ = self.price.log_price_change(
                         req.id,
                         "purchase_price",
                         old_purchase,
@@ -363,7 +365,7 @@ impl<R: ProductRepo, S: RemoteImageStore + ProductImageStore> ProductUseCase for
                 }
                 // 记录售价变更
                 if (old_base - new_base).abs() >= 0.001 {
-                    crate::service::price::log_price_change(
+                    let _ = self.price.log_price_change(
                         req.id,
                         "base_price",
                         old_base,
@@ -382,7 +384,7 @@ impl<R: ProductRepo, S: RemoteImageStore + ProductImageStore> ProductUseCase for
                         "[商品编辑] 商品ID={} 加成率/开关变更 旧加成率={:.4} 新加成率={:.4} 旧开关={} 新开关={} 触发售价重算",
                         req.id, old_markup, new_markup, old_auto, new_auto
                     );
-                    crate::service::price::recalc_base_price_by_markup(req.id, "product_update", None).await;
+                    let _ = self.price.recalc_base_price_by_markup(req.id, "product_update", None).await;
                 }
                 Ok("更新成功".to_string())
             }
@@ -661,10 +663,10 @@ impl<R: ProductRepo, S: RemoteImageStore + ProductImageStore> ProductUseCase for
                                 .import_price_snapshot(pid, pt, pv, &today, "商品导入")
                                 .await;
                             // 维护时段连续性
-                            let _ = crate::service::price::rebuild_price_schedule_end_dates(pid, pt).await;
+                            let _ = self.price.rebuild_end_dates(pid, pt).await;
                             // 政采平台价有数值时自动标记政采状态
                             if pt == "gov_procurement" {
-                                crate::service::price::auto_mark_gov_status(pid).await;
+                                let _ = self.price.auto_mark_gov_status(pid).await;
                             }
                         }
                     }
@@ -785,7 +787,7 @@ impl<R: ProductRepo, S: RemoteImageStore + ProductImageStore> ProductUseCase for
         {
             Ok(()) => {
                 // 政采平台价有数值时，政采平台状态自动标记为「政采商品（有指导价）」
-                crate::service::price::auto_mark_gov_status(req.product_id).await;
+                let _ = self.price.auto_mark_gov_status(req.product_id).await;
                 Ok(())
             }
             Err(e) => {
@@ -832,15 +834,15 @@ impl<R: ProductRepo, S: RemoteImageStore + ProductImageStore> ProductUseCase for
     }
 
     async fn sync_base_price(&self, product_id: i64) {
-        crate::service::price::sync_product_base_price(product_id).await;
+        let _ = self.price.sync_base_price(product_id).await;
     }
 
     async fn set_auto_update_price(&self, product_id: i64, auto: i64) {
-        crate::service::price::set_auto_update_price(product_id, auto).await;
+        let _ = self.price.set_auto_update_price(product_id, auto).await;
     }
 
     async fn batch_set_auto_update_price(&self, auto: i64) {
-        crate::service::price::batch_set_auto_update_price(auto).await;
+        let _ = self.price.batch_set_auto_update_price(auto).await;
     }
 
     async fn last_purchase_price(&self, product_id: i64) -> Option<String> {
