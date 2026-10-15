@@ -1,11 +1,14 @@
 # 供类 Unix 环境参考；Windows 请使用 make.ps1（功能一一对应）
 
-.PHONY: check build release run clean fmt clippy frontend-build frontend-dev
+.PHONY: check check-layers build release run clean fmt clippy frontend-build frontend-dev
 
 FRONTEND_DIR := crates/frontend
 
 check:
 	cargo check --workspace
+
+check-layers:
+	pwsh -File ./scripts/check_layers.ps1
 
 build:
 	cargo build

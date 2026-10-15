@@ -22,3 +22,6 @@ build.log
 crates/frontend/node_modules/
 crates/frontend/dist/
 
+# 运行时产物（release build 输出），不计入版本控制
+food_accept_single.exe
+
