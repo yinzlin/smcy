@@ -63,4 +63,8 @@ pub trait SalesOrderUseCase: Send + Sync {
     async fn approve(&self, id: i64, reason: String, ctx: &UserCtx) -> Result<SalesOrderOutcome, UseCaseError>;
     /// 反审核（reason 必填；super_admin 任意时刻可反审核；原状态 accepted 时写冲销流水）
     async fn unapprove(&self, id: i64, reason: String, ctx: &UserCtx) -> Result<SalesOrderOutcome, UseCaseError>;
+    /// 导出销售单列表 xlsx（purchaser 角色强制只看自己；行级权限在用例层）
+    async fn export(&self, ctx: &UserCtx, keyword_pattern: String, purchaser_id: Option<i64>) -> Result<Vec<u8>, UseCaseError>;
+    /// 批量导入销售单（xlsx/csv 解析 + INSERT OR IGNORE 幂等 + base_quantity 服务端重算）
+    async fn import(&self, bytes: Vec<u8>, ctx: &UserCtx) -> Result<SalesOrderOutcome, UseCaseError>;
 }

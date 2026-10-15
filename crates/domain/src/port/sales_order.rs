@@ -87,6 +87,59 @@ pub struct SalesOrderByPurchaserRow {
     pub purchaser_id: i64,
 }
 
+/// 导出行（LEFT JOIN 明细；明细列可空）
+#[derive(Debug, Clone)]
+pub struct SalesOrderExportRow {
+    pub id: i64,
+    pub order_no: String,
+    pub order_date: String,
+    pub total_amount: f64,
+    pub discount_rate: f64,
+    pub final_amount: f64,
+    pub status: String,
+    pub remark: Option<String>,
+    pub purchaser_name: String,
+    pub product_name: Option<String>,
+    pub alias1: Option<String>,
+    pub alias2: Option<String>,
+    pub spec: Option<String>,
+    pub unit: Option<String>,
+    pub pre_sale_quantity: Option<f64>,
+    pub quantity: Option<f64>,
+    pub unit_price: Option<f64>,
+    pub base_quantity: Option<f64>,
+    pub amount: Option<f64>,
+    pub item_remark: Option<String>,
+}
+
+/// 批量导入主表行
+#[derive(Debug, Clone)]
+pub struct SalesOrderImportMain {
+    pub order_no: String,
+    pub purchaser_id: i64,
+    pub order_date: String,
+    pub total_amount: f64,
+    pub discount_rate: f64,
+    pub final_amount: f64,
+    pub remark: String,
+}
+
+/// 批量导入明细行
+#[derive(Debug, Clone)]
+pub struct SalesOrderImportItem {
+    pub product_id: i64,
+    pub product_name: String,
+    pub alias1: String,
+    pub alias2: String,
+    pub spec: String,
+    pub unit: String,
+    pub unit_price: f64,
+    pub quantity: f64,
+    pub base_quantity: f64,
+    pub amount: f64,
+    pub remark: String,
+}
+
 /// 列表筛选条件（purchaser_id 为 HTTP 原始值，角色强制在用例层完成）
 #[derive(Debug, Clone, Default)]
 pub struct SalesOrderListFilter {
@@ -178,4 +231,16 @@ pub trait SalesOrderRepo: Send + Sync {
     async fn product_base_price(&self, product_id: i64) -> Option<f64>;
     /// 调价读取：(discount_rate, amount_reduction)，各自 fetch_one 错误吞为 0.0
     async fn fetch_discount_and_reduction(&self, id: i64) -> (f64, f64);
+    /// 导出行查询（LEFT JOIN 明细，按 so.id, soi.id；失败由用例层吞为空）
+    async fn export_rows(&self, keyword_pattern: &str, purchaser_id: Option<i64>) -> Result<Vec<SalesOrderExportRow>, DomainError>;
+    /// 导入：按名称查采购单位 id（吞为 None）
+    async fn find_purchaser_id_by_name(&self, name: &str) -> Result<Option<i64>, DomainError>;
+    /// 导入：INSERT OR IGNORE 主表（返回 (last_insert_rowid, rows_affected)）
+    async fn insert_import_order(&self, main: &SalesOrderImportMain) -> Result<(i64, u64), DomainError>;
+    /// 导入：按 name+spec 查商品 id（吞为 None）
+    async fn find_product_id_by_name_spec(&self, name: &str, spec: &str) -> Result<Option<i64>, DomainError>;
+    /// 导入：查辅助单位换算比（吞为 None）
+    async fn unit_ratio(&self, product_id: i64, unit: &str) -> Result<Option<f64>, DomainError>;
+    /// 导入：插入明细（旧行为吞错，由用例层 let _ 忽略）
+    async fn insert_import_item(&self, order_id: i64, item: &SalesOrderImportItem) -> Result<(), DomainError>;
 }

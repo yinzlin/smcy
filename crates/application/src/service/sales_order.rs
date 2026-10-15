@@ -1,11 +1,13 @@
-//! 销售订单用例：创建 / 列表 / by_purchaser / 详情 / 乐观锁更新 / 调价 / 删除 / 结算 / 状态流转 / 审核 / 反审核
+//! 销售订单用例：创建 / 列表 / by_purchaser / 详情 / 乐观锁更新 / 调价 / 删除 / 结算 / 状态流转 / 审核 / 反审核 / 导出 / 导入
 //!
 //! 行为与旧 api_sales_order_* handler 逐字一致：含错误文案、状态码、吞错分支、
 //! 价格策略时段补价（政采价优先，否则商超1/2/3/AI 非零平均价）与操作日志文案。
 
+use calamine::{open_workbook_auto_from_rs, Data, Reader};
 use domain::error::DomainError;
 use domain::port::sales_order::*;
 use domain::{SalesOrderItemReq, SalesOrderReq, UserCtx};
+use rust_xlsxwriter::{Format, FormatAlign, Workbook, XlsxError};
 
 use crate::error::UseCaseError;
 use crate::port::sales_order::{SalesOrderLog, SalesOrderOutcome, SalesOrderUseCase};
@@ -661,4 +663,252 @@ impl<R: SalesOrderRepo> SalesOrderUseCase for SalesOrderService<R> {
             Err(e) => Err(UseCaseError::from(e)),
         }
     }
+
+    async fn export(&self, ctx: &UserCtx, keyword_pattern: String, purchaser_id: Option<i64>) -> Result<Vec<u8>, UseCaseError> {
+        // 行级数据权限 + 筛选：purchaser 强制只看自己，其他角色可按 purchaser_id 过滤
+        let purchaser_id: Option<i64> = if ctx.role == "purchaser" {
+            if ctx.purchaser_id > 0 { Some(ctx.purchaser_id) } else { Some(-1) }
+        } else {
+            purchaser_id
+        };
+
+        let rows = self.repo.export_rows(&keyword_pattern, purchaser_id).await.unwrap_or_default();
+        build_export_workbook(rows).map_err(|e| UseCaseError::Storage(format!("导出失败: {}", e)))
+    }
+
+    async fn import(&self, bytes: Vec<u8>, _ctx: &UserCtx) -> Result<SalesOrderOutcome, UseCaseError> {
+        let rows: Vec<Vec<String>>;
+
+        if bytes.starts_with(&[0x50, 0x4B, 0x03, 0x04]) {
+            match open_workbook_auto_from_rs(std::io::Cursor::new(bytes)) {
+                Ok(mut workbook) => {
+                    let sheets = workbook.sheet_names().to_vec();
+                    if sheets.is_empty() {
+                        return Err(UseCaseError::BadRequest("Excel文件中没有工作表".to_string()));
+                    }
+
+                    let range = match workbook.worksheet_range(&sheets[0]) {
+                        Ok(r) => r,
+                        Err(e) => return Err(UseCaseError::BadRequest(format!("无法读取Excel文件内容: {}", e))),
+                    };
+
+                    rows = range.rows()
+                        .map(|row| {
+                            row.iter()
+                                .map(|cell| match cell {
+                                    Data::Empty => "".to_string(),
+                                    Data::Int(v) => v.to_string(),
+                                    Data::Float(v) => v.to_string(),
+                                    Data::String(v) => v.to_string(),
+                                    Data::Bool(v) => v.to_string(),
+                                    _ => "".to_string(),
+                                })
+                                .collect()
+                        })
+                        .collect();
+                }
+                Err(e) => {
+                    return Err(UseCaseError::BadRequest(format!("读取Excel文件失败: {}", e)));
+                }
+            }
+        } else {
+            let content_str = String::from_utf8_lossy(&bytes).to_string();
+            rows = common::utils::parse_csv(&content_str);
+        }
+
+        if rows.len() < 2 {
+            return Err(UseCaseError::BadRequest("文件至少需要包含标题行和一行数据".to_string()));
+        }
+
+        let mut orders: std::collections::HashMap<String, (Vec<String>, Vec<Vec<String>>)> = std::collections::HashMap::new();
+
+        for row in rows.iter().skip(1) {
+            if row.len() < 3 {
+                continue;
+            }
+
+            let order_no = row[1].trim().to_string();
+            if order_no.is_empty() {
+                continue;
+            }
+
+            if !orders.contains_key(&order_no) {
+                orders.insert(order_no.clone(), (row.clone(), Vec::new()));
+            }
+
+            if row.len() > 9 && !row[9].trim().is_empty() {
+                let item: Vec<String> = row[9..].to_vec();
+                orders.get_mut(&order_no).unwrap().1.push(item);
+            }
+        }
+
+        let mut success = 0;
+        let mut failed = 0;
+
+        for (order_no, (order_row, items)) in orders {
+            let purchaser_name = if order_row.len() > 3 { order_row[3].trim() } else { "" };
+            let purchaser_id = if !purchaser_name.is_empty() {
+                self.repo.find_purchaser_id_by_name(purchaser_name).await.ok().flatten()
+            } else {
+                None
+            };
+
+            if purchaser_id.is_none() {
+                failed += 1;
+                continue;
+            }
+
+            let order_date = if order_row.len() > 2 { order_row[2].trim() } else { "" };
+            if order_date.is_empty() {
+                failed += 1;
+                continue;
+            }
+
+            let total_amount: f64 = if order_row.len() > 4 { order_row[4].trim().parse().unwrap_or(0.0) } else { 0.0 };
+            let discount_rate: f64 = if order_row.len() > 5 { order_row[5].trim().parse().unwrap_or(0.0) } else { 0.0 };
+            let final_amount: f64 = if order_row.len() > 6 { order_row[6].trim().parse().unwrap_or(0.0) } else { 0.0 };
+            let remark = if order_row.len() > 8 { order_row[8].trim() } else { "" };
+
+            let main = SalesOrderImportMain {
+                order_no: order_no.clone(),
+                purchaser_id: purchaser_id.unwrap(),
+                order_date: order_date.to_string(),
+                total_amount,
+                discount_rate,
+                final_amount,
+                remark: remark.to_string(),
+            };
+            let result = self.repo.insert_import_order(&main).await;
+
+            match result {
+                Ok((order_id, affected)) => {
+                    if affected > 0 {
+                        for item in items {
+                            if item.len() < 1 {
+                                continue;
+                            }
+
+                            let product_name = if item.len() > 0 { item[0].trim() } else { "" };
+                            let alias1 = if item.len() > 1 { item[1].trim() } else { "" };
+                            let alias2 = if item.len() > 2 { item[2].trim() } else { "" };
+                            let spec = if item.len() > 3 { item[3].trim() } else { "" };
+                            let unit = if item.len() > 4 { item[4].trim() } else { "个" };
+                            let unit_price: f64 = if item.len() > 5 { item[5].trim().parse().unwrap_or(0.0) } else { 0.0 };
+                            let quantity: f64 = if item.len() > 6 { item[6].trim().parse().unwrap_or(0.0) } else { 0.0 };
+                            let amount: f64 = if item.len() > 8 { item[8].trim().parse().unwrap_or(0.0) } else { 0.0 };
+                            let item_remark = if item.len() > 9 { item[9].trim() } else { "" };
+
+                            let product_id: i64 = self.repo.find_product_id_by_name_spec(product_name, spec)
+                                .await.ok().flatten().unwrap_or(0);
+
+                            // base_quantity 服务端按 product_unit.ratio 重算（有 ratio 时权威，否则回退模板值或 quantity）
+                            let computed_bq = if product_id > 0 {
+                                self.repo.unit_ratio(product_id, unit).await.ok().flatten()
+                                    .map(|ratio| ((quantity * ratio) * 100.0).round() / 100.0)
+                            } else { None };
+                            let bq = computed_bq.unwrap_or_else(|| {
+                                let from_sheet = if item.len() > 7 { item[7].trim().parse().unwrap_or(0.0) } else { 0.0 };
+                                if from_sheet > 0.0 { from_sheet } else { quantity }
+                            });
+
+                            let import_item = SalesOrderImportItem {
+                                product_id,
+                                product_name: product_name.to_string(),
+                                alias1: alias1.to_string(),
+                                alias2: alias2.to_string(),
+                                spec: spec.to_string(),
+                                unit: unit.to_string(),
+                                unit_price,
+                                quantity,
+                                base_quantity: bq,
+                                amount,
+                                remark: item_remark.to_string(),
+                            };
+                            let _ = self.repo.insert_import_item(order_id, &import_item).await;
+                        }
+                        success += 1;
+                    } else {
+                        failed += 1;
+                    }
+                }
+                Err(_) => {
+                    failed += 1;
+                }
+            }
+        }
+
+        let logs = vec![SalesOrderLog::new(
+            "sales_order.import",
+            String::new(),
+            format!("导入销售单：成功 {} 条，失败 {} 条", success, failed),
+        )];
+        Ok(SalesOrderOutcome::with_logs(
+            format!("导入完成：成功 {} 条，失败 {} 条", success, failed),
+            logs,
+        ))
+    }
+}
+
+/// 导出销售单列表工作簿（自旧 api_sales_order_export 平移，Vec<SqliteRow> → DTO）
+fn build_export_workbook(rows: Vec<SalesOrderExportRow>) -> Result<Vec<u8>, XlsxError> {
+    let mut workbook = Workbook::new();
+    let worksheet = workbook.add_worksheet();
+
+    let header_format = Format::new()
+        .set_bold()
+        .set_align(FormatAlign::Center)
+        .set_align(FormatAlign::VerticalCenter);
+
+    let headers = ["订单ID", "订单号", "订单日期", "采购单位", "总金额", "下浮率(%)", "下浮后合计", "状态", "备注", "商品名称", "下订名称(别称1)", "配单名称(别称2)", "规格", "单位", "预售数量", "数量", "单价", "基本数量", "金额", "商品备注"];
+    for (i, &header) in headers.iter().enumerate() {
+        worksheet.write_with_format(0, i as u16, header, &header_format)?;
+    }
+
+    let mut row_idx = 1;
+    for row in rows {
+        worksheet.write(row_idx, 0, row.id)?;
+        worksheet.write(row_idx, 1, row.order_no.clone())?;
+        worksheet.write(row_idx, 2, row.order_date.clone())?;
+        worksheet.write(row_idx, 3, row.purchaser_name.clone())?;
+        worksheet.write(row_idx, 4, row.total_amount)?;
+        worksheet.write(row_idx, 5, row.discount_rate)?;
+        worksheet.write(row_idx, 6, row.final_amount)?;
+        worksheet.write(row_idx, 7, row.status.clone())?;
+        worksheet.write(row_idx, 8, row.remark.clone().unwrap_or_default())?;
+        worksheet.write(row_idx, 9, row.product_name.clone().unwrap_or_default())?;
+        worksheet.write(row_idx, 10, row.alias1.clone().unwrap_or_default())?;
+        worksheet.write(row_idx, 11, row.alias2.clone().unwrap_or_default())?;
+        worksheet.write(row_idx, 12, row.spec.clone().unwrap_or_default())?;
+        worksheet.write(row_idx, 13, row.unit.clone().unwrap_or_default())?;
+        worksheet.write(row_idx, 14, row.pre_sale_quantity.unwrap_or(0.0))?;
+        worksheet.write(row_idx, 15, row.quantity.unwrap_or(0.0))?;
+        worksheet.write(row_idx, 16, row.unit_price.unwrap_or(0.0))?;
+        worksheet.write(row_idx, 17, row.base_quantity.unwrap_or(0.0))?;
+        worksheet.write(row_idx, 18, row.amount.unwrap_or(0.0))?;
+        worksheet.write(row_idx, 19, row.item_remark.clone().unwrap_or_default())?;
+        row_idx += 1;
+    }
+
+    worksheet.set_column_width(0, 8)?;
+    worksheet.set_column_width(1, 18)?;
+    worksheet.set_column_width(2, 12)?;
+    worksheet.set_column_width(3, 15)?;
+    worksheet.set_column_width(4, 10)?;
+    worksheet.set_column_width(5, 12)?;
+    worksheet.set_column_width(6, 12)?;
+    worksheet.set_column_width(7, 8)?;
+    worksheet.set_column_width(8, 15)?;
+    worksheet.set_column_width(9, 15)?;
+    worksheet.set_column_width(10, 15)?;
+    worksheet.set_column_width(11, 15)?;
+    worksheet.set_column_width(12, 10)?;
+    worksheet.set_column_width(13, 8)?;
+    worksheet.set_column_width(14, 10)?;
+    worksheet.set_column_width(15, 8)?;
+    worksheet.set_column_width(16, 8)?;
+    worksheet.set_column_width(17, 10)?;
+    worksheet.set_column_width(18, 10)?;
+    worksheet.set_column_width(19, 15)?;
+
+    workbook.save_to_buffer()
 }

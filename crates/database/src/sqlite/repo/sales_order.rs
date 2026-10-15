@@ -616,4 +616,119 @@ impl SalesOrderRepo for SqliteSalesOrderRepo {
 
         (discount_rate, amount_reduction)
     }
+
+    async fn export_rows(&self, keyword_pattern: &str, purchaser_id: Option<i64>) -> Result<Vec<SalesOrderExportRow>, DomainError> {
+        let base_sql = "SELECT so.id, so.order_no, so.order_date, so.total_amount, so.discount_rate, so.final_amount, so.status, so.remark, p.name as purchaser_name,
+                               soi.product_name, soi.alias1, soi.alias2, soi.spec, soi.unit, soi.pre_sale_quantity, soi.quantity, soi.unit_price, soi.base_quantity, soi.amount, soi.remark as item_remark
+                        FROM sales_order so
+                        JOIN purchaser p ON so.purchaser_id = p.id
+                        LEFT JOIN sales_order_item soi ON so.id = soi.order_id
+                        WHERE (so.order_no LIKE ? OR p.name LIKE ? OR so.order_date LIKE ?)";
+        let rows = if let Some(pid) = purchaser_id {
+            let sql = format!("{} AND so.purchaser_id = ? ORDER BY so.id, soi.id", base_sql);
+            sqlx::query(AssertSqlSafe(sql.as_str()))
+                .bind(keyword_pattern).bind(keyword_pattern).bind(keyword_pattern)
+                .bind(pid)
+                .fetch_all(&self.pool).await.map_err(storage)?
+        } else {
+            let sql = format!("{} ORDER BY so.id, soi.id", base_sql);
+            sqlx::query(AssertSqlSafe(sql.as_str()))
+                .bind(keyword_pattern).bind(keyword_pattern).bind(keyword_pattern)
+                .fetch_all(&self.pool).await.map_err(storage)?
+        };
+        Ok(rows
+            .iter()
+            .map(|row| SalesOrderExportRow {
+                id: row.get::<i64, _>("id"),
+                order_no: row.get::<String, _>("order_no"),
+                order_date: row.get::<String, _>("order_date"),
+                total_amount: row.get::<f64, _>("total_amount"),
+                discount_rate: row.get::<f64, _>("discount_rate"),
+                final_amount: row.get::<f64, _>("final_amount"),
+                status: row.get::<String, _>("status"),
+                remark: row.get::<Option<String>, _>("remark"),
+                purchaser_name: row.get::<String, _>("purchaser_name"),
+                product_name: row.get::<Option<String>, _>("product_name"),
+                alias1: row.get::<Option<String>, _>("alias1"),
+                alias2: row.get::<Option<String>, _>("alias2"),
+                spec: row.get::<Option<String>, _>("spec"),
+                unit: row.get::<Option<String>, _>("unit"),
+                pre_sale_quantity: row.get::<Option<f64>, _>("pre_sale_quantity"),
+                quantity: row.get::<Option<f64>, _>("quantity"),
+                unit_price: row.get::<Option<f64>, _>("unit_price"),
+                base_quantity: row.get::<Option<f64>, _>("base_quantity"),
+                amount: row.get::<Option<f64>, _>("amount"),
+                item_remark: row.get::<Option<String>, _>("item_remark"),
+            })
+            .collect())
+    }
+
+    async fn find_purchaser_id_by_name(&self, name: &str) -> Result<Option<i64>, DomainError> {
+        let row = sqlx::query("SELECT id FROM purchaser WHERE name = ?")
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?;
+        Ok(row.map(|r| r.get::<i64, _>("id")))
+    }
+
+    async fn insert_import_order(&self, main: &SalesOrderImportMain) -> Result<(i64, u64), DomainError> {
+        let res = sqlx::query(
+            "INSERT OR IGNORE INTO sales_order(order_no, purchaser_id, order_date, total_amount, discount_rate, final_amount, remark, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')"
+        )
+        .bind(&main.order_no)
+        .bind(main.purchaser_id)
+        .bind(&main.order_date)
+        .bind(main.total_amount)
+        .bind(main.discount_rate)
+        .bind(main.final_amount)
+        .bind(&main.remark)
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok((res.last_insert_rowid(), res.rows_affected()))
+    }
+
+    async fn find_product_id_by_name_spec(&self, name: &str, spec: &str) -> Result<Option<i64>, DomainError> {
+        let row = sqlx::query("SELECT id FROM product WHERE name = ? AND (spec IS NULL OR spec = ?)")
+            .bind(name)
+            .bind(spec)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?;
+        Ok(row.map(|r| r.get::<i64, _>("id")))
+    }
+
+    async fn unit_ratio(&self, product_id: i64, unit: &str) -> Result<Option<f64>, DomainError> {
+        let row = sqlx::query("SELECT ratio FROM product_unit WHERE product_id = ? AND unit_name = ?")
+            .bind(product_id)
+            .bind(unit)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?;
+        Ok(row.map(|r| r.get::<f64, _>("ratio")))
+    }
+
+    async fn insert_import_item(&self, order_id: i64, item: &SalesOrderImportItem) -> Result<(), DomainError> {
+        sqlx::query(
+            "INSERT INTO sales_order_item(order_id, product_id, product_name, alias1, alias2, spec, unit, unit_price, quantity, base_quantity, amount, pre_sale_quantity, remark) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(order_id)
+        .bind(item.product_id)
+        .bind(&item.product_name)
+        .bind(&item.alias1)
+        .bind(&item.alias2)
+        .bind(&item.spec)
+        .bind(&item.unit)
+        .bind(item.unit_price)
+        .bind(item.quantity)
+        .bind(item.base_quantity)
+        .bind(item.amount)
+        .bind(0.0f64)
+        .bind(&item.remark)
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(())
+    }
 }

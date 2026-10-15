@@ -2270,103 +2270,15 @@ pub async fn api_sales_order_delete(State(app): State<App>, headers: axum::http:
 }
 
 pub async fn api_sales_order_export(
+    State(app): State<App>,
     headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    // 行级数据权限：purchaser 只能导出自己采购单位的销售单
+    // 行级数据权限：purchaser 只能导出自己采购单位的销售单（强制逻辑在用例层）
     let ctx = crate::auth::get_user_ctx(&headers).await;
     let keyword_pattern = parse_keyword_pattern(&params);
-
-    // 行级数据权限 + 筛选：purchaser 强制只看自己，其他角色可按 purchaser_id 过滤
-    let purchaser_id: Option<i64> = if ctx.role == "purchaser" {
-        if ctx.purchaser_id > 0 { Some(ctx.purchaser_id) } else { Some(-1) }
-    } else {
-        params.get("purchaser_id").and_then(|s| s.parse().ok())
-    };
-
-    let base_sql = "SELECT so.id, so.order_no, so.order_date, so.total_amount, so.discount_rate, so.final_amount, so.status, so.remark, p.name as purchaser_name,
-                           soi.product_name, soi.alias1, soi.alias2, soi.spec, soi.unit, soi.pre_sale_quantity, soi.quantity, soi.unit_price, soi.base_quantity, soi.amount, soi.remark as item_remark
-                    FROM sales_order so
-                    JOIN purchaser p ON so.purchaser_id = p.id
-                    LEFT JOIN sales_order_item soi ON so.id = soi.order_id
-                    WHERE (so.order_no LIKE ? OR p.name LIKE ? OR so.order_date LIKE ?)";
-    let rows: Vec<sqlx::sqlite::SqliteRow> = if let Some(pid) = purchaser_id {
-        let sql = format!("{} AND so.purchaser_id = ? ORDER BY so.id, soi.id", base_sql);
-        let q = sqlx::query(AssertSqlSafe(sql.as_str()))
-            .bind(&keyword_pattern).bind(&keyword_pattern).bind(&keyword_pattern)
-            .bind(pid);
-        q.fetch_all(crate::db::pool()).await.unwrap_or_default()
-    } else {
-        let sql = format!("{} ORDER BY so.id, soi.id", base_sql);
-        let q = sqlx::query(AssertSqlSafe(sql.as_str()))
-            .bind(&keyword_pattern).bind(&keyword_pattern).bind(&keyword_pattern);
-        q.fetch_all(crate::db::pool()).await.unwrap_or_default()
-    };
-
-    let result: Result<Vec<u8>, XlsxError> = (|| {
-        let mut workbook = Workbook::new();
-        let worksheet = workbook.add_worksheet();
-
-        let header_format = Format::new()
-            .set_bold()
-            .set_align(FormatAlign::Center)
-            .set_align(FormatAlign::VerticalCenter);
-
-        let headers = ["订单ID", "订单号", "订单日期", "采购单位", "总金额", "下浮率(%)", "下浮后合计", "状态", "备注", "商品名称", "下订名称(别称1)", "配单名称(别称2)", "规格", "单位", "预售数量", "数量", "单价", "基本数量", "金额", "商品备注"];
-        for (i, &header) in headers.iter().enumerate() {
-            worksheet.write_with_format(0, i as u16, header, &header_format)?;
-        }
-
-        let mut row_idx = 1;
-        for row in rows {
-            worksheet.write(row_idx, 0, row.get::<i64, _>("id"))?;
-            worksheet.write(row_idx, 1, row.get::<String, _>("order_no"))?;
-            worksheet.write(row_idx, 2, row.get::<String, _>("order_date"))?;
-            worksheet.write(row_idx, 3, row.get::<String, _>("purchaser_name"))?;
-            worksheet.write(row_idx, 4, row.get::<f64, _>("total_amount"))?;
-            worksheet.write(row_idx, 5, row.get::<f64, _>("discount_rate"))?;
-            worksheet.write(row_idx, 6, row.get::<f64, _>("final_amount"))?;
-            worksheet.write(row_idx, 7, row.get::<String, _>("status"))?;
-            worksheet.write(row_idx, 8, row.get::<Option<String>, _>("remark").unwrap_or_default())?;
-            worksheet.write(row_idx, 9, row.get::<Option<String>, _>("product_name").unwrap_or_default())?;
-            worksheet.write(row_idx, 10, row.get::<Option<String>, _>("alias1").unwrap_or_default())?;
-            worksheet.write(row_idx, 11, row.get::<Option<String>, _>("alias2").unwrap_or_default())?;
-            worksheet.write(row_idx, 12, row.get::<Option<String>, _>("spec").unwrap_or_default())?;
-            worksheet.write(row_idx, 13, row.get::<Option<String>, _>("unit").unwrap_or_default())?;
-            worksheet.write(row_idx, 14, row.get::<Option<f64>, _>("pre_sale_quantity").unwrap_or(0.0))?;
-            worksheet.write(row_idx, 15, row.get::<Option<f64>, _>("quantity").unwrap_or(0.0))?;
-            worksheet.write(row_idx, 16, row.get::<Option<f64>, _>("unit_price").unwrap_or(0.0))?;
-            worksheet.write(row_idx, 17, row.get::<Option<f64>, _>("base_quantity").unwrap_or(0.0))?;
-            worksheet.write(row_idx, 18, row.get::<Option<f64>, _>("amount").unwrap_or(0.0))?;
-            worksheet.write(row_idx, 19, row.get::<Option<String>, _>("item_remark").unwrap_or_default())?;
-            row_idx += 1;
-        }
-
-        worksheet.set_column_width(0, 8)?;
-        worksheet.set_column_width(1, 18)?;
-        worksheet.set_column_width(2, 12)?;
-        worksheet.set_column_width(3, 15)?;
-        worksheet.set_column_width(4, 10)?;
-        worksheet.set_column_width(5, 12)?;
-        worksheet.set_column_width(6, 12)?;
-        worksheet.set_column_width(7, 8)?;
-        worksheet.set_column_width(8, 15)?;
-        worksheet.set_column_width(9, 15)?;
-        worksheet.set_column_width(10, 15)?;
-        worksheet.set_column_width(11, 15)?;
-        worksheet.set_column_width(12, 10)?;
-        worksheet.set_column_width(13, 8)?;
-        worksheet.set_column_width(14, 10)?;
-        worksheet.set_column_width(15, 8)?;
-        worksheet.set_column_width(16, 8)?;
-        worksheet.set_column_width(17, 10)?;
-        worksheet.set_column_width(18, 10)?;
-        worksheet.set_column_width(19, 15)?;
-
-        workbook.save_to_buffer()
-    })();
-
-    match result {
+    let purchaser_id = params.get("purchaser_id").and_then(|s| s.parse().ok());
+    match app.sales_order.export(&ctx, keyword_pattern, purchaser_id).await {
         Ok(data) => (
             StatusCode::OK,
             [
@@ -2375,207 +2287,25 @@ pub async fn api_sales_order_export(
             ],
             data,
         ).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("导出失败: {}", e)).into_response(),
+        Err(e) => text_error_response(e).into_response(),
     }
 }
 
-pub async fn api_sales_order_import(headers: axum::http::HeaderMap, content: Bytes) -> impl IntoResponse {
+pub async fn api_sales_order_import(State(app): State<App>, headers: axum::http::HeaderMap, content: Bytes) -> impl IntoResponse {
     match crate::auth::check_api_permission(&headers, "/api/sales_order/import").await {
         Err(e) => return e.into_response(),
         Ok(_) => {}
     }
     let ctx = crate::auth::get_user_ctx(&headers).await;
-
-    let rows: Vec<Vec<String>>;
-    
-    if content.starts_with(&[0x50, 0x4B, 0x03, 0x04]) {
-        let content_vec = content.to_vec();
-        match open_workbook_auto_from_rs(std::io::Cursor::new(content_vec)) {
-            Ok(mut workbook) => {
-                let sheets = workbook.sheet_names().to_vec();
-                if sheets.is_empty() {
-                    return (StatusCode::BAD_REQUEST, "Excel文件中没有工作表".to_string()).into_response();
-                }
-                
-                let range = match workbook.worksheet_range(&sheets[0]) {
-                    Ok(r) => r,
-                    Err(e) => return (StatusCode::BAD_REQUEST, format!("无法读取Excel文件内容: {}", e)).into_response(),
-                };
-                
-                rows = range.rows()
-                    .map(|row| {
-                        row.iter()
-                            .map(|cell| match cell {
-                                Data::Empty => "".to_string(),
-                                Data::Int(v) => v.to_string(),
-                                Data::Float(v) => v.to_string(),
-                                Data::String(v) => v.to_string(),
-                                Data::Bool(v) => v.to_string(),
-                                _ => "".to_string(),
-                            })
-                            .collect()
-                    })
-                    .collect();
+    match app.sales_order.import(content.to_vec(), &ctx).await {
+        Ok(outcome) => {
+            for log in &outcome.logs {
+                crate::auth::log_operation(&ctx, &log.action, &log.target_type, &log.target_id, &log.detail).await;
             }
-            Err(e) => {
-                return (StatusCode::BAD_REQUEST, format!("读取Excel文件失败: {}", e)).into_response();
-            }
+            (StatusCode::OK, outcome.body).into_response()
         }
-    } else {
-        let content_str = String::from_utf8_lossy(&content).to_string();
-        rows = parse_csv(&content_str);
+        Err(e) => text_error_response(e).into_response(),
     }
-    
-    if rows.len() < 2 {
-        return (StatusCode::BAD_REQUEST, "文件至少需要包含标题行和一行数据".to_string()).into_response();
-    }
-    
-    let mut orders: std::collections::HashMap<String, (Vec<String>, Vec<Vec<String>>)> = std::collections::HashMap::new();
-    
-    for row in rows.iter().skip(1) {
-        if row.len() < 3 {
-            continue;
-        }
-        
-        let order_no = row[1].trim().to_string();
-        if order_no.is_empty() {
-            continue;
-        }
-        
-        if !orders.contains_key(&order_no) {
-            orders.insert(order_no.clone(), (row.clone(), Vec::new()));
-        }
-        
-        if row.len() > 9 && !row[9].trim().is_empty() {
-            let item: Vec<String> = row[9..].to_vec();
-            orders.get_mut(&order_no).unwrap().1.push(item);
-        }
-    }
-    
-    let mut success = 0;
-    let mut failed = 0;
-    
-    for (order_no, (order_row, items)) in orders {
-        let purchaser_name = if order_row.len() > 3 { order_row[3].trim() } else { "" };
-        let purchaser_id = if !purchaser_name.is_empty() {
-            let pid: Option<i64> = sqlx::query("SELECT id FROM purchaser WHERE name = ?")
-                .bind(purchaser_name)
-                .fetch_optional(crate::db::pool())
-                .await
-                .ok()
-                .flatten()
-                .map(|r| r.get::<i64, _>("id"));
-            pid
-        } else {
-            None
-        };
-        
-        if purchaser_id.is_none() {
-            failed += 1;
-            continue;
-        }
-        
-        let order_date = if order_row.len() > 2 { order_row[2].trim() } else { "" };
-        if order_date.is_empty() {
-            failed += 1;
-            continue;
-        }
-        
-        let total_amount: f64 = if order_row.len() > 4 { order_row[4].trim().parse().unwrap_or(0.0) } else { 0.0 };
-        let discount_rate: f64 = if order_row.len() > 5 { order_row[5].trim().parse().unwrap_or(0.0) } else { 0.0 };
-        let final_amount: f64 = if order_row.len() > 6 { order_row[6].trim().parse().unwrap_or(0.0) } else { 0.0 };
-        let remark = if order_row.len() > 8 { order_row[8].trim() } else { "" };
-        
-        let result = sqlx::query(
-            "INSERT OR IGNORE INTO sales_order(order_no, purchaser_id, order_date, total_amount, discount_rate, final_amount, remark, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')"
-        )
-        .bind(&order_no)
-        .bind(purchaser_id.unwrap())
-        .bind(order_date)
-        .bind(total_amount)
-        .bind(discount_rate)
-        .bind(final_amount)
-        .bind(remark)
-        .execute(crate::db::pool())
-        .await;
-        
-        match result {
-            Ok(res) => {
-                if res.rows_affected() > 0 {
-                    let order_id = res.last_insert_rowid();
-                    for item in items {
-                        if item.len() < 1 {
-                            continue;
-                        }
-                        
-                        let product_name = if item.len() > 0 { item[0].trim() } else { "" };
-                        let alias1 = if item.len() > 1 { item[1].trim() } else { "" };
-                        let alias2 = if item.len() > 2 { item[2].trim() } else { "" };
-                        let spec = if item.len() > 3 { item[3].trim() } else { "" };
-                        let unit = if item.len() > 4 { item[4].trim() } else { "个" };
-                        let unit_price: f64 = if item.len() > 5 { item[5].trim().parse().unwrap_or(0.0) } else { 0.0 };
-                        let quantity: f64 = if item.len() > 6 { item[6].trim().parse().unwrap_or(0.0) } else { 0.0 };
-                        let amount: f64 = if item.len() > 8 { item[8].trim().parse().unwrap_or(0.0) } else { 0.0 };
-                        let item_remark = if item.len() > 9 { item[9].trim() } else { "" };
-                        
-                        let product_id: i64 = sqlx::query("SELECT id FROM product WHERE name = ? AND (spec IS NULL OR spec = ?)")
-                            .bind(product_name)
-                            .bind(spec)
-                            .fetch_optional(crate::db::pool())
-                            .await
-                            .ok()
-                            .flatten()
-                            .map(|r| r.get::<i64, _>("id"))
-                            .unwrap_or(0);
-
-                        // base_quantity 服务端按 product_unit.ratio 重算（有 ratio 时权威，否则回退模板值或 quantity）
-                        let computed_bq = if product_id > 0 {
-                            sqlx::query("SELECT ratio FROM product_unit WHERE product_id = ? AND unit_name = ?")
-                                .bind(product_id).bind(unit)
-                                .fetch_optional(crate::db::pool()).await
-                                .ok().flatten()
-                                .map(|r| ((quantity * r.get::<f64, _>("ratio")) * 100.0).round() / 100.0)
-                        } else { None };
-                        let bq = computed_bq.unwrap_or_else(|| {
-                            let from_sheet = if item.len() > 7 { item[7].trim().parse().unwrap_or(0.0) } else { 0.0 };
-                            if from_sheet > 0.0 { from_sheet } else { quantity }
-                        });
-
-                        sqlx::query(
-                            "INSERT INTO sales_order_item(order_id, product_id, product_name, alias1, alias2, spec, unit, unit_price, quantity, base_quantity, amount, pre_sale_quantity, remark) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                        )
-                        .bind(order_id)
-                        .bind(product_id)
-                        .bind(product_name)
-                        .bind(alias1)
-                        .bind(alias2)
-                        .bind(spec)
-                        .bind(unit)
-                        .bind(unit_price)
-                        .bind(quantity)
-                        .bind(bq)
-                        .bind(amount)
-                        .bind(0.0f64)
-                        .bind(item_remark)
-                        .execute(crate::db::pool())
-                        .await
-                        .ok();
-                    }
-                    success += 1;
-                } else {
-                    failed += 1;
-                }
-            }
-            Err(_) => {
-                failed += 1;
-            }
-        }
-    }
-    
-    crate::auth::log_operation(&ctx, "sales_order.import", "sales_order", "",
-        &format!("导入销售单：成功 {} 条，失败 {} 条", success, failed)).await;
-
-    (StatusCode::OK, format!("导入完成：成功 {} 条，失败 {} 条", success, failed)).into_response()
 }
 
 pub async fn api_query_purchase_order(headers: axum::http::HeaderMap, axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
