@@ -2,8 +2,8 @@
 //!
 //! 行为保持：明细插入失败吞错（repo 内 .ok()）；列表查询失败吞错返回空数组。
 
-use domain::port::food_accept::FoodAcceptRepo;
-use domain::AcceptReq;
+use domain::port::food_accept::{AcceptInput, FoodAcceptRepo};
+use crate::dto::AcceptReq;
 
 use crate::error::UseCaseError;
 use crate::port::food_accept::FoodAcceptUseCase;
@@ -21,6 +21,8 @@ impl<R: FoodAcceptRepo> FoodAcceptService<R> {
 
 impl<R: FoodAcceptRepo> FoodAcceptUseCase for FoodAcceptService<R> {
     async fn create(&self, req: AcceptReq) -> Result<(), UseCaseError> {
+        // HTTP 契约 → domain 端口输入类型（字段同名同序，下游字段访问不变）
+        let req = AcceptInput::from(req);
         // 旧行为：主记录 Err → 仅 500 状态码；Ok → 仅 200 状态码（无响应体）
         self.repo.create(&req).await.map(|_| ()).map_err(|_| UseCaseError::Storage(String::new()))
     }

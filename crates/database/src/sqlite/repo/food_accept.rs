@@ -4,8 +4,7 @@ use sqlx::sqlite::SqlitePool;
 use sqlx::Row;
 
 use domain::error::DomainError;
-use domain::port::food_accept::{FoodAcceptRepo, FoodAcceptRow};
-use domain::AcceptReq;
+use domain::port::food_accept::{AcceptInput, FoodAcceptRepo, FoodAcceptRow};
 
 #[derive(Clone)]
 pub struct SqliteFoodAcceptRepo {
@@ -23,7 +22,7 @@ fn storage(e: sqlx::Error) -> DomainError {
 }
 
 impl FoodAcceptRepo for SqliteFoodAcceptRepo {
-    async fn create(&self, req: &AcceptReq) -> Result<i64, DomainError> {
+    async fn create(&self, req: &AcceptInput) -> Result<i64, DomainError> {
         let res = sqlx::query(
             "INSERT INTO food_accept(supplier_id, purchaser_id, car_no, supply_time, total_price, discount_rate, final_price) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )

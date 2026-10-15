@@ -5,9 +5,9 @@
 
 use calamine::Reader;
 use chrono::Local;
-use domain::PriceScheduleReq;
+use crate::dto::PriceScheduleReq;
 use domain::UserCtx;
-use domain::port::price_schedule::{PriceScheduleRepo, ScheduleFilter, ScheduleListRow};
+use domain::port::price_schedule::{PriceScheduleInput, PriceScheduleRepo, ScheduleFilter, ScheduleListRow};
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook, XlsxError};
 
 use crate::error::UseCaseError;
@@ -40,7 +40,7 @@ fn is_valid_price_type(price_type: &str) -> bool {
 }
 
 /// 校验 price_schedule 录入请求的字段合法性，返回错误信息字符串（None 表示通过）
-fn validate_price_schedule_req(req: &PriceScheduleReq) -> Option<String> {
+fn validate_price_schedule_req(req: &PriceScheduleInput) -> Option<String> {
     if req.product_id <= 0 {
         return Some("product_id 必须大于 0".to_string());
     }
@@ -129,7 +129,7 @@ impl<R: PriceScheduleRepo> PriceScheduleService<R> {
     /// 批量导入核心写循环（upsert/ignore 两策略；通用价带 NULL 条件），返回 (inserted, skipped, errors, affected_keys)
     async fn import_loop(
         &self,
-        validated: &[PriceScheduleReq],
+        validated: &[PriceScheduleInput],
         policy: &str,
         mut errors: Vec<String>,
     ) -> (i64, i64, Vec<String>, std::collections::HashSet<(i64, String)>) {
@@ -210,6 +210,8 @@ impl<R: PriceScheduleRepo> PriceScheduleService<R> {
 
 impl<R: PriceScheduleRepo> PriceScheduleUseCase for PriceScheduleService<R> {
     async fn create(&self, req: PriceScheduleReq) -> Result<PriceScheduleOutcome, UseCaseError> {
+        // HTTP 契约 → domain 端口输入类型（字段同名同序，下游字段访问不变）
+        let req = PriceScheduleInput::from(req);
         // 价格策略是独立的价格时段数据，与商品基础信息的审核状态无关，
         // 因此不做「商品已审核则禁止修改」的锁定校验（市场价格随时变动，需随时可录入）
         if let Some(err) = validate_price_schedule_req(&req) {
@@ -247,6 +249,8 @@ impl<R: PriceScheduleRepo> PriceScheduleUseCase for PriceScheduleService<R> {
     }
 
     async fn update(&self, req: PriceScheduleReq) -> Result<PriceScheduleOutcome, UseCaseError> {
+        // HTTP 契约 → domain 端口输入类型（字段同名同序，下游字段访问不变）
+        let req = PriceScheduleInput::from(req);
         let id = match req.id {
             Some(i) if i > 0 => i,
             _ => return Err(UseCaseError::RawResponse(400, "{\"success\":false, \"message\":\"id 必填\"}".to_string())),
@@ -348,11 +352,13 @@ impl<R: PriceScheduleRepo> PriceScheduleUseCase for PriceScheduleService<R> {
     }
 
     async fn batch_import(&self, items: Vec<PriceScheduleReq>, conflict_policy: Option<String>) -> PriceScheduleOutcome {
+        // HTTP 契约 → domain 端口输入类型（字段同名同序，下游字段访问不变）
+        let items: Vec<PriceScheduleInput> = items.into_iter().map(PriceScheduleInput::from).collect();
         let policy = conflict_policy.unwrap_or_else(|| "upsert".to_string());
 
         // 预校验：相同 (product, price_type, effective_date) 在本次请求内去重
         let mut seen: std::collections::HashSet<(i64, String, String)> = std::collections::HashSet::new();
-        let mut validated: Vec<PriceScheduleReq> = Vec::new();
+        let mut validated: Vec<PriceScheduleInput> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
         for it in items {
             if let Some(e) = validate_price_schedule_req(&it) {
@@ -804,7 +810,7 @@ impl<R: PriceScheduleRepo> PriceScheduleUseCase for PriceScheduleService<R> {
         let idx_remark = col_idx_of("备注");
 
         // 解析行：从表头行的下一行开始（表头可能位于第 4 行而非第 1 行）
-        let mut items: Vec<PriceScheduleReq> = Vec::new();
+        let mut items: Vec<PriceScheduleInput> = Vec::new();
         let mut parse_errors: Vec<String> = Vec::new();
         for (row_idx, row) in rows.iter().enumerate().skip(header_idx + 1) {
             // 跳过全空行
@@ -847,7 +853,7 @@ impl<R: PriceScheduleRepo> PriceScheduleUseCase for PriceScheduleService<R> {
                 }
             };
 
-            items.push(PriceScheduleReq {
+            items.push(PriceScheduleInput {
                 id: None,
                 product_id: pid,
                 price_type,
@@ -877,7 +883,7 @@ impl<R: PriceScheduleRepo> PriceScheduleUseCase for PriceScheduleService<R> {
 
         // 复用 batch_import 的核心逻辑
         let mut seen: std::collections::HashSet<(i64, String, String)> = std::collections::HashSet::new();
-        let mut validated: Vec<PriceScheduleReq> = Vec::new();
+        let mut validated: Vec<PriceScheduleInput> = Vec::new();
         let mut errors = parse_errors;
         for it in items {
             if let Some(e) = validate_price_schedule_req(&it) {

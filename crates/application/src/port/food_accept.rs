@@ -1,6 +1,6 @@
 //! 验收单域入站端口（UseCase 契约）
 
-use domain::AcceptReq;
+use crate::dto::AcceptReq;
 
 use crate::error::UseCaseError;
 

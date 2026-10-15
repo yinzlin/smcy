@@ -3,7 +3,6 @@
 //! SQL 与旧 api_price_schedule_* handler 及 application::service::price 过渡态函数逐字一致，
 //! 行为保持注释见各方法。
 
-use crate::PriceScheduleReq;
 use crate::error::DomainError;
 
 /// 列表/单条查询行（JOIN product/supplier/purchaser 带回名称）
@@ -89,7 +88,7 @@ pub struct BackfillItemRow {
 /// 采购明细进价更新输入（domain 自有类型，不含 serde）
 ///
 /// 供 `PriceScheduleRepo::update_product_purchase_prices` 使用：由 application 层把
-/// HTTP 契约（`PurchaseOrderItemReq`）映射为本结构体后送入端口。
+/// HTTP 采购明细契约映射为本结构体后送入端口。
 #[derive(Debug, Clone)]
 pub struct PurchasePriceInput {
     pub product_id: i64,
@@ -109,14 +108,31 @@ pub struct ScheduleFilter {
     pub keyword: String,
 }
 
+/// 价格策略时段写入输入（domain 自有类型，不含 serde）
+///
+/// 由 application 层把 HTTP 价格时段契约映射为本结构体后送入端口。
+#[derive(Debug, Clone)]
+pub struct PriceScheduleInput {
+    pub id: Option<i64>,
+    pub product_id: i64,
+    pub price_type: String,
+    pub price: f64,
+    pub effective_date: String,
+    pub end_date: Option<String>,
+    pub source: Option<String>,
+    pub remark: Option<String>,
+    pub supplier_id: Option<i64>,
+    pub purchaser_id: Option<i64>,
+}
+
 /// 价格策略仓储端口
 pub trait PriceScheduleRepo: Send + Sync {
     /// 新增时段（end_date 强制 NULL；返回 last_insert_rowid；UNIQUE 冲突以 Err 返回且消息含 "UNIQUE"）
-    async fn create(&self, req: &PriceScheduleReq, price: f64) -> Result<i64, DomainError>;
+    async fn create(&self, req: &PriceScheduleInput, price: f64) -> Result<i64, DomainError>;
     /// 按 id 查 (product_id, price_type)（update/delete 前取原组合；查询失败按旧行为吞为 None）
     async fn get_product_type(&self, id: i64) -> Result<Option<(i64, String)>, DomainError>;
     /// 更新时段（返回 rows_affected）
-    async fn update(&self, id: i64, req: &PriceScheduleReq) -> Result<u64, DomainError>;
+    async fn update(&self, id: i64, req: &PriceScheduleInput) -> Result<u64, DomainError>;
     /// 删除时段（返回 rows_affected）
     async fn delete(&self, id: i64) -> Result<u64, DomainError>;
     /// 列表总数（动态 WHERE；失败由用例层吞为 0）
@@ -144,9 +160,9 @@ pub trait PriceScheduleRepo: Send + Sync {
     /// 按键更新价格/来源/备注（Excel 导入分支，返回 rows_affected；失败返回 Err 由用例层收集）
     async fn update_price_by_key(&self, product_id: i64, price_type: &str, effective_date: &str, price: f64, source: &Option<String>, remark: &Option<String>) -> Result<u64, DomainError>;
     /// 插入通用价（supplier_id/purchaser_id 写 NULL；失败返回 Err 由用例层收集）
-    async fn insert_general(&self, req: &PriceScheduleReq, price: f64) -> Result<(), DomainError>;
+    async fn insert_general(&self, req: &PriceScheduleInput, price: f64) -> Result<(), DomainError>;
     /// 插入 Excel 导入行（无 supplier/purchaser 列；失败返回 Err 由用例层收集）
-    async fn insert_excel(&self, req: &PriceScheduleReq, price: f64) -> Result<(), DomainError>;
+    async fn insert_excel(&self, req: &PriceScheduleInput, price: f64) -> Result<(), DomainError>;
     /// 维护 (product, price_type) 时段连续性：按 (supplier_id, purchaser_id) 分组重写 end_date
     /// （首查失败返回 Err；逐条 UPDATE 失败吞错，与旧 rebuild_price_schedule_end_dates 一致）
     async fn rebuild_end_dates(&self, product_id: i64, price_type: &str) -> Result<(), DomainError>;

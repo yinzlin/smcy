@@ -252,7 +252,7 @@ impl<R: ProductRepo, S: RemoteImageStore + ProductImageStore, P: PriceScheduleRe
             .into()
     }
 
-    async fn create(&self, is_super_admin: bool, req: domain::ProductReq) -> Result<(), UseCaseError> {
+    async fn create(&self, is_super_admin: bool, req: crate::dto::ProductReq) -> Result<(), UseCaseError> {
         // 进价仅超级管理员可设置：非 super_admin 创建商品时进价强制为 0
         let base_unit = req
             .base_unit
@@ -311,7 +311,7 @@ impl<R: ProductRepo, S: RemoteImageStore + ProductImageStore, P: PriceScheduleRe
         }
     }
 
-    async fn update(&self, is_super_admin: bool, req: domain::ProductUpdateReq) -> Result<String, UseCaseError> {
+    async fn update(&self, is_super_admin: bool, req: crate::dto::ProductUpdateReq) -> Result<String, UseCaseError> {
         self.ensure_not_confirmed(req.id).await?;
         // 读取旧值用于日志；行为保持：查询失败旧 .ok().flatten() → 默认值
         let snapshot: PriceSnapshot = self
@@ -689,7 +689,7 @@ impl<R: ProductRepo, S: RemoteImageStore + ProductImageStore, P: PriceScheduleRe
         }
     }
 
-    async fn unit_create(&self, req: domain::ProductUnitReq) -> Result<String, UseCaseError> {
+    async fn unit_create(&self, req: crate::dto::ProductUnitReq) -> Result<String, UseCaseError> {
         // 商品单位属价格维度（随时变动），不受商品基础信息审核状态锁定
         // 价格统一四舍五入保留两位小数
         let u = NewProductUnit {
@@ -710,7 +710,7 @@ impl<R: ProductRepo, S: RemoteImageStore + ProductImageStore, P: PriceScheduleRe
         }
     }
 
-    async fn unit_update(&self, req: domain::ProductUnitReq) -> Result<String, UseCaseError> {
+    async fn unit_update(&self, req: crate::dto::ProductUnitReq) -> Result<String, UseCaseError> {
         // 行为保持：旧 SQL 的 WHERE id 直接绑定请求的 product_id 字段（前端以该字段传单位 id）
         let u = NewProductUnit {
             product_id: req.product_id,
@@ -772,7 +772,7 @@ impl<R: ProductRepo, S: RemoteImageStore + ProductImageStore, P: PriceScheduleRe
         serde_json::to_string(&units).unwrap_or_else(|_| "[]".to_string())
     }
 
-    async fn price_upsert(&self, req: domain::ProductPriceReq) -> Result<(), UseCaseError> {
+    async fn price_upsert(&self, req: crate::dto::ProductPriceReq) -> Result<(), UseCaseError> {
         // product_price 为最新价快照（价格策略 schedule 会同步刷新），属价格维度，不受商品审核锁定
         match self
             .repo

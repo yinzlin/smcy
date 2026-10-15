@@ -6,7 +6,6 @@
 //! DomainError 中。
 
 use crate::error::DomainError;
-use crate::{SalesOrderItemReq, SalesOrderReq};
 
 /// 详情主表行（LEFT JOIN purchaser）
 #[derive(Debug, Clone)]
@@ -321,6 +320,49 @@ pub struct GeneratePoItemWrite {
 }
 
 
+/// 销售单明细写入输入（domain 自有类型，不含 serde）
+///
+/// 由 application 层把 HTTP 销售明细契约映射为本结构体后送入端口。
+#[derive(Debug, Clone)]
+pub struct SalesOrderItemInput {
+    pub product_id: i64,
+    pub product_name: String,
+    pub alias1: Option<String>,
+    pub alias2: Option<String>,
+    pub spec: Option<String>,
+    pub unit: Option<String>,
+    pub unit_price: f64,
+    pub quantity: f64,
+    pub base_quantity: Option<f64>,
+    pub amount: f64,
+    pub pre_sale_quantity: Option<f64>,
+    pub supplier_id: i64,
+    pub supplier_name: String,
+    pub category_id: Option<i64>,
+    pub remark: Option<String>,
+}
+
+/// 销售单主表写入输入（domain 自有类型，不含 serde）
+#[derive(Debug, Clone)]
+pub struct SalesOrderInput {
+    pub id: Option<i64>,
+    pub purchaser_id: i64,
+    pub order_no: String,
+    pub order_date: String,
+    pub total_amount: f64,
+    pub discount_rate: f64,
+    pub amount_reduction: f64,
+    pub final_amount: f64,
+    pub warehouse_id: i64,
+    pub warehouse_name: String,
+    pub items: Vec<SalesOrderItemInput>,
+    pub remark: Option<String>,
+    pub supplier_company: Option<String>,
+    pub truck_plate: Option<String>,
+    pub version: Option<i64>,
+    pub is_settled: Option<i64>,
+}
+
 /// 列表筛选条件（purchaser_id 为 HTTP 原始值，角色强制在用例层完成）
 #[derive(Debug, Clone, Default)]
 pub struct SalesOrderListFilter {
@@ -383,11 +425,11 @@ pub trait SalesOrderRepo: Send + Sync {
     /// 批量查耗材分配状态：返回 (source_order_id, status) 序列，按 id ASC（用例层取每单最早一条）
     async fn allocation_status_rows(&self, order_ids: &[i64]) -> Result<Vec<(i64, i64)>, DomainError>;
     /// 创建主表，返回 order_id
-    async fn insert_order(&self, req: &SalesOrderReq) -> Result<i64, DomainError>;
+    async fn insert_order(&self, req: &SalesOrderInput) -> Result<i64, DomainError>;
     /// 批量插入明细（base_qtys 与 items 同序；数量兜底已在入参组装完成）
-    async fn insert_items_batch(&self, order_id: i64, items: &[SalesOrderItemReq], base_qtys: &[f64]) -> Result<(), DomainError>;
+    async fn insert_items_batch(&self, order_id: i64, items: &[SalesOrderItemInput], base_qtys: &[f64]) -> Result<(), DomainError>;
     /// 乐观锁更新：BEGIN IMMEDIATE + 主表 UPDATE(version+1) + 明细全量重写 + commit
-    async fn update_order_with_items(&self, req: &SalesOrderReq, ver: i64, base_qtys: &[f64]) -> Result<SalesOrderUpdateTx, DomainError>;
+    async fn update_order_with_items(&self, req: &SalesOrderInput, ver: i64, base_qtys: &[f64]) -> Result<SalesOrderUpdateTx, DomainError>;
     /// 删除明细（外键冲突文案由用例层识别）
     async fn delete_items(&self, order_id: i64) -> Result<(), DomainError>;
     /// 删除主表

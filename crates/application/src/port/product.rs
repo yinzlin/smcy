@@ -14,11 +14,11 @@ pub trait ProductUseCase: Send + Sync {
     /// 开单商品搜索（吞错返回空数组；返回预序列化 JSON 文本保证逐字节兼容）
     async fn search(&self, is_super_admin: bool, keyword: Option<String>, only_audited: bool) -> String;
     /// 新建商品（默认单位/价格舍入/进价脱敏在用例层；失败 500 空响应体）
-    async fn create(&self, is_super_admin: bool, req: domain::ProductReq) -> Result<(), UseCaseError>;
+    async fn create(&self, is_super_admin: bool, req: crate::dto::ProductReq) -> Result<(), UseCaseError>;
     /// 启用/停用切换
     async fn toggle_status(&self, id: i64) -> Result<String, UseCaseError>;
     /// 编辑商品（非超管进价保持原值；价格变更记日志、加成率变更触发重算）
-    async fn update(&self, is_super_admin: bool, req: domain::ProductUpdateReq) -> Result<String, UseCaseError>;
+    async fn update(&self, is_super_admin: bool, req: crate::dto::ProductUpdateReq) -> Result<String, UseCaseError>;
     /// 删除商品（关联数据守卫 + 事务级联清理）
     async fn delete(&self, id: i64) -> Result<String, UseCaseError>;
 
@@ -33,9 +33,9 @@ pub trait ProductUseCase: Send + Sync {
     // —— 子步b：商品单位 ——
 
     /// 新建商品单位（价格四舍五入两位；失败 500 携带"创建单位失败: …"）
-    async fn unit_create(&self, req: domain::ProductUnitReq) -> Result<String, UseCaseError>;
+    async fn unit_create(&self, req: crate::dto::ProductUnitReq) -> Result<String, UseCaseError>;
     /// 更新商品单位（旧行为 WHERE id 取请求的 product_id 字段）
-    async fn unit_update(&self, req: domain::ProductUnitReq) -> Result<String, UseCaseError>;
+    async fn unit_update(&self, req: crate::dto::ProductUnitReq) -> Result<String, UseCaseError>;
     /// 删除商品单位（0 行 → 404"单位不存在"）
     async fn unit_delete(&self, id: i64) -> Result<String, UseCaseError>;
     /// 按商品清空单位
@@ -46,7 +46,7 @@ pub trait ProductUseCase: Send + Sync {
     // —— 子步b：价格快照 ——
 
     /// 价格快照 UPSERT，成功后联动政采状态（失败 500 空响应体）
-    async fn price_upsert(&self, req: domain::ProductPriceReq) -> Result<(), UseCaseError>;
+    async fn price_upsert(&self, req: crate::dto::ProductPriceReq) -> Result<(), UseCaseError>;
     /// 价格快照列表（预序列化 JSON 文本；吞错返回空数组）
     async fn price_list(&self, product_id: i64) -> String;
     /// 删除价格快照（0 行 → 404"价格记录不存在"）

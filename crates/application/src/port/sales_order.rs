@@ -1,7 +1,8 @@
 //! 销售订单入站端口（UseCase 契约）
 
 use domain::port::sales_order::SalesOrderListFilter;
-use domain::{SalesOrderReq, UserCtx};
+use crate::dto::SalesOrderReq;
+use domain::UserCtx;
 
 use crate::error::UseCaseError;
 

@@ -3,11 +3,10 @@
 use sqlx::sqlite::SqlitePool;
 use sqlx::{AssertSqlSafe, Row};
 
-use domain::PriceScheduleReq;
 use domain::error::DomainError;
 use domain::port::price_schedule::{
-    BackfillItemRow, DiagnoseRow, HistoryRow, PriceScheduleRepo, PurchasePriceInput,
-    ScheduleExportRow, ScheduleFilter, ScheduleListRow,
+    BackfillItemRow, DiagnoseRow, HistoryRow, PriceScheduleInput, PriceScheduleRepo,
+    PurchasePriceInput, ScheduleExportRow, ScheduleFilter, ScheduleListRow,
 };
 
 #[derive(Clone)]
@@ -84,7 +83,7 @@ fn list_row(r: &sqlx::sqlite::SqliteRow) -> ScheduleListRow {
 }
 
 impl PriceScheduleRepo for SqlitePriceScheduleRepo {
-    async fn create(&self, req: &PriceScheduleReq, price: f64) -> Result<i64, DomainError> {
+    async fn create(&self, req: &PriceScheduleInput, price: f64) -> Result<i64, DomainError> {
         // 录入时 end_date 强制 NULL；由 rebuild_end_dates 维护
         let res = sqlx::query(
             "INSERT INTO product_price_schedule(product_id, price_type, price, effective_date, end_date, source, remark, supplier_id, purchaser_id)
@@ -115,7 +114,7 @@ impl PriceScheduleRepo for SqlitePriceScheduleRepo {
         Ok(row.map(|r| (r.get::<i64, _>("product_id"), r.get::<String, _>("price_type"))))
     }
 
-    async fn update(&self, id: i64, req: &PriceScheduleReq) -> Result<u64, DomainError> {
+    async fn update(&self, id: i64, req: &PriceScheduleInput) -> Result<u64, DomainError> {
         let res = sqlx::query(
             "UPDATE product_price_schedule
              SET price = ?, remark = ?, source = ?, price_type = ?, effective_date = ?, supplier_id = ?, purchaser_id = ?
@@ -361,7 +360,7 @@ impl PriceScheduleRepo for SqlitePriceScheduleRepo {
         Ok(res.rows_affected())
     }
 
-    async fn insert_general(&self, req: &PriceScheduleReq, price: f64) -> Result<(), DomainError> {
+    async fn insert_general(&self, req: &PriceScheduleInput, price: f64) -> Result<(), DomainError> {
         sqlx::query(
             "INSERT INTO product_price_schedule(product_id, price_type, price, effective_date, end_date, source, remark, supplier_id, purchaser_id)
              VALUES (?, ?, ?, ?, NULL, ?, ?, NULL, NULL)"
@@ -378,7 +377,7 @@ impl PriceScheduleRepo for SqlitePriceScheduleRepo {
         .map_err(storage)
     }
 
-    async fn insert_excel(&self, req: &PriceScheduleReq, price: f64) -> Result<(), DomainError> {
+    async fn insert_excel(&self, req: &PriceScheduleInput, price: f64) -> Result<(), DomainError> {
         sqlx::query(
             "INSERT INTO product_price_schedule(product_id, price_type, price, effective_date, end_date, source, remark)
              VALUES (?, ?, ?, ?, NULL, ?, ?)"

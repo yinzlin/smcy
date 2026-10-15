@@ -1,6 +1,6 @@
 //! 价格策略时段入站端口
 
-use domain::PriceScheduleReq;
+use crate::dto::PriceScheduleReq;
 use domain::UserCtx;
 use domain::port::price_schedule::ScheduleFilter;
 

@@ -3,7 +3,6 @@
 use serde::Serialize;
 
 use crate::error::DomainError;
-use crate::OrderSupplementItemReq;
 
 /// 增项行（按目标订单列表，JOIN 源订单号）
 #[derive(Debug, Clone, Serialize)]
@@ -121,9 +120,29 @@ pub struct AdjustedOrderRow {
     pub last_adjust_date: Option<String>,
 }
 
+/// 增项写入输入（domain 自有类型，不含 serde）
+#[derive(Debug, Clone)]
+pub struct OrderSupplementInput {
+    pub target_order_id: i64,
+    pub source_order_id: i64,
+    pub source_remark: Option<String>,
+    pub product_id: i64,
+    pub product_name: String,
+    pub alias1: Option<String>,
+    pub alias2: Option<String>,
+    pub spec: Option<String>,
+    pub unit: String,
+    pub unit_price: f64,
+    pub quantity: f64,
+    pub amount: f64,
+    pub allocate_date: String,
+    pub operation_type: String,
+    pub target_order_item_id: Option<i64>,
+}
+
 pub trait OrderSupplementRepo: Send + Sync {
     /// 写入增项，返回 last_insert_rowid
-    async fn create(&self, req: &OrderSupplementItemReq) -> Result<i64, DomainError>;
+    async fn create(&self, req: &OrderSupplementInput) -> Result<i64, DomainError>;
     /// 分摊余额消耗：allocated += delta, remaining -= delta, status CASE
     /// （行为保持：旧 handler 吞错，返回 Err 由用例层 let _ =）
     async fn apply_pool_delta(&self, source_order_id: i64, pool_delta: f64) -> Result<(), DomainError>;

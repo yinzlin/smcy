@@ -5,7 +5,6 @@
 //! （Unit-of-Work 属于基础设施层）。错误文案按旧 handler 逐字预置在 DomainError 中。
 
 use crate::error::DomainError;
-use crate::{PurchaseOrderItemReq, PurchaseOrderReq};
 
 /// 列表行（JOIN supplier + 明细仓库聚合子查询）
 #[derive(Debug, Clone)]
@@ -166,14 +165,57 @@ pub struct PurchaseOrderImportItem {
     pub remark: String,
 }
 
+/// 采购单明细写入输入（domain 自有类型，不含 serde）
+#[derive(Debug, Clone)]
+pub struct PurchaseOrderItemInput {
+    pub id: Option<i64>,
+    pub product_id: i64,
+    pub product_name: String,
+    pub alias1: Option<String>,
+    pub alias2: Option<String>,
+    pub spec: Option<String>,
+    pub unit: Option<String>,
+    pub unit_price: f64,
+    pub quantity: f64,
+    pub base_quantity: Option<f64>,
+    pub amount: f64,
+    pub ordered_quantity: Option<f64>,
+    pub remark: Option<String>,
+    pub warehouse_id: Option<i64>,
+    pub warehouse_name: Option<String>,
+    pub production_date: Option<String>,
+    pub batch_no: Option<String>,
+}
+
+/// 采购单主表写入输入（domain 自有类型，不含 serde）
+#[derive(Debug, Clone)]
+pub struct PurchaseOrderInput {
+    pub id: Option<i64>,
+    pub supplier_id: i64,
+    pub order_no: String,
+    pub order_date: String,
+    pub total_amount: f64,
+    pub discount_rate: f64,
+    pub amount_reduction: f64,
+    pub final_amount: f64,
+    pub warehouse_id: i64,
+    pub warehouse_name: String,
+    pub user_id: Option<i64>,
+    pub handler_phone: Option<String>,
+    pub items: Vec<PurchaseOrderItemInput>,
+    pub remark: Option<String>,
+    pub version: Option<i64>,
+    pub is_settled: Option<i64>,
+}
+
 /// 采购订单仓储端口
 pub trait PurchaseOrderRepo: Send + Sync {
     /// 供应商审核状态（下单前置校验用；查询失败吞为 None）
     async fn supplier_audit_status(&self, supplier_id: i64) -> Result<Option<String>, DomainError>;
     /// 新增主表（返回 last_insert_rowid）
-    async fn insert_order(&self, req: &PurchaseOrderReq, main_wh_id: i64, main_wh_name: &str) -> Result<i64, DomainError>;
+    async fn insert_order(&self, req: &PurchaseOrderInput, main_wh_id: i64, main_wh_name: &str) -> Result<i64, DomainError>;
     /// 批量插入明细（17 列无 sales_unit/source；旧行为失败吞错，由用例层 let _ 忽略）
-    async fn insert_items_batch(&self, order_id: i64, items: &[PurchaseOrderItemReq], base_qtys: &[f64]) -> Result<(), DomainError>;
+    async fn insert_items_batch(&self, order_id: i64, items: &[PurchaseOrderItemInput], base_qtys: &[f64]) -> Result<(), DomainError>;
     /// 列表总数（动态 WHERE 四分支；bind 全字符串，与旧一致）
     async fn count_list(&self, filter: &PurchaseOrderListFilter) -> Result<i64, DomainError>;
     /// 列表分页（ORDER BY 白名单子句由用例层构造；失败由用例层吞为空）
@@ -188,7 +230,7 @@ pub trait PurchaseOrderRepo: Send + Sync {
     /// Err(Conflict)=version 冲突；Err(Storage)=带旧文案的完整消息
     async fn update_order_with_items(
         &self,
-        req: &PurchaseOrderReq,
+        req: &PurchaseOrderInput,
         main_wh_id: i64,
         main_wh_name: &str,
         ver: i64,

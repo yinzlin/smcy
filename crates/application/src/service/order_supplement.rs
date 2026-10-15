@@ -8,9 +8,9 @@ use std::collections::HashMap;
 
 use domain::error::DomainError;
 use domain::port::order_supplement::{
-    AdjustedOrdersFilter, OrderSupplementRepo,
+    AdjustedOrdersFilter, OrderSupplementInput, OrderSupplementRepo,
 };
-use domain::OrderSupplementItemReq;
+use crate::dto::OrderSupplementItemReq;
 
 use crate::error::UseCaseError;
 use crate::port::order_supplement::OrderSupplementUseCase;
@@ -37,6 +37,8 @@ fn storage_msg(e: DomainError) -> String {
 
 impl<R: OrderSupplementRepo> OrderSupplementUseCase for OrderSupplementService<R> {
     async fn create(&self, req: OrderSupplementItemReq) -> Result<String, UseCaseError> {
+        // HTTP 契约 → domain 端口输入类型（字段同名同序，下游字段访问不变）
+        let req = OrderSupplementInput::from(req);
         match self.repo.create(&req).await {
             Ok(id) => {
                 // 分摊余额口径：正数(换入/追加/新增)按金额全额消耗余额；

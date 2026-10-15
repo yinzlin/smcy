@@ -10,7 +10,8 @@ use domain::error::DomainError;
 use domain::port::price_schedule::PriceScheduleRepo;
 use domain::port::purchase_order::PurchaseOrderRepo;
 use domain::port::sales_order::*;
-use domain::{SalesOrderItemReq, SalesOrderReq, UserCtx};
+use crate::dto::SalesOrderReq;
+use domain::UserCtx;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook, XlsxError};
 
 use super::get_category_sort_key;
@@ -43,7 +44,7 @@ fn can_access_sales_order(user: &UserCtx, order_purchaser_id: i64) -> bool {
 
 /// 数量同步兜底：保存时若销售数量为 0 而预售数量 > 0，用预售数量兜底，
 /// 避免后续生成采购时数量为 0 的空明细（创建/更新共用）
-fn normalize_quantities(items: &mut [SalesOrderItemReq]) {
+fn normalize_quantities(items: &mut [SalesOrderItemInput]) {
     for it in items.iter_mut() {
         if it.quantity <= 0.0 && it.pre_sale_quantity.unwrap_or(0.0) > 0.0 {
             it.quantity = it.pre_sale_quantity.unwrap();
@@ -52,7 +53,7 @@ fn normalize_quantities(items: &mut [SalesOrderItemReq]) {
 }
 
 /// base_quantity 服务端统一重算入参组装（product_unit.ratio 权威），不信任前端值
-fn base_inputs_of(items: &[SalesOrderItemReq]) -> Vec<(i64, String, f64, f64)> {
+fn base_inputs_of(items: &[SalesOrderItemInput]) -> Vec<(i64, String, f64, f64)> {
     items.iter()
         .map(|it| (it.product_id, it.unit.clone().unwrap_or_default(), it.quantity, it.base_quantity.unwrap_or(0.0)))
         .collect()
@@ -75,7 +76,7 @@ impl<R: SalesOrderRepo, P: PurchaseOrderRepo, S: PriceScheduleRepo> SalesOrderSe
     /// 价格策略时段补价：对 unit_price<=0 的明细按 order_date 查时段价。
     /// 政采价(>0) 优先，否则商超1/2/3/AI 非零平均价；返回补价条数。
     /// 前端已手工填价的保留原值不被覆盖；order_date 非法/为空时不补。
-    async fn auto_fill_prices(&self, items: &mut [SalesOrderItemReq], order_date: &str) -> (String, usize) {
+    async fn auto_fill_prices(&self, items: &mut [SalesOrderItemInput], order_date: &str) -> (String, usize) {
         let order_date_short = if order_date.len() >= 10 { order_date[..10].to_string() } else { order_date.to_string() };
         if order_date_short.is_empty() || !common::utils::is_valid_date_str(&order_date_short) {
             return (order_date_short, 0);
@@ -129,7 +130,9 @@ impl<R: SalesOrderRepo, P: PurchaseOrderRepo, S: PriceScheduleRepo> SalesOrderSe
 }
 
 impl<R: SalesOrderRepo, P: PurchaseOrderRepo, S: PriceScheduleRepo> SalesOrderUseCase for SalesOrderService<R, P, S> {
-    async fn create(&self, mut req: SalesOrderReq, ctx: &UserCtx) -> Result<SalesOrderOutcome, UseCaseError> {
+    async fn create(&self, req: SalesOrderReq, ctx: &UserCtx) -> Result<SalesOrderOutcome, UseCaseError> {
+        // HTTP 契约 → domain 端口输入类型（字段同名同序，下游字段访问不变）
+        let mut req = SalesOrderInput::from(req);
         // 仅已审核的采购方与商品允许下单（id<=0 视为通过，避免误伤无关联的零值）
         if req.purchaser_id > 0 {
             let status = self.repo.purchaser_audit_status(req.purchaser_id).await.ok().flatten();
@@ -382,7 +385,9 @@ impl<R: SalesOrderRepo, P: PurchaseOrderRepo, S: PriceScheduleRepo> SalesOrderUs
         }
     }
 
-    async fn update(&self, mut req: SalesOrderReq, ctx: &UserCtx) -> Result<SalesOrderOutcome, UseCaseError> {
+    async fn update(&self, req: SalesOrderReq, ctx: &UserCtx) -> Result<SalesOrderOutcome, UseCaseError> {
+        // HTTP 契约 → domain 端口输入类型（字段同名同序，下游字段访问不变）
+        let mut req = SalesOrderInput::from(req);
         // 行级数据权限 + 存在性
         let (_order_purchaser_id, order_status) = self.guard(req.id.unwrap_or(0), ctx).await?;
         // 仅待审核（pending）状态允许修改；已审核/已流转的订单必须反审核后才能修改（防篡改）

@@ -8,7 +8,6 @@ use sqlx::{AssertSqlSafe, Row};
 
 use domain::error::DomainError;
 use domain::port::sales_order::*;
-use domain::{SalesOrderItemReq, SalesOrderReq};
 
 use super::stock_writer;
 
@@ -28,7 +27,7 @@ fn storage(e: sqlx::Error) -> DomainError {
 }
 
 /// 明细批量 INSERT（创建走 pool / 更新走事务共用拼装）：15 列，数量兜底已在用例层完成
-fn build_items_insert(items: &[SalesOrderItemReq]) -> String {
+fn build_items_insert(items: &[SalesOrderItemInput]) -> String {
     let placeholders: Vec<String> = items.iter()
         .map(|_| "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)".to_string())
         .collect();
@@ -41,7 +40,7 @@ fn build_items_insert(items: &[SalesOrderItemReq]) -> String {
 fn bind_items<'a>(
     mut query: sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>,
     order_id: Option<i64>,
-    items: &'a [SalesOrderItemReq],
+    items: &'a [SalesOrderItemInput],
     base_qtys: &[f64],
 ) -> sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments> {
     for (idx, item) in items.iter().enumerate() {
@@ -308,7 +307,7 @@ impl SalesOrderRepo for SqliteSalesOrderRepo {
         Ok(rows.iter().map(|row| (row.get::<i64, _>("source_order_id"), row.get::<i64, _>("status"))).collect())
     }
 
-    async fn insert_order(&self, req: &SalesOrderReq) -> Result<i64, DomainError> {
+    async fn insert_order(&self, req: &SalesOrderInput) -> Result<i64, DomainError> {
         let res = sqlx::query(
             "INSERT INTO sales_order(purchaser_id, order_no, order_date, total_amount, discount_rate, amount_reduction, final_amount, warehouse_id, warehouse_name, remark, supplier_company, truck_plate, is_settled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
@@ -331,7 +330,7 @@ impl SalesOrderRepo for SqliteSalesOrderRepo {
         Ok(res.last_insert_rowid())
     }
 
-    async fn insert_items_batch(&self, order_id: i64, items: &[SalesOrderItemReq], base_qtys: &[f64]) -> Result<(), DomainError> {
+    async fn insert_items_batch(&self, order_id: i64, items: &[SalesOrderItemInput], base_qtys: &[f64]) -> Result<(), DomainError> {
         let sql = build_items_insert(items);
         let query = sqlx::query(AssertSqlSafe(sql.as_str()));
         let query = bind_items(query, Some(order_id), items, base_qtys);
@@ -339,7 +338,7 @@ impl SalesOrderRepo for SqliteSalesOrderRepo {
         Ok(())
     }
 
-    async fn update_order_with_items(&self, req: &SalesOrderReq, ver: i64, base_qtys: &[f64]) -> Result<SalesOrderUpdateTx, DomainError> {
+    async fn update_order_with_items(&self, req: &SalesOrderInput, ver: i64, base_qtys: &[f64]) -> Result<SalesOrderUpdateTx, DomainError> {
         // 用 BEGIN IMMEDIATE 启动写事务，立即获得 SQLite 写锁（RESERVED）。
         // 作用：把"主表 UPDATE + 明细全量重写"整体串行化，
         // 杜绝连点两次保存时两个事务都读到同一 version、都通过乐观锁、然后后提交的事务用全量 items

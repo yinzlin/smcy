@@ -1,7 +1,7 @@
 //! 订单增补（分摊增项）域入站端口（UseCase 契约）
 
 use crate::error::UseCaseError;
-use domain::OrderSupplementItemReq;
+use crate::dto::OrderSupplementItemReq;
 
 pub trait OrderSupplementUseCase: Send + Sync {
     /// 创建增项 → 200 JSON {"id":..}

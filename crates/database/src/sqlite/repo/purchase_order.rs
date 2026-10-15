@@ -7,7 +7,6 @@ use sqlx::{AssertSqlSafe, Row};
 
 use domain::error::DomainError;
 use domain::port::purchase_order::*;
-use domain::{PurchaseOrderItemReq, PurchaseOrderReq};
 
 use super::stock_writer;
 
@@ -31,7 +30,7 @@ fn storage(e: sqlx::Error) -> DomainError {
 async fn insert_purchase_item(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     order_id: i64,
-    item: &PurchaseOrderItemReq,
+    item: &PurchaseOrderItemInput,
     fallback_source: Option<i64>,
     base_qty: f64,
 ) {
@@ -71,7 +70,7 @@ impl PurchaseOrderRepo for SqlitePurchaseOrderRepo {
             .map_err(storage)
     }
 
-    async fn insert_order(&self, req: &PurchaseOrderReq, main_wh_id: i64, main_wh_name: &str) -> Result<i64, DomainError> {
+    async fn insert_order(&self, req: &PurchaseOrderInput, main_wh_id: i64, main_wh_name: &str) -> Result<i64, DomainError> {
         let res = sqlx::query(
             "INSERT INTO purchase_order(supplier_id, order_no, order_date, total_amount, discount_rate, amount_reduction, final_amount, warehouse_id, warehouse_name, user_id, handler_phone, remark, is_settled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
@@ -94,7 +93,7 @@ impl PurchaseOrderRepo for SqlitePurchaseOrderRepo {
         Ok(res.last_insert_rowid())
     }
 
-    async fn insert_items_batch(&self, order_id: i64, items: &[PurchaseOrderItemReq], base_qtys: &[f64]) -> Result<(), DomainError> {
+    async fn insert_items_batch(&self, order_id: i64, items: &[PurchaseOrderItemInput], base_qtys: &[f64]) -> Result<(), DomainError> {
         let placeholders: Vec<String> = items.iter()
             .map(|_| "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)".to_string())
             .collect();
@@ -332,7 +331,7 @@ impl PurchaseOrderRepo for SqlitePurchaseOrderRepo {
 
     async fn update_order_with_items(
         &self,
-        req: &PurchaseOrderReq,
+        req: &PurchaseOrderInput,
         main_wh_id: i64,
         main_wh_name: &str,
         ver: i64,

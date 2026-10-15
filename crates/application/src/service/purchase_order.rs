@@ -7,7 +7,8 @@ use calamine::{open_workbook_auto_from_rs, Data, Reader};
 use domain::error::DomainError;
 use domain::port::price_schedule::{PriceScheduleRepo, PurchasePriceInput};
 use domain::port::purchase_order::*;
-use domain::{PurchaseOrderReq, UserCtx};
+use crate::dto::PurchaseOrderReq;
+use domain::UserCtx;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook, Worksheet, XlsxError};
 
 use crate::error::UseCaseError;
@@ -36,7 +37,7 @@ fn can_access_purchase_order(user: &UserCtx, order_supplier_id: i64) -> bool {
 }
 
 /// 主表仓库按明细汇总：各行全部同一仓库则记该仓库；否则仓库名去重后以"、"连接（创建/更新共用）
-fn derive_main_warehouse(items: &[domain::PurchaseOrderItemReq]) -> (i64, String) {
+fn derive_main_warehouse(items: &[PurchaseOrderItemInput]) -> (i64, String) {
     let mut wh_id_set: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut wh_names: Vec<String> = Vec::new();
     for it in items {
@@ -51,14 +52,14 @@ fn derive_main_warehouse(items: &[domain::PurchaseOrderItemReq]) -> (i64, String
 }
 
 /// base_quantity 服务端统一重算入参组装（product_unit.ratio 权威），不信任前端值——与销售单同一规则
-fn base_inputs_of(items: &[domain::PurchaseOrderItemReq]) -> Vec<(i64, String, f64, f64)> {
+fn base_inputs_of(items: &[PurchaseOrderItemInput]) -> Vec<(i64, String, f64, f64)> {
     items.iter()
         .map(|it| (it.product_id, it.unit.clone().unwrap_or_default(), it.quantity, it.base_quantity.unwrap_or(0.0)))
         .collect()
 }
 
 /// 采购明细 → 进价更新输入映射（domain 自有类型，端口不依赖 HTTP 契约）
-fn price_inputs_of(items: &[domain::PurchaseOrderItemReq]) -> Vec<PurchasePriceInput> {
+fn price_inputs_of(items: &[PurchaseOrderItemInput]) -> Vec<PurchasePriceInput> {
     items.iter()
         .map(|it| PurchasePriceInput {
             product_id: it.product_id,
@@ -87,6 +88,8 @@ impl<R: PurchaseOrderRepo, P: PriceScheduleRepo> PurchaseOrderService<R, P> {
 
 impl<R: PurchaseOrderRepo, P: PriceScheduleRepo> PurchaseOrderUseCase for PurchaseOrderService<R, P> {
     async fn create(&self, req: PurchaseOrderReq, ctx: &UserCtx) -> Result<PurchaseOrderOutcome, UseCaseError> {
+        // HTTP 契约 → domain 端口输入类型（字段同名同序，下游字段访问不变）
+        let req = PurchaseOrderInput::from(req);
         // 仅已审核的供应商允许下单（id<=0 视为通过，避免误伤无关联的零值）
         if req.supplier_id > 0 {
             let status = self.repo.supplier_audit_status(req.supplier_id).await.ok().flatten();
@@ -260,6 +263,8 @@ impl<R: PurchaseOrderRepo, P: PriceScheduleRepo> PurchaseOrderUseCase for Purcha
     }
 
     async fn update(&self, req: PurchaseOrderReq, ctx: &UserCtx) -> Result<PurchaseOrderOutcome, UseCaseError> {
+        // HTTP 契约 → domain 端口输入类型（字段同名同序，下游字段访问不变）
+        let req = PurchaseOrderInput::from(req);
         // 行级数据权限：先查订单所属供应商
         let (_supplier_id, order_status) = self.guard(req.id.unwrap_or(0), ctx, "订单不存在", "您没有权限操作此订单").await?;
         // 仅待审核（pending）状态的订单允许修改；已审核/已流转/已作废的订单必须反审核后才能修改（防篡改）

@@ -8,10 +8,10 @@ use sqlx::{AssertSqlSafe, Row};
 
 use domain::error::DomainError;
 use domain::port::order_supplement::{
-    AdjustedOrderRow, AdjustedOrdersFilter, CompareItemRow, CompareSupplementRow, OrderSupplementRepo,
-    SupplementBySourceRow, SupplementByTargetRow, SupplementDeleteRow,
+    AdjustedOrderRow, AdjustedOrdersFilter, CompareItemRow, CompareSupplementRow,
+    OrderSupplementInput, OrderSupplementRepo, SupplementBySourceRow, SupplementByTargetRow,
+    SupplementDeleteRow,
 };
-use domain::OrderSupplementItemReq;
 
 #[derive(Clone)]
 pub struct SqliteOrderSupplementRepo {
@@ -50,7 +50,7 @@ fn build_cond_sql(filter: &AdjustedOrdersFilter) -> (String, Vec<String>, Vec<i6
 }
 
 impl OrderSupplementRepo for SqliteOrderSupplementRepo {
-    async fn create(&self, req: &OrderSupplementItemReq) -> Result<i64, DomainError> {
+    async fn create(&self, req: &OrderSupplementInput) -> Result<i64, DomainError> {
         let res = sqlx::query(
             "INSERT INTO order_supplement_item(target_order_id, source_order_id, source_remark, product_id, product_name, alias1, alias2, spec, unit, unit_price, quantity, amount, allocate_date, operation_type, target_order_item_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )

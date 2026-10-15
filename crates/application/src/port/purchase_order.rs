@@ -1,7 +1,8 @@
 //! 采购订单入站端口（UseCase 契约）
 
 use domain::port::purchase_order::PurchaseOrderListFilter;
-use domain::{PurchaseOrderReq, UserCtx};
+use crate::dto::PurchaseOrderReq;
+use domain::UserCtx;
 
 use crate::error::UseCaseError;
 
