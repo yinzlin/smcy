@@ -101,7 +101,6 @@ export default function App() {
           <Route path="purchase" element={<Suspense fallback={<PageFallback />}><PurchasePage /></Suspense>} />
           <Route path="sales" element={<Suspense fallback={<PageFallback />}><SalesPage /></Suspense>} />
           <Route path="supplement" element={<Suspense fallback={<PageFallback />}><SupplementPage /></Suspense>} />
-          <Route path="today-price" element={<Suspense fallback={<PageFallback />}><TodayPricePage /></Suspense>} />
           <Route path="price-schedule" element={<Suspense fallback={<PageFallback />}><PriceSchedulePage /></Suspense>} />
           {/* 采购查询 */}
           <Route path="query/purchase-order" element={<Suspense fallback={<PageFallback />}><PurchaseOrderQueryPage /></Suspense>} />
@@ -147,6 +146,8 @@ export default function App() {
         <Route path="mobile/sort-by-category" element={<Suspense fallback={<PageFallback />}><MobileSortByCategoryPage /></Suspense>} />
         <Route path="mobile/sort-by-supplier" element={<Suspense fallback={<PageFallback />}><MobileSortBySupplierPage /></Suspense>} />
         <Route path="mobile/sort-comprehensive" element={<Suspense fallback={<PageFallback />}><MobileSortComprehensivePage /></Suspense>} />
+        {/* 今日进价采集：与移动分拣页同族的全屏手写页（老 /mobile/today_price 形态） */}
+        <Route path="today-price" element={<Suspense fallback={<PageFallback />}><TodayPricePage /></Suspense>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>

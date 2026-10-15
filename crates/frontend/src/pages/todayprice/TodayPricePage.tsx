@@ -1,93 +1,140 @@
-import { useMemo, useState } from 'react'
-import { App, Button, Card, Col, DatePicker, Input, InputNumber, Result, Row, Space, Statistic, Table, Tag, Typography } from 'antd'
-import { DownloadOutlined, SaveOutlined, ThunderboltOutlined } from '@ant-design/icons'
-import type { TableProps } from 'antd'
-import dayjs from 'dayjs'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+// 今日进价采集（对应老 page_mobile_today_price，1:1 手写复刻，与移动分拣页同族）
+import { useEffect, useState } from 'react'
+import {
+  EmptyState,
+  PageHeader,
+  SortStyles,
+  todayStr,
+} from '../mobile/sortShared'
 import {
   exportTodayPriceUrl,
   fetchSortItemsBySupplier,
   fetchTodayPriceItems,
   generatePurchaseForOrder,
   saveTodayPrices,
-  type TodayPriceItem,
   type TodayPriceSupplier,
 } from '../../api/todayprice'
 import { useAuth } from '../../stores/auth'
-import { scrollX } from '../../utils/tableScroll'
+
+/** 本页专属样式：橙色主题覆盖 + 价格卡片（共享外壳的绿色变体在老页中为本页的橙色） */
+const TP_CSS = `
+.msr-tp .history-bar { background: #fff7ed; }
+.msr-tp .history-bar button { background: #f97316; }
+.msr-tp .history-bar button.clear { background: #f3f4f6; }
+.msr-tp .cat-supplier { background: linear-gradient(135deg, #f97316 0%, #fb923c 100%); }
+.msr-tp .price-card { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid #f0f0f0; }
+.msr-tp .price-card:last-child { border-bottom: none; }
+.msr-tp .price-badge { flex-shrink: 0; text-align: right; }
+.msr-tp .price-label { font-size: 11px; color: #666; margin-bottom: 2px; }
+.msr-tp .price-input { width: 84px; padding: 8px; border: 1px solid #ddd; border-radius: 6px; font-size: 15px; text-align: center; }
+.msr-tp .price-input:focus { outline: none; border-color: #f97316; }
+.msr-tp .saved-tag { background: #dcfce7; color: #16a34a; padding: 2px 5px; border-radius: 3px; font-size: 11px; }
+.msr-tp .btn-save { background: #f97316; color: white; }
+.msr-tp .btn-export { background: #10b981; color: white; }
+.msr-tp .btn-export-plain { background: #3b82f6; color: white; }
+`
 
 const fmtPrice = (v: number | undefined) => (!v || v <= 0 ? '-' : Number(v).toFixed(2))
 
-interface Props {
-  embeddedDate?: string
+/** 录入值合法（正数）才算"已录入"，与老页 parseFloat>0 口径一致 */
+const isValidPrice = (raw: string) => {
+  const n = parseFloat(raw)
+  return !isNaN(n) && n > 0
 }
 
-export default function TodayPricePage({ embeddedDate }: Props) {
-  const { message, modal } = App.useApp()
-  const { user } = useAuth()
-  const queryClient = useQueryClient()
-  const [date, setDate] = useState(embeddedDate ?? dayjs().format('YYYY-MM-DD'))
-  const [dateInput, setDateInput] = useState(embeddedDate ?? dayjs().format('YYYY-MM-DD'))
+export default function TodayPricePage() {
+  const { user, checked, fetchMe } = useAuth()
+  const [suppliers, setSuppliers] = useState<TodayPriceSupplier[]>([])
+  const [loaded, setLoaded] = useState(false)
+  const [date, setDate] = useState(todayStr())
   const [keyword, setKeyword] = useState('')
-  /** 今日价录入值：`${supplier_id}_${product_id}` -> price */
-  const [todayPrices, setTodayPrices] = useState<Record<string, number>>({})
+  /** 今日价录入原文：`${supplier_id}_${product_id}` -> 输入框原始字符串（保留用户输入过程态） */
+  const [inputs, setInputs] = useState<Record<string, string>>({})
 
-  const { data: suppliers = [], isLoading } = useQuery({
-    queryKey: ['todayPriceItems', date],
-    queryFn: () => fetchTodayPriceItems(date),
-    enabled: user?.role === 'super_admin',
-  })
+  // 独立于主布局的全屏页：自行探测登录态（老页服务端校验 super_admin）
+  useEffect(() => {
+    if (!checked) void fetchMe()
+  }, [checked, fetchMe])
 
-  const stats = useMemo(() => {
-    let totalCount = 0
-    suppliers.forEach((s) => {
-      totalCount += s.items?.length ?? 0
-    })
-    return { totalCount, supplierCount: suppliers.length, savedCount: Object.keys(todayPrices).length }
-  }, [suppliers, todayPrices])
-
-  if (user && user.role !== 'super_admin') {
-    return <Result status="403" title="无权限" subTitle="今日进价采集仅超级管理员可用" />
+  const loadItems = async (d: string) => {
+    try {
+      setSuppliers(await fetchTodayPriceItems(d))
+    } catch (e) {
+      console.error('加载失败:', e)
+    } finally {
+      setLoaded(true)
+    }
   }
 
-  const priceKey = (sid: number, pid: number) => `${sid}_${pid}`
+  useEffect(() => {
+    if (checked && user?.role === 'super_admin') void loadItems(todayStr())
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checked, user?.role])
 
-  const setPrice = (sid: number, pid: number, value: number) => {
-    setTodayPrices((m) => {
+  if (!checked) {
+    return (
+      <div className="msr msr-tp">
+        <SortStyles />
+        <style>{TP_CSS}</style>
+      </div>
+    )
+  }
+
+  if (user?.role !== 'super_admin') {
+    return (
+      <div className="msr msr-tp">
+        <SortStyles />
+        <style>{TP_CSS}</style>
+        <EmptyState icon="🔒" text="您没有权限访问此页面" />
+      </div>
+    )
+  }
+
+  const savedCount = Object.values(inputs).filter(isValidPrice).length
+  let totalCount = 0
+  suppliers.forEach((s) => {
+    totalCount += s.items?.length ?? 0
+  })
+
+  const setInput = (sid: number, pid: number, raw: string) => {
+    const key = `${sid}_${pid}`
+    setInputs((m) => {
       const next = { ...m }
-      if (value > 0) next[priceKey(sid, pid)] = value
-      else delete next[priceKey(sid, pid)]
+      if (raw === '') delete next[key]
+      else next[key] = raw
       return next
     })
   }
 
   const savePrices = async () => {
-    const keys = Object.keys(todayPrices)
-    if (keys.length === 0) {
-      message.warning('请先录入今日价')
+    const items = Object.entries(inputs)
+      .filter(([, raw]) => isValidPrice(raw))
+      .map(([key, raw]) => {
+        const [sid, pid] = key.split('_')
+        return { supplier_id: Number(sid), product_id: Number(pid), price: parseFloat(raw) }
+      })
+    if (items.length === 0) {
+      window.alert('请先录入今日价')
       return
     }
-    const items = keys.map((key) => {
-      const [sid, pid] = key.split('_')
-      return { supplier_id: Number(sid), product_id: Number(pid), price: todayPrices[key] }
-    })
     try {
       const resp = await saveTodayPrices(items)
-      message.success(resp.message || '保存成功')
-      setTodayPrices({})
-      void queryClient.invalidateQueries({ queryKey: ['todayPriceItems'] })
+      window.alert(resp.message || '保存成功')
+      setInputs({})
+      void loadItems(date)
     } catch (e) {
-      message.error(`保存失败：${e instanceof Error ? e.message : e}`)
+      console.error('保存失败:', e)
+      window.alert('保存失败，请重试')
     }
   }
 
-  // 生成采购订单（自供应商分拣页迁入）：按当前日期取当日销售订单，逐单生成/补全，同供应商同日期自动合并
+  // 生成采购订单（与老页一致）：按当前日期取当日销售订单，逐单生成/补全，同供应商同日期自动合并
   const generatePurchaseOrdersForDate = async () => {
     let sortSuppliers: Awaited<ReturnType<typeof fetchSortItemsBySupplier>>
     try {
       sortSuppliers = await fetchSortItemsBySupplier(date)
     } catch (e) {
-      message.error(`获取当日销售订单失败：${e instanceof Error ? e.message : e}`)
+      window.alert(`获取当日销售订单失败：${e instanceof Error ? e.message : e}`)
       return
     }
     const orderIds: number[] = []
@@ -99,20 +146,16 @@ export default function TodayPricePage({ embeddedDate }: Props) {
       })
     })
     if (orderIds.length === 0) {
-      message.warning(`${date} 没有可生成采购订单的销售订单`)
+      window.alert(`${date || '当前'} 没有可生成采购订单的销售订单`)
       return
     }
-    const ok = await new Promise<boolean>((resolve) => {
-      modal.confirm({
-        title: '生成采购订单',
-        content: `将为 ${date} 的 ${orderIds.length} 个销售订单生成或补全采购订单（已审核的自动跳过，同供应商同日期自动合并）。是否继续？`,
-        okText: '确定',
-        cancelText: '取消',
-        onOk: () => resolve(true),
-        onCancel: () => resolve(false),
-      })
-    })
-    if (!ok) return
+    if (
+      !window.confirm(
+        `将为 ${date || '当前待分拣'} 的 ${orderIds.length} 个销售订单生成或补全采购订单（已审核的自动跳过，同供应商同日期自动合并）。\n是否继续？`,
+      )
+    ) {
+      return
+    }
 
     let createdCount = 0
     let mergedCount = 0
@@ -165,208 +208,145 @@ export default function TodayPricePage({ embeddedDate }: Props) {
     if (mergedCount > 0) msg += `，合并 ${mergedCount} 条明细`
     if (excludedCount > 0) msg += `（已审核 ${excludedCount} 张自动跳过）`
     if (errors.length > 0) msg += `\n\n以下订单生成失败：\n${errors.join('\n')}`
-    modal.info({ title: '生成结果', content: <div style={{ whiteSpace: 'pre-line' }}>{msg}</div> })
+    window.alert(msg)
   }
 
   const doExport = (kind: 'excel' | 'a4' | 'category', printValues: boolean) => {
     window.location.href = exportTodayPriceUrl(kind, date, printValues)
   }
 
-  return (
-    <>
-      <Card style={{ marginBottom: 16 }}>
-        <Row gutter={[16, 16]} align="middle">
-          <Col>
-            <Space wrap>
-              <span>日期：</span>
-              <DatePicker
-                value={dateInput ? dayjs(dateInput) : null}
-                onChange={(d) => setDateInput(d ? d.format('YYYY-MM-DD') : '')}
-                allowClear
-              />
-              <Button
-                type="primary"
-                onClick={() => {
-                  setDate(dateInput)
-                  setTodayPrices({})
-                }}
-              >
-                检索
-              </Button>
-              <Button
-                onClick={() => {
-                  setDateInput('')
-                  setDate('')
-                  setTodayPrices({})
-                }}
-              >
-                清除
-              </Button>
-            </Space>
-          </Col>
-          <Col flex="auto">
-            <Input.Search
-              placeholder="搜索商品名称..."
-              style={{ maxWidth: 280 }}
-              allowClear
-              onSearch={setKeyword}
-              onChange={(e) => {
-                if (!e.target.value) setKeyword('')
-              }}
-            />
-          </Col>
-          <Col>
-            <Button type="primary" icon={<ThunderboltOutlined />} onClick={() => void generatePurchaseOrdersForDate()}>
-              生成采购订单
-            </Button>
-          </Col>
-        </Row>
-        <Row gutter={16} style={{ marginTop: 16 }}>
-          <Col xs={12} md={6} lg={4}>
-            <Statistic title="商品种类" value={stats.totalCount} />
-          </Col>
-          <Col xs={12} md={6} lg={4}>
-            <Statistic title="供应商数" value={stats.supplierCount} />
-          </Col>
-          <Col xs={12} md={6} lg={4}>
-            <Statistic title="已录入" value={stats.savedCount} valueStyle={{ color: '#16a34a' }} />
-          </Col>
-        </Row>
-      </Card>
-
-      {suppliers.length === 0 && !isLoading ? (
-        <Card>
-          <div style={{ textAlign: 'center', padding: '60px 0', color: '#999' }}>
-            <div style={{ fontSize: 48 }}>📭</div>
-            <div>{date ? `${date} 暂无采购订单` : '当前待分拣暂无采购订单'}</div>
-          </div>
-        </Card>
-      ) : (
-        suppliers
-          .map((supplier) => ({ supplier, items: filterItems(supplier, keyword) }))
-          .filter(({ items }) => items.length > 0)
-          .map(({ supplier, items }) => (
-            <Card
-              key={supplier.supplier_id}
-              title={`🏭 ${supplier.supplier_name}`}
-              extra={<span>共 {supplier.items.length} 种</span>}
-              style={{ marginBottom: 16 }}
-            >
-              <Table<TodayPriceItem>
-                rowKey="product_id"
-                size="small"
-                pagination={false}
-                columns={supplierColumns(supplier, todayPrices, setPrice)}
-                dataSource={items}
-                scroll={scrollX('max-content')}
-              />
-            </Card>
-          ))
-      )}
-
-      <div style={{ position: 'sticky', bottom: 0, background: '#fff', padding: '12px 0', borderTop: '1px solid #f0f0f0' }}>
-        <Space wrap>
-          <Button type="primary" icon={<SaveOutlined />} onClick={() => void savePrices()}>
-            保存今日价
-          </Button>
-          <Button type="primary" ghost icon={<DownloadOutlined />} onClick={() => doExport('excel', true)}>
-            导出XLSX
-          </Button>
-          <Button icon={<DownloadOutlined />} onClick={() => doExport('excel', false)}>
-            导出(手写价)
-          </Button>
-          <Button type="primary" ghost icon={<DownloadOutlined />} onClick={() => doExport('category', true)}>
-            导出(按分类)
-          </Button>
-          <Button type="primary" ghost icon={<DownloadOutlined />} onClick={() => doExport('a4', true)}>
-            导出(A4)
-          </Button>
-          <Button icon={<DownloadOutlined />} onClick={() => doExport('a4', false)}>
-            导出A4(手写价)
-          </Button>
-        </Space>
-      </div>
-    </>
-  )
-}
-
-function filterItems(supplier: TodayPriceSupplier, keyword: string): TodayPriceItem[] {
   const kw = keyword.trim().toLowerCase()
-  if (!supplier.items) return []
-  if (!kw) return supplier.items
-  return supplier.items.filter(
-    (item) => item.product_name.toLowerCase().includes(kw) || (item.spec || '').toLowerCase().includes(kw),
-  )
-}
+  const sections = suppliers
+    .map((supplier) => ({
+      supplier,
+      items: (supplier.items ?? []).filter(
+        (it) => it.product_name.toLowerCase().includes(kw) || (it.spec || '').toLowerCase().includes(kw),
+      ),
+    }))
+    .filter(({ items }) => items.length > 0)
 
-/** 每个供应商的列定义仅在"今日价"列上不同（输入值与已录入标签按 supplier+product 作用域） */
-function supplierColumns(
-  supplier: TodayPriceSupplier,
-  todayPrices: Record<string, number>,
-  setPrice: (sid: number, pid: number, v: number) => void,
-): TableProps<TodayPriceItem>['columns'] {
-  const base = baseColumns()
-  base[base.length - 1] = {
-    title: '今日价',
-    key: 'input',
-    width: 150,
-    render: (_v, o) => {
-      const key = `${supplier.supplier_id}_${o.product_id}`
-      const hasInput = todayPrices[key] !== undefined
-      const defaultPrice = o.supplier_price > 0 ? o.supplier_price : o.purchase_price || 0
-      return (
-        <Space size={4}>
-          <InputNumber
-            size="small"
-            style={{ width: 90 }}
-            min={0}
-            precision={2}
-            controls={false}
-            placeholder={defaultPrice > 0 ? Number(defaultPrice).toFixed(2) : ''}
-            value={hasInput ? todayPrices[key] : null}
-            onChange={(v) => setPrice(supplier.supplier_id, o.product_id, v ?? 0)}
+  return (
+    <div className="msr msr-tp">
+      <SortStyles />
+      <style>{TP_CSS}</style>
+      <div className="sticky-header">
+        <PageHeader
+          gradient="linear-gradient(135deg, #f97316 0%, #fb923c 100%)"
+          title="💰 今日进价采集"
+          info="按供应商汇总当天商品，采集并录入今日进价（最近价）"
+          links={[
+            { label: '统筹分拣', to: '/mobile/sort' },
+            { label: '按单位分拣', to: '/mobile/sort-by-purchaser' },
+            { label: '按分类分拣', to: '/mobile/sort-by-category' },
+            { label: '按供应商分拣', to: '/mobile/sort-by-supplier' },
+            { label: '综合分拣', to: '/mobile/sort-comprehensive' },
+          ]}
+          actionLinks={[{ label: '📋 生成采购订单', onClick: () => void generatePurchaseOrdersForDate() }]}
+          stats={[
+            { value: totalCount, label: '商品种类' },
+            { value: suppliers.length, label: '供应商数' },
+            { value: savedCount, label: '已录入' },
+          ]}
+        />
+        <div className="history-bar">
+          <input
+            type="date"
+            title="选择日期检索该日期的历史销售订单，留空显示当前待分拣"
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
           />
-          {hasInput && <Tag color="success">已录入</Tag>}
-        </Space>
-      )
-    },
-  }
-  return base
-}
-
-function baseColumns(): NonNullable<TableProps<TodayPriceItem>['columns']> {
-  return [
-    {
-      title: '商品',
-      dataIndex: 'product_name',
-      width: 180,
-      render: (v: string, o) => (
-        <div>
-          <div style={{ fontWeight: 600 }}>{v}</div>
-          {o.spec && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{o.spec}</Typography.Text>}
+          <button onClick={() => void loadItems(date)}>检索</button>
+          <button
+            className="clear"
+            onClick={() => {
+              setDate('')
+              void loadItems('')
+            }}
+          >
+            清除
+          </button>
         </div>
-      ),
-    },
-    { title: '基本单位', dataIndex: 'base_unit', width: 90 },
-    {
-      title: '合计',
-      dataIndex: 'total_qty',
-      width: 130,
-      render: (v: number, o) => (
-        <span>
-          {v} {o.base_unit}
-          {o.qty_detail && (
-            <div>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>明细: {o.qty_detail}</Typography.Text>
+        <div className="filter-bar">
+          <input
+            type="text"
+            placeholder="搜索商品名称..."
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+          />
+          <button className="clear" onClick={() => setKeyword('')}>
+            清除
+          </button>
+        </div>
+      </div>
+
+      <div className="content-area content-area-padded">
+        {!loaded ? (
+          <EmptyState icon="📭" text="暂无采购订单" />
+        ) : sections.length === 0 ? (
+          <EmptyState icon="🔍" text="没有找到匹配的商品" />
+        ) : (
+          sections.map(({ supplier, items }) => (
+            <div className="category-section" key={supplier.supplier_id}>
+              <div className="category-header cat-supplier">
+                <h3>🏭 {supplier.supplier_name}</h3>
+                <div className="category-stats">共 {supplier.items.length} 种</div>
+              </div>
+              <div className="category-body">
+                {items.map((item) => {
+                  const key = `${supplier.supplier_id}_${item.product_id}`
+                  const raw = inputs[key]
+                  const hasInput = raw !== undefined && isValidPrice(raw)
+                  const defaultPrice = item.supplier_price > 0 ? item.supplier_price : item.purchase_price || 0
+                  return (
+                    <div className="price-card" key={item.product_id}>
+                      <div className="item-info">
+                        <div className="item-name">
+                          {item.product_name}
+                          {item.spec ? ` ${item.spec}` : ''}
+                        </div>
+                        <div className="item-detail">
+                          <span>基本单位: {item.base_unit}</span>
+                          <span>合计: {item.total_qty} {item.base_unit}</span>
+                          {item.qty_detail && <span>明细: {item.qty_detail}</span>}
+                        </div>
+                        <div className="item-detail" style={{ marginTop: 4 }}>
+                          <span style={{ color: '#16a34a' }}>最高 {fmtPrice(item.max_purchase_price)}</span>
+                          <span style={{ color: '#dc2626' }}>最低 {fmtPrice(item.min_purchase_price)}</span>
+                          <span style={{ color: '#d97706' }}>最近 {fmtPrice(item.purchase_price)}</span>
+                          {item.supplier_price > 0 && <span style={{ color: '#2563eb' }}>该商 {fmtPrice(item.supplier_price)}</span>}
+                          {hasInput && <span className="saved-tag">已录入</span>}
+                        </div>
+                      </div>
+                      <div className="price-badge">
+                        <div className="price-label">今日价</div>
+                        <input
+                          type="number"
+                          min={0}
+                          step="any"
+                          className="price-input"
+                          placeholder={defaultPrice > 0 ? Number(defaultPrice).toFixed(2) : ''}
+                          value={raw ?? ''}
+                          onChange={(e) => setInput(supplier.supplier_id, item.product_id, e.target.value)}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
             </div>
-          )}
-        </span>
-      ),
-    },
-    { title: '最高', dataIndex: 'max_purchase_price', width: 80, align: 'right', render: (v: number) => <span style={{ color: '#16a34a' }}>{fmtPrice(v)}</span> },
-    { title: '最低', dataIndex: 'min_purchase_price', width: 80, align: 'right', render: (v: number) => <span style={{ color: '#dc2626' }}>{fmtPrice(v)}</span> },
-    { title: '最近', dataIndex: 'purchase_price', width: 80, align: 'right', render: (v: number) => <span style={{ color: '#d97706' }}>{fmtPrice(v)}</span> },
-    { title: '该商', dataIndex: 'supplier_price', width: 80, align: 'right', render: (v: number) => (v > 0 ? <span style={{ color: '#2563eb' }}>{fmtPrice(v)}</span> : '-') },
-    { title: '今日价', key: 'input', width: 150 },
-  ]
+          ))
+        )}
+      </div>
+
+      <div className="bottom-bar">
+        <button className="btn-save" onClick={() => void savePrices()}>保存今日价</button>
+        <button className="btn-export" onClick={() => doExport('excel', true)}>导出XLSX</button>
+        <button className="btn-export-plain" onClick={() => doExport('excel', false)}>导出(手写价)</button>
+        <button className="btn-export" onClick={() => doExport('category', true)}>导出(按分类)</button>
+        <button className="btn-export" onClick={() => doExport('a4', true)}>导出(A4)</button>
+        <button className="btn-export-plain" onClick={() => doExport('a4', false)}>导出A4(手写价)</button>
+      </div>
+    </div>
+  )
 }

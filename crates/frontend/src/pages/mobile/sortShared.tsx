@@ -152,6 +152,8 @@ export function PageHeader(props: {
   info: string
   links: SwitchLink[]
   stats: { value: number; label: string }[]
+  /** 非导航的动作链接（如"生成采购订单"），渲染在切换链接之后 */
+  actionLinks?: { label: string; onClick: () => void }[]
 }) {
   return (
     <div className="page-header" style={{ background: props.gradient }}>
@@ -162,6 +164,11 @@ export function PageHeader(props: {
           <Link key={l.to + l.label} to={l.to} className={l.highlight ? 'switch-link switch-link-highlight' : 'switch-link'}>
             {l.label}
           </Link>
+        ))}
+        {props.actionLinks?.map((a) => (
+          <a key={a.label} className="switch-link" style={{ cursor: 'pointer' }} onClick={a.onClick}>
+            {a.label}
+          </a>
         ))}
       </div>
       <div className="stats-bar">
