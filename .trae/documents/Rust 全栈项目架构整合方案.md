@@ -1,8 +1,15 @@
-# Rust 全栈项目架构整合方案
+> ⚠️ **SUPERSEDED**
+>
+> 本文档为初始脚手架模板态（Dioxus + PostgreSQL + Redis + Docker），与本仓库实际架构（Rust 2024 + Axum + SQLite + 严格六边形）已完全不符，仅供架构思路参考。
+>
+> **本仓库的权威架构规范**：
+> - [六边形分层规则.md](./六边形分层规则.md) — ADR，长期有效
+> - [六边形严格化整改计划.md](./六边形严格化整改计划.md) — Phase 0-3 已全部完成
+> - [全项目重构计划-workspace拆分与React迁移.md](./全项目重构计划-workspace拆分与React迁移.md) — 阶段一已完成
 
-# Rust 全栈项目架构整合方案
+# Rust 全栈项目架构整合方案
 
-**版本**: v1.0   **日期**: 2026-05-20   **适用技术栈**: Axum + Dioxus + SQLite + PostgreSQL + Redis
+**版本**: v1.0   **日期**: 2026-05-20   **适用技术栈**: Axum + Dioxus + SQLite + PostgreSQL + Redis
 
 ---
 

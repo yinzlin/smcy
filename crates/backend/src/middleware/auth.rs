@@ -1,13 +1,14 @@
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Html;
-use sqlx::Row;
 use std::collections::{HashMap, HashSet};
 
 use common::utils::layout_html;
-use database::pool;
 use domain::UserCtx;
+use domain::port::{UserRepo, OperationLogRepo, SalesOrderRepo};
 
-pub async fn get_user_role(headers: &HeaderMap) -> String {
+use crate::di::App;
+
+pub async fn get_user_role(app: &App, headers: &HeaderMap) -> String {
     let session_token = headers.get("cookie")
         .and_then(|v| v.to_str().ok())
         .and_then(|cookies| {
@@ -15,34 +16,25 @@ pub async fn get_user_role(headers: &HeaderMap) -> String {
                 .map(|s| s.trim().strip_prefix("session=").unwrap_or(""))
         })
         .unwrap_or("");
-    
+
     if session_token.is_empty() {
         return "anonymous".to_string();
     }
-    
+
     let parts: Vec<&str> = session_token.split(':').collect();
     if parts.len() < 2 {
         return "anonymous".to_string();
     }
-    
+
     let user_id = match parts[0].parse::<i64>() {
         Ok(id) => id,
         Err(_) => return "anonymous".to_string(),
     };
-    
-    let rows = sqlx::query(
-        "SELECT role FROM user_account WHERE id = ? AND status = 1"
-    )
-    .bind(user_id)
-    .fetch_all(pool())
-    .await
-    .unwrap_or_default();
-    
-    if rows.is_empty() {
-        return "anonymous".to_string();
+
+    match app.user_repo.find_active_by_id(user_id).await {
+        Ok(Some(row)) => row.role,
+        _ => "anonymous".to_string(),
     }
-    
-    rows[0].get::<String, _>("role")
 }
 
 pub fn has_permission(role: &str, required_role: &str) -> bool {
@@ -54,7 +46,7 @@ pub fn has_permission(role: &str, required_role: &str) -> bool {
         ("user", vec!["query"]),
         ("anonymous", vec![]),
     ]);
-    
+
     role_permissions.get(role)
         .map(|permissions| permissions.contains(&required_role))
         .unwrap_or(false)
@@ -64,10 +56,7 @@ pub fn has_permission(role: &str, required_role: &str) -> bool {
 // 权限点：resource.action，如 purchase_order.update
 // 角色 → 权限点映射，super_admin 拥有全部权限
 
-/// 判断某角色是否拥有指定权限点
 pub fn has_permission_point(role: &str, permission: &str) -> bool {
-    // 全部业务权限点（供 super_admin 全量拥有）
-    // supplier/purchaser 为基础资料管理权限点：供应商/采购方角色及以上可维护各自基础资料
     const ALL_PERMS: [&str; 24] = [
         "purchase_order.view", "purchase_order.create", "purchase_order.update", "purchase_order.approve", "purchase_order.unapprove", "purchase_order.cancel", "purchase_order.delete",
         "sales_order.view", "sales_order.create", "sales_order.update", "sales_order.approve", "sales_order.unapprove", "sales_order.adjust_price", "sales_order.cancel", "sales_order.delete",
@@ -98,8 +87,7 @@ pub fn has_permission_point(role: &str, permission: &str) -> bool {
     role_perms.contains(permission)
 }
 
-/// 解析用户上下文：cookie session -> (role, user_id, supplier_id, purchaser_id)
-pub async fn get_user_ctx(headers: &HeaderMap) -> UserCtx {
+pub async fn get_user_ctx(app: &App, headers: &HeaderMap) -> UserCtx {
     let session_token = headers.get("cookie")
         .and_then(|v| v.to_str().ok())
         .and_then(|cookies| {
@@ -123,53 +111,28 @@ pub async fn get_user_ctx(headers: &HeaderMap) -> UserCtx {
         Err(_) => return empty,
     };
 
-    let rows = sqlx::query(
-        "SELECT role, COALESCE(supplier_id,0) as supplier_id, COALESCE(purchaser_id,0) as purchaser_id FROM user_account WHERE id = ? AND status = 1"
-    )
-    .bind(user_id)
-    .fetch_all(pool())
-    .await
-    .unwrap_or_default();
-
-    if rows.is_empty() {
-        return empty;
-    }
-    let row = &rows[0];
-    UserCtx {
-        role: row.get::<String, _>("role"),
-        user_id,
-        supplier_id: row.get::<i64, _>("supplier_id"),
-        purchaser_id: row.get::<i64, _>("purchaser_id"),
+    match app.user_repo.session_ctx(user_id).await {
+        Ok(Some(row)) => UserCtx {
+            role: row.role,
+            user_id,
+            supplier_id: row.supplier_id,
+            purchaser_id: row.purchaser_id,
+        },
+        _ => empty,
     }
 }
 
-/// 记录操作审计日志（关键写操作）
 pub async fn log_operation(
+    app: &App,
     user: &UserCtx,
     action: &str,
     target_type: &str,
     target_id: &str,
     detail: &str,
 ) {
-    let username: String = sqlx::query_scalar("SELECT COALESCE(username,'') FROM user_account WHERE id = ?")
-        .bind(user.user_id)
-        .fetch_one(pool())
-        .await
-        .unwrap_or_default();
-    let _ = sqlx::query(
-        "INSERT INTO operation_log(user_id, username, action, target_type, target_id, detail) VALUES (?, ?, ?, ?, ?, ?)"
-    )
-    .bind(user.user_id)
-    .bind(&username)
-    .bind(action)
-    .bind(target_type)
-    .bind(target_id)
-    .bind(detail)
-    .execute(pool())
-    .await;
+    let _ = app.oplog_repo.log(user, action, target_type, target_id, detail).await;
 }
 
-/// 判断用户是否可操作该采购单（行级数据权限）：admin/super_admin 可见全部；supplier 仅可见自己绑定的供应商
 pub fn can_access_purchase_order(user: &UserCtx, order_supplier_id: i64) -> bool {
     match user.role.as_str() {
         "super_admin" | "admin" => true,
@@ -178,7 +141,6 @@ pub fn can_access_purchase_order(user: &UserCtx, order_supplier_id: i64) -> bool
     }
 }
 
-/// 判断用户是否可操作该销售单（行级数据权限）：admin/super_admin 可见全部；purchaser 仅可见自己绑定的采购单位
 pub fn can_access_sales_order(user: &UserCtx, order_purchaser_id: i64) -> bool {
     match user.role.as_str() {
         "super_admin" | "admin" => true,
@@ -211,10 +173,8 @@ pub fn get_route_required_role(path: &str) -> Option<&str> {
 
 pub fn check_api_route_permission(path: &str) -> Option<&str> {
     if path.starts_with("/api/supplier/") {
-        // 供应商基础资料：supplier 角色以上可访问
         Some("supplier")
     } else if path.starts_with("/api/purchaser/") {
-        // 采购单位基础资料：purchaser 角色以上可访问
         Some("purchaser")
     } else if path.starts_with("/api/product/") {
         Some("manage.admin")
@@ -223,7 +183,6 @@ pub fn check_api_route_permission(path: &str) -> Option<&str> {
     } else if path.starts_with("/api/inventory/") {
         Some("manage.admin")
     } else if path.starts_with("/api/purchase_order/") {
-        // 采购单：按操作细分权限点
         if path.ends_with("/create") || path.ends_with("/import") {
             Some("purchase_order.create")
         } else if path.ends_with("/update") {
@@ -240,14 +199,12 @@ pub fn check_api_route_permission(path: &str) -> Option<&str> {
             Some("purchase_order.view")
         }
     } else if path.starts_with("/api/purchase_document/") {
-        // 采购单据：上传/删除属于写操作
         if path.ends_with("/upload") || path.ends_with("/delete") {
             Some("purchase_order.update")
         } else {
             Some("purchase_order.view")
         }
     } else if path.starts_with("/api/sales_order/") {
-        // 销售单：按操作细分权限点
         if path.ends_with("/create") || path.ends_with("/import") || path.contains("/generate_purchase") {
             Some("sales_order.create")
         } else if path.ends_with("/update") || path.ends_with("/correction") || path.ends_with("/upload_image") || path.ends_with("/delete_image") {
@@ -276,19 +233,16 @@ pub fn check_api_route_permission(path: &str) -> Option<&str> {
     } else if path.starts_with("/api/query/stock") || path.starts_with("/api/query/income") || path.starts_with("/api/query/profit") || path.starts_with("/api/query/overview") || path.starts_with("/api/query/category") || path.starts_with("/api/query/document") {
         Some("manage.admin")
     } else if path.starts_with("/api/stock_movement/") {
-        // 库存台账维护（清空/重新生成）：仅管理员
         Some("manage.admin")
     } else if path.starts_with("/api/query/") {
         Some("query.view")
     } else if path.starts_with("/api/user/") {
         if path == "/api/user/list" {
-            // 用户列表（用于采购单/销售单经手人选择），采购/销售/管理员均可访问
             Some("query.view")
         } else {
             Some("manage.user")
         }
     } else if path.starts_with("/api/price_schedule/") {
-        // 价格策略管理：写操作（增/改/删/导入）需 manage 权限，读操作（list/history/lookup/batch_lookup/export/backfill）view 权限
         if path.ends_with("/list")
             || path.ends_with("/history")
             || path.ends_with("/lookup")
@@ -313,10 +267,9 @@ pub fn check_api_route_permission(path: &str) -> Option<&str> {
     }
 }
 
-/// 校验 API 权限：返回权限点对应的角色校验（权限点系统）
-pub async fn check_api_permission(headers: &HeaderMap, path: &str) -> Result<String, (StatusCode, String)> {
-    let ctx = get_user_ctx(headers).await;
-    
+pub async fn check_api_permission(app: &App, headers: &HeaderMap, path: &str) -> Result<String, (StatusCode, String)> {
+    let ctx = get_user_ctx(app, headers).await;
+
     if let Some(permission) = check_api_route_permission(path) {
         if !has_permission_point(&ctx.role, permission) {
             return Err((StatusCode::FORBIDDEN, serde_json::to_string(&serde_json::json!({
@@ -325,13 +278,13 @@ pub async fn check_api_permission(headers: &HeaderMap, path: &str) -> Result<Str
             })).unwrap()));
         }
     }
-    
+
     Ok(ctx.role)
 }
 
-pub async fn check_page_permission(headers: &HeaderMap, path: &str) -> Result<String, Html<String>> {
-    let role = get_user_role(headers).await;
-    
+pub async fn check_page_permission(app: &App, headers: &HeaderMap, path: &str) -> Result<String, Html<String>> {
+    let role = get_user_role(app, headers).await;
+
     if let Some(required_role) = get_route_required_role(path) {
         if !has_permission(&role, required_role) {
             if role == "anonymous" {
@@ -351,19 +304,15 @@ pub async fn check_page_permission(headers: &HeaderMap, path: &str) -> Result<St
     Ok(role)
 }
 
-/// 校验用户是否有权查看/导出指定销售单（行级数据权限）
 pub async fn check_sales_order_access(
-    headers: &axum::http::HeaderMap,
+    app: &App,
+    headers: &HeaderMap,
     id: i64,
-) -> Result<(), (axum::http::StatusCode, String)> {
-    let ctx = get_user_ctx(headers).await;
-    let order_purchaser_id: i64 = sqlx::query_scalar("SELECT purchaser_id FROM sales_order WHERE id = ?")
-        .bind(id)
-        .fetch_one(pool())
-        .await
-        .unwrap_or(-1);
+) -> Result<(), (StatusCode, String)> {
+    let ctx = get_user_ctx(app, headers).await;
+    let order_purchaser_id = app.sales_order_repo.fetch_purchaser_id_or_neg1(id).await;
     if !can_access_sales_order(&ctx, order_purchaser_id) {
-        return Err((axum::http::StatusCode::FORBIDDEN, "您没有权限查看此订单".to_string()));
+        return Err((StatusCode::FORBIDDEN, "您没有权限查看此订单".to_string()));
     }
     Ok(())
 }
