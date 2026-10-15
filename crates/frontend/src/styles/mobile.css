@@ -9,3 +9,232 @@
 .ant-drawer-content-wrapper {
   max-width: 100vw;
 }
+
+/* ---- 移动分拣族（/app/mobile/sort* 与 /app/today-price）外壳 ---- */
+.mobile-root {
+  min-height: 100vh;
+  background: #f5f7fa;
+}
+
+.mobile-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.mobile-header {
+  color: #fff;
+  padding: 16px;
+}
+
+.mobile-header h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.mobile-header-info {
+  margin-top: 4px;
+  font-size: 13px;
+  opacity: 0.9;
+}
+
+.mobile-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.mobile-header .mobile-nav-link {
+  background: rgba(255, 255, 255, 0.22);
+  border-color: transparent;
+  color: #fff;
+  font-size: 13px;
+}
+
+.mobile-header .mobile-nav-link:hover {
+  background: rgba(255, 255, 255, 0.34);
+  border-color: transparent;
+  color: #fff;
+}
+
+.mobile-header .mobile-nav-link.active {
+  background: #fff;
+  color: #1677ff;
+  font-weight: 700;
+}
+
+.mobile-stats {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.mobile-stat {
+  flex: 1;
+  text-align: center;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  padding: 6px 4px;
+}
+
+.mobile-stat b {
+  display: block;
+  font-size: 16px;
+}
+
+.mobile-stat span {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+/* 检索/搜索栏（吸顶区内的浅色带） */
+.mobile-bar {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  background: #fff;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+/* 列表行 */
+.mobile-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: #fff;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.mobile-row:last-child {
+  border-bottom: none;
+}
+
+.mobile-row.checked {
+  background: #f0fdf4;
+}
+
+.mobile-row-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.mobile-row-title {
+  margin-bottom: 4px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #333;
+}
+
+.mobile-row-side {
+  flex-shrink: 0;
+  text-align: right;
+}
+
+.mobile-qty-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: #1677ff;
+}
+
+.mobile-qty-unit {
+  font-size: 11px;
+  color: #888;
+}
+
+.mobile-section {
+  margin-bottom: 12px;
+}
+
+/* 卡片体内次级分组头 */
+.mobile-subheader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: #fafafa;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.mobile-subheader-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #555;
+}
+
+.mobile-subheader-extra {
+  font-size: 12px;
+  color: #888;
+}
+
+/* 列表主体：底部预留吸底操作栏（含换行后的高度）与安全区 */
+.mobile-content {
+  padding: 12px;
+  padding-bottom: calc(150px + env(safe-area-inset-bottom));
+}
+
+.mobile-bottom-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 200;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+  background: #fff;
+  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.mobile-bottom-bar .ant-btn {
+  flex: 1 1 auto;
+  min-width: 96px;
+  font-size: 13px;
+}
+
+/* 综合分拣：采购单位折叠区（antd Collapse 收敛为白卡样式） */
+.mobile-collapse.ant-collapse {
+  background: transparent;
+  border: none;
+}
+
+.mobile-collapse .ant-collapse-item {
+  margin-bottom: 12px;
+  background: #fff;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.mobile-collapse .ant-collapse-header {
+  padding: 12px 14px;
+  align-items: center;
+}
+
+.mobile-collapse .ant-collapse-content-box {
+  padding: 0;
+}
+
+.mobile-collapse-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+}
+
+.mobile-collapse-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #333;
+}
+
+.mobile-collapse-extra {
+  font-size: 12px;
+  color: #888;
+}
+
+

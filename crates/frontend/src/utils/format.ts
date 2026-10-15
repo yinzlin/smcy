@@ -24,3 +24,9 @@ export function monthRange(month: string): { start: string; end: string } {
   const d = month ? month + '-01' : ''
   return { start: d, end: d ? d.slice(0, 7) + '-31' : '' }
 }
+
+/** 当天日期 YYYY-MM-DD（本地时区，供移动分拣族默认检索日期使用） */
+export function todayStr(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}

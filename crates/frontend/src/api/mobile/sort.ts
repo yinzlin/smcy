@@ -19,7 +19,7 @@ export function sortItemsExcelUrl(date: string): string {
   return `/api/sales_order/sort_items_excel${date ? `?date=${encodeURIComponent(date)}` : ''}`
 }
 
-/** 数量修正保存（后端返回纯文本，与老页 alert(text) 行为一致；供 sortShared 的 useSortState 使用） */
+/** 数量修正保存（后端返回纯文本，由 useSortSelection 统一提示；供统筹分拣页使用） */
 export async function saveCorrections(corrections: { id: number; quantity: number }[]): Promise<string> {
   const res = await fetch('/api/sales_order/correction', {
     method: 'POST',

@@ -4,6 +4,7 @@ import { Spin } from 'antd'
 import RequireAuth from './components/RequireAuth'
 import MainLayout from './layouts/MainLayout'
 import LoginPage from './pages/LoginPage'
+import { MobileShell } from './pages/mobile/mobileKit'
 
 // 首页静态引入，其余页面按路由分包（减小首屏 bundle，兼容 Win7 低配机器）
 import HomePage from './pages/HomePage'
@@ -140,14 +141,17 @@ export default function App() {
           <Route path="operation-log" element={<Suspense fallback={<PageFallback />}><OperationLogPage /></Suspense>} />
           <Route path="inventory" element={<Suspense fallback={<PageFallback />}><InventoryPage /></Suspense>} />
         </Route>
-        {/* 移动端分拣页：独立于主布局的全屏移动页（与老 /mobile/sort* 一致无侧边栏） */}
-        <Route path="mobile/sort" element={<Suspense fallback={<PageFallback />}><MobileSortPage /></Suspense>} />
-        <Route path="mobile/sort-by-purchaser" element={<Suspense fallback={<PageFallback />}><MobileSortByPurchaserPage /></Suspense>} />
-        <Route path="mobile/sort-by-category" element={<Suspense fallback={<PageFallback />}><MobileSortByCategoryPage /></Suspense>} />
-        <Route path="mobile/sort-by-supplier" element={<Suspense fallback={<PageFallback />}><MobileSortBySupplierPage /></Suspense>} />
-        <Route path="mobile/sort-comprehensive" element={<Suspense fallback={<PageFallback />}><MobileSortComprehensivePage /></Suspense>} />
-        {/* 今日进价采集：与移动分拣页同族的全屏手写页（老 /mobile/today_price 形态） */}
-        <Route path="today-price" element={<Suspense fallback={<PageFallback />}><TodayPricePage /></Suspense>} />
+        {/* 移动端分拣族：独立于主布局的全屏移动页（不挂 MainLayout、无 RequireAuth），
+            由 MobileShell 统一下发移动端 antd 触控主题 */}
+        <Route element={<MobileShell />}>
+          <Route path="mobile/sort" element={<Suspense fallback={<PageFallback />}><MobileSortPage /></Suspense>} />
+          <Route path="mobile/sort-by-purchaser" element={<Suspense fallback={<PageFallback />}><MobileSortByPurchaserPage /></Suspense>} />
+          <Route path="mobile/sort-by-category" element={<Suspense fallback={<PageFallback />}><MobileSortByCategoryPage /></Suspense>} />
+          <Route path="mobile/sort-by-supplier" element={<Suspense fallback={<PageFallback />}><MobileSortBySupplierPage /></Suspense>} />
+          <Route path="mobile/sort-comprehensive" element={<Suspense fallback={<PageFallback />}><MobileSortComprehensivePage /></Suspense>} />
+          {/* 今日进价采集：同族全屏页（老 /mobile/today_price 形态），GET 数据接口公开、POST 修正需登录 */}
+          <Route path="today-price" element={<Suspense fallback={<PageFallback />}><TodayPricePage /></Suspense>} />
+        </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>
