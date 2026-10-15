@@ -414,7 +414,6 @@ name = "common"
 version = "3.7.0"
 dependencies = [
  "axum",
- "chrono",
  "rust_xlsxwriter",
  "serde",
  "serde_json",

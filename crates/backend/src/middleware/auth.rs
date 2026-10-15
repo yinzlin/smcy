@@ -1,8 +1,6 @@
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::Html;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use common::utils::layout_html;
 use domain::UserCtx;
 use domain::port::{UserRepo, OperationLogRepo, SalesOrderRepo};
 
@@ -35,21 +33,6 @@ pub async fn get_user_role(app: &App, headers: &HeaderMap) -> String {
         Ok(Some(row)) => row.role,
         _ => "anonymous".to_string(),
     }
-}
-
-pub fn has_permission(role: &str, required_role: &str) -> bool {
-    let role_permissions = HashMap::from([
-        ("super_admin", vec!["super_admin", "admin", "supplier", "purchaser", "query"]),
-        ("admin", vec!["admin", "supplier", "purchaser", "query"]),
-        ("supplier", vec!["supplier", "query"]),
-        ("purchaser", vec!["purchaser", "query"]),
-        ("user", vec!["query"]),
-        ("anonymous", vec![]),
-    ]);
-
-    role_permissions.get(role)
-        .map(|permissions| permissions.contains(&required_role))
-        .unwrap_or(false)
 }
 
 // ===== 细粒度权限点系统（工程化 RBAC） =====
@@ -146,28 +129,6 @@ pub fn can_access_sales_order(user: &UserCtx, order_purchaser_id: i64) -> bool {
         "super_admin" | "admin" => true,
         "purchaser" => user.purchaser_id == order_purchaser_id,
         _ => false,
-    }
-}
-
-pub fn get_route_required_role(path: &str) -> Option<&str> {
-    match path {
-        "/supplier" | "/api/supplier/create" | "/api/supplier/update" | "/api/supplier/delete" => Some("supplier"),
-        "/purchaser" | "/api/purchaser/create" | "/api/purchaser/update" | "/api/purchaser/delete" => Some("purchaser"),
-        "/product" | "/api/product/create" | "/api/product/update" | "/api/product/delete" => Some("admin"),
-        "/warehouse" | "/api/warehouse/create" | "/api/warehouse/update" | "/api/warehouse/delete" => Some("admin"),
-        "/inventory" => Some("admin"),
-        "/purchase" | "/api/purchase_order/create" | "/api/purchase_order/update" | "/api/purchase_order/delete" => Some("supplier"),
-        "/sales" | "/api/sales_order/create" | "/api/sales_order/update" | "/api/sales_order/update_prices" | "/api/sales_order/delete" | "/api/sales_order/upload_image" | "/api/sales_order/delete_image" => Some("purchaser"),
-        "/query/purchase_order" | "/query/purchase_document" | "/query/purchase_price" | "/query/purchase_summary" | "/query/supplier_balance" => Some("supplier"),
-        "/query/sales_order" | "/query/sales_summary" | "/query/sales_price" | "/query/purchaser_balance" | "/query/product_rank" | "/query/reimburse_summary" | "/query/allocation_source" | "/query/order_adjust" | "/query/price_schedule" => Some("purchaser"),
-        "/query/stock_balance" | "/query/stock_flow" | "/query/stock_warning" | "/query/slow_stock" | "/query/stock_summary" | "/query/stock_summary_reimburse" => Some("admin"),
-        "/query/income_expense" | "/query/profit_detail" | "/query/overview" | "/query/category_stats" | "/query/document_summary" => Some("admin"),
-        "/user" | "/api/user" | "/api/user/*" => Some("super_admin"),
-        "/system" | "/api/system/config" => Some("super_admin"),
-        "/system/operation_log" => Some("admin"),
-        "/backup" | "/api/backup" | "/api/backup/*" => Some("super_admin"),
-        "/restore" | "/api/restore/*" => Some("super_admin"),
-        _ => None,
     }
 }
 
@@ -280,28 +241,6 @@ pub async fn check_api_permission(app: &App, headers: &HeaderMap, path: &str) ->
     }
 
     Ok(ctx.role)
-}
-
-pub async fn check_page_permission(app: &App, headers: &HeaderMap, path: &str) -> Result<String, Html<String>> {
-    let role = get_user_role(app, headers).await;
-
-    if let Some(required_role) = get_route_required_role(path) {
-        if !has_permission(&role, required_role) {
-            if role == "anonymous" {
-                return Err(Html(String::from(r#"
-                    <!DOCTYPE html>
-                    <html>
-                    <head><meta http-equiv="refresh" content="0; url=/login"></head>
-                    <body>请登录</body>
-                    </html>
-                "#)));
-            }
-            let content = r#"<div class="container mt-5"><div class="alert alert-danger text-center" style="font-size:1.5rem;">您没有权限访问此页面</div></div>"#;
-            return Err(Html(layout_html("无权限", path, content)));
-        }
-    }
-
-    Ok(role)
 }
 
 pub async fn check_sales_order_access(

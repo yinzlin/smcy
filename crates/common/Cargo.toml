@@ -2,11 +2,10 @@
 name = "common"
 version = "3.7.0"
 edition = "2024"
-description = "通用工具层：Excel 导出辅助、页面布局、文件名处理等无业务依赖的纯工具"
+description = "通用工具层：Excel 导出辅助、文件名处理等无业务依赖的纯工具"
 
 [dependencies]
 axum = { workspace = true }
 rust_xlsxwriter = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-chrono = { workspace = true }
