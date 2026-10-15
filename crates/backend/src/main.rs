@@ -6,21 +6,27 @@ mod app_assets;
 mod di;
 mod tray;
 
-// ---- 兼容 shim：保持历史代码中的 crate::xxx 路径不变 ----
-pub(crate) use common::utils;
-pub(crate) use database as db;
-pub(crate) use domain as models;
-pub(crate) use crate::middleware::auth;
-
-pub(crate) use application::service::*;
-pub(crate) use common::utils::*;
-pub(crate) use crate::middleware::auth::*;
-
+use std::sync::atomic::{AtomicU16, Ordering};
 use tao::event_loop::{ControlFlow, EventLoop};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{TrayIconBuilder, TrayIconEvent};
 
+/// 实际监听端口：优先 80，被占用时自动回退 8080~8099，供托盘「打开页面」读取
+static ACTUAL_PORT: AtomicU16 = AtomicU16::new(80);
+
+pub fn actual_port() -> u16 {
+    ACTUAL_PORT.load(Ordering::Relaxed)
+}
+
 fn main() {
+    // 锁定工作目录为 exe 所在目录，确保数据库、uploads、backups 始终生成在程序同级目录，
+    // 不受快捷方式「起始位置」影响
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let _ = std::env::set_current_dir(dir);
+        }
+    }
+
     std::thread::spawn(|| {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -29,8 +35,15 @@ fn main() {
         rt.block_on(async {
             let state = di::bootstrap().await;
             let app = api::routes::build_router().with_state(state);
-            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 80));
-            let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+            let mut bound = None;
+            for port in std::iter::once(80u16).chain(8080u16..=8099) {
+                if let Ok(listener) = tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).await {
+                    bound = Some((listener, port));
+                    break;
+                }
+            }
+            let (listener, port) = bound.expect("没有可用端口（80 与 8080~8099 均被占用）");
+            ACTUAL_PORT.store(port, Ordering::Relaxed);
             axum::serve(listener, app).await.unwrap();
         });
     });

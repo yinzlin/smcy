@@ -31,7 +31,13 @@ pub fn make_app_icon() -> Icon {
 }
 
 pub fn open_browser() {
+    let port = crate::actual_port();
+    let url = if port == 80 {
+        "http://127.0.0.1/".to_string()
+    } else {
+        format!("http://127.0.0.1:{}/", port)
+    };
     let _ = std::process::Command::new("cmd")
-        .args(["/C", "start", "", "http://127.0.0.1/"])
+        .args(["/C", "start", "", &url])
         .spawn();
 }

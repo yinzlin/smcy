@@ -3,9 +3,9 @@ use axum::response::Html;
 use sqlx::Row;
 use std::collections::{HashMap, HashSet};
 
-use crate::utils::layout_html;
-use crate::db::pool;
-use crate::models::UserCtx;
+use common::utils::layout_html;
+use database::pool;
+use domain::UserCtx;
 
 pub async fn get_user_role(headers: &HeaderMap) -> String {
     let session_token = headers.get("cookie")
@@ -359,7 +359,7 @@ pub async fn check_sales_order_access(
     let ctx = get_user_ctx(headers).await;
     let order_purchaser_id: i64 = sqlx::query_scalar("SELECT purchaser_id FROM sales_order WHERE id = ?")
         .bind(id)
-        .fetch_one(crate::db::pool())
+        .fetch_one(pool())
         .await
         .unwrap_or(-1);
     if !can_access_sales_order(&ctx, order_purchaser_id) {
