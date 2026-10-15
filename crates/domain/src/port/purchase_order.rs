@@ -187,6 +187,45 @@ pub struct PurchaseOrderItemInput {
     pub batch_no: Option<String>,
 }
 
+/// 采购单明细域内纯业务规则（零 IO，紧绑 PurchaseOrderItemInput）
+impl PurchaseOrderItemInput {
+    /// 按明细列表汇总主表仓库：各行全部同一仓库则记该仓库；否则仓库名去重后以"、"连接
+    pub fn derive_main_warehouse(items: &[Self]) -> (i64, String) {
+        let mut wh_id_set: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        let mut wh_names: Vec<String> = Vec::new();
+        for it in items {
+            let wid = it.warehouse_id.unwrap_or(0);
+            let wname = it.warehouse_name.clone().unwrap_or_default();
+            if wid > 0 { wh_id_set.insert(wid); }
+            if !wname.trim().is_empty() && !wh_names.contains(&wname) { wh_names.push(wname); }
+        }
+        let main_wh_id = if wh_id_set.len() == 1 { *wh_id_set.iter().next().unwrap() } else { 0 };
+        let main_wh_name = wh_names.join("、");
+        (main_wh_id, main_wh_name)
+    }
+
+    /// base_quantity 重算入参组装（product_unit.ratio 权威），不信任前端值
+    pub fn base_inputs_of(items: &[Self]) -> Vec<(i64, String, f64, f64)> {
+        items.iter()
+            .map(|it| (it.product_id, it.unit.clone().unwrap_or_default(), it.quantity, it.base_quantity.unwrap_or(0.0)))
+            .collect()
+    }
+
+    /// 采购明细 → 进价更新输入映射（跨模块引用 price_schedule::PurchasePriceInput）
+    pub fn price_inputs_of(items: &[Self]) -> Vec<crate::port::price_schedule::PurchasePriceInput> {
+        use crate::port::price_schedule::PurchasePriceInput;
+        items.iter()
+            .map(|it| PurchasePriceInput {
+                product_id: it.product_id,
+                unit_price: it.unit_price,
+                quantity: it.quantity,
+                base_quantity: it.base_quantity,
+                amount: it.amount,
+            })
+            .collect()
+    }
+}
+
 /// 采购单主表写入输入（domain 自有类型，不含 serde）
 #[derive(Debug, Clone)]
 pub struct PurchaseOrderInput {

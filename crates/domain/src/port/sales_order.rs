@@ -342,6 +342,26 @@ pub struct SalesOrderItemInput {
     pub remark: Option<String>,
 }
 
+/// 销售单明细域内纯业务规则（零 IO，紧绑 SalesOrderItemInput）
+impl SalesOrderItemInput {
+    /// 数量同步兜底：销售数量为 0 而预售数量 > 0 时，用预售数量兜底，
+    /// 避免后续生成采购时数量为 0 的空明细（创建/更新共用）
+    pub fn normalize(items: &mut [Self]) {
+        for it in items.iter_mut() {
+            if it.quantity <= 0.0 && it.pre_sale_quantity.unwrap_or(0.0) > 0.0 {
+                it.quantity = it.pre_sale_quantity.unwrap();
+            }
+        }
+    }
+
+    /// base_quantity 重算入参组装（product_unit.ratio 权威），不信任前端值
+    pub fn base_inputs_of(items: &[Self]) -> Vec<(i64, String, f64, f64)> {
+        items.iter()
+            .map(|it| (it.product_id, it.unit.clone().unwrap_or_default(), it.quantity, it.base_quantity.unwrap_or(0.0)))
+            .collect()
+    }
+}
+
 /// 销售单主表写入输入（domain 自有类型，不含 serde）
 #[derive(Debug, Clone)]
 pub struct SalesOrderInput {

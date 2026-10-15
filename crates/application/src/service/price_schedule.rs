@@ -24,64 +24,6 @@ impl<R: PriceScheduleRepo> PriceScheduleService<R> {
     }
 }
 
-/// 价格类型白名单：与前端 PriceTypeSelect 选项保持一致
-const PRICE_SCHEDULE_TYPES: &[&str] = &[
-    "gov_procurement",
-    "supermarket_1",
-    "supermarket_2",
-    "supermarket_3",
-    "ai_realtime",
-    "supplier_contract",
-    "purchaser_contract",
-];
-
-fn is_valid_price_type(price_type: &str) -> bool {
-    PRICE_SCHEDULE_TYPES.contains(&price_type)
-}
-
-/// 校验 price_schedule 录入请求的字段合法性，返回错误信息字符串（None 表示通过）
-fn validate_price_schedule_req(req: &PriceScheduleInput) -> Option<String> {
-    if req.product_id <= 0 {
-        return Some("product_id 必须大于 0".to_string());
-    }
-    if !is_valid_price_type(&req.price_type) {
-        return Some(format!(
-            "price_type 非法：{}（允许：{}）",
-            req.price_type,
-            PRICE_SCHEDULE_TYPES.join(", ")
-        ));
-    }
-    // 约定价必须指定对应方
-    if req.price_type == "supplier_contract" && req.supplier_id.unwrap_or(0) <= 0 {
-        return Some("供应商约定采购价必须选择供应商".to_string());
-    }
-    if req.price_type == "purchaser_contract" && req.purchaser_id.unwrap_or(0) <= 0 {
-        return Some("采购单位约定售价必须选择采购单位".to_string());
-    }
-    // 通用价格类型不应带 supplier_id / purchaser_id
-    if req.price_type != "supplier_contract" && req.supplier_id.is_some() {
-        return Some("仅供应商约定采购价可指定 supplier_id".to_string());
-    }
-    if req.price_type != "purchaser_contract" && req.purchaser_id.is_some() {
-        return Some("仅采购单位约定售价可指定 purchaser_id".to_string());
-    }
-    if !common::utils::is_valid_date_str(&req.effective_date) {
-        return Some(format!("effective_date 格式错误：{}", req.effective_date));
-    }
-    if let Some(end) = &req.end_date {
-        if !end.is_empty() && !common::utils::is_valid_date_str(end) {
-            return Some(format!("end_date 格式错误：{}", end));
-        }
-        if !end.is_empty() && end.as_str() < req.effective_date.as_str() {
-            return Some("end_date 不能早于 effective_date".to_string());
-        }
-    }
-    if req.price < 0.0 {
-        return Some("price 不能为负数".to_string());
-    }
-    None
-}
-
 /// 行级数据权限（自 backend middleware::auth::can_access_sales_order 平移，逻辑逐字一致）
 fn can_access_sales_order(user: &UserCtx, order_purchaser_id: i64) -> bool {
     match user.role.as_str() {
@@ -214,7 +156,7 @@ impl<R: PriceScheduleRepo> PriceScheduleUseCase for PriceScheduleService<R> {
         let req = PriceScheduleInput::from(req);
         // 价格策略是独立的价格时段数据，与商品基础信息的审核状态无关，
         // 因此不做「商品已审核则禁止修改」的锁定校验（市场价格随时变动，需随时可录入）
-        if let Some(err) = validate_price_schedule_req(&req) {
+        if let Some(err) = req.validate() {
             // 行为保持：create 校验失败返回 400 纯文本
             return Err(UseCaseError::RawResponse(400, err));
         }
@@ -258,7 +200,7 @@ impl<R: PriceScheduleRepo> PriceScheduleUseCase for PriceScheduleService<R> {
         if req.price < 0.0 {
             return Err(UseCaseError::RawResponse(400, "{\"success\":false, \"message\":\"price 不能为负数\"}".to_string()));
         }
-        if !is_valid_price_type(&req.price_type) {
+        if !PriceScheduleInput::is_valid_price_type(&req.price_type) {
             return Err(UseCaseError::RawResponse(400, "{\"success\":false, \"message\":\"price_type 非法\"}".to_string()));
         }
         if req.effective_date.trim().is_empty() {
@@ -361,7 +303,7 @@ impl<R: PriceScheduleRepo> PriceScheduleUseCase for PriceScheduleService<R> {
         let mut validated: Vec<PriceScheduleInput> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
         for it in items {
-            if let Some(e) = validate_price_schedule_req(&it) {
+            if let Some(e) = it.validate() {
                 errors.push(format!("商品 {} / {} / {} : {}", it.product_id, it.price_type, it.effective_date, e));
                 continue;
             }
@@ -653,7 +595,7 @@ impl<R: PriceScheduleRepo> PriceScheduleUseCase for PriceScheduleService<R> {
         if order_id <= 0 {
             return Err(UseCaseError::RawResponse(400, "{\"success\":false, \"message\":\"order_id 必填\"}".to_string()));
         }
-        if !is_valid_price_type(&price_type) {
+        if !PriceScheduleInput::is_valid_price_type(&price_type) {
             return Err(UseCaseError::RawResponse(400, format!("{{\"success\":false, \"message\":\"price_type 非法：{}\"}}", price_type)));
         }
 
@@ -886,7 +828,7 @@ impl<R: PriceScheduleRepo> PriceScheduleUseCase for PriceScheduleService<R> {
         let mut validated: Vec<PriceScheduleInput> = Vec::new();
         let mut errors = parse_errors;
         for it in items {
-            if let Some(e) = validate_price_schedule_req(&it) {
+            if let Some(e) = it.validate() {
                 errors.push(format!("商品 {} / {} / {} : {}", it.product_id, it.price_type, it.effective_date, e));
                 continue;
             }

@@ -42,23 +42,6 @@ fn can_access_sales_order(user: &UserCtx, order_purchaser_id: i64) -> bool {
     }
 }
 
-/// 数量同步兜底：保存时若销售数量为 0 而预售数量 > 0，用预售数量兜底，
-/// 避免后续生成采购时数量为 0 的空明细（创建/更新共用）
-fn normalize_quantities(items: &mut [SalesOrderItemInput]) {
-    for it in items.iter_mut() {
-        if it.quantity <= 0.0 && it.pre_sale_quantity.unwrap_or(0.0) > 0.0 {
-            it.quantity = it.pre_sale_quantity.unwrap();
-        }
-    }
-}
-
-/// base_quantity 服务端统一重算入参组装（product_unit.ratio 权威），不信任前端值
-fn base_inputs_of(items: &[SalesOrderItemInput]) -> Vec<(i64, String, f64, f64)> {
-    items.iter()
-        .map(|it| (it.product_id, it.unit.clone().unwrap_or_default(), it.quantity, it.base_quantity.unwrap_or(0.0)))
-        .collect()
-}
-
 impl<R: SalesOrderRepo, P: PurchaseOrderRepo, S: PriceScheduleRepo> SalesOrderService<R, P, S> {
     /// 详情/更新/调价/删除/结算/审核/反审核共用护栏：订单存在性 + 行级数据权限
     async fn guard(&self, id: i64, ctx: &UserCtx) -> Result<(i64, String), UseCaseError> {
@@ -174,7 +157,7 @@ impl<R: SalesOrderRepo, P: PurchaseOrderRepo, S: PriceScheduleRepo> SalesOrderUs
         }
 
         // 数量同步：保存时若销售数量为 0 而预售数量 > 0，用预售数量兜底
-        normalize_quantities(&mut req.items);
+        SalesOrderItemInput::normalize(&mut req.items);
 
         let order_id = match self.repo.insert_order(&req).await {
             Ok(id) => id,
@@ -182,7 +165,7 @@ impl<R: SalesOrderRepo, P: PurchaseOrderRepo, S: PriceScheduleRepo> SalesOrderUs
         };
 
         if !req.items.is_empty() {
-            let base_qtys = self.repo.compute_base_quantities(&base_inputs_of(&req.items)).await;
+            let base_qtys = self.repo.compute_base_quantities(&SalesOrderItemInput::base_inputs_of(&req.items)).await;
             let _ = self.repo.insert_items_batch(order_id, &req.items, &base_qtys).await;
         }
 
@@ -418,14 +401,14 @@ impl<R: SalesOrderRepo, P: PurchaseOrderRepo, S: PriceScheduleRepo> SalesOrderUs
         }
 
         // 数量同步：保存时若销售数量为 0 而预售数量 > 0，用预售数量兜底
-        normalize_quantities(&mut req.items);
+        SalesOrderItemInput::normalize(&mut req.items);
 
         let old_order_no = req.order_no.clone();
         let old_total = req.total_amount;
         let old_final = req.final_amount;
 
         // 服务端按当前单位换算比例统一计算基础数量，不信任前端值
-        let base_qtys = self.repo.compute_base_quantities(&base_inputs_of(&req.items)).await;
+        let base_qtys = self.repo.compute_base_quantities(&SalesOrderItemInput::base_inputs_of(&req.items)).await;
 
         match self.repo.update_order_with_items(&req, ver, &base_qtys).await {
             Ok(SalesOrderUpdateTx::Committed) => {

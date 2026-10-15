@@ -5,7 +5,7 @@
 
 use calamine::{open_workbook_auto_from_rs, Data, Reader};
 use domain::error::DomainError;
-use domain::port::price_schedule::{PriceScheduleRepo, PurchasePriceInput};
+use domain::port::price_schedule::PriceScheduleRepo;
 use domain::port::purchase_order::*;
 use crate::dto::PurchaseOrderReq;
 use domain::UserCtx;
@@ -34,41 +34,6 @@ fn can_access_purchase_order(user: &UserCtx, order_supplier_id: i64) -> bool {
         "supplier" => user.supplier_id == order_supplier_id,
         _ => false,
     }
-}
-
-/// 主表仓库按明细汇总：各行全部同一仓库则记该仓库；否则仓库名去重后以"、"连接（创建/更新共用）
-fn derive_main_warehouse(items: &[PurchaseOrderItemInput]) -> (i64, String) {
-    let mut wh_id_set: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    let mut wh_names: Vec<String> = Vec::new();
-    for it in items {
-        let wid = it.warehouse_id.unwrap_or(0);
-        let wname = it.warehouse_name.clone().unwrap_or_default();
-        if wid > 0 { wh_id_set.insert(wid); }
-        if !wname.trim().is_empty() && !wh_names.contains(&wname) { wh_names.push(wname); }
-    }
-    let main_wh_id = if wh_id_set.len() == 1 { *wh_id_set.iter().next().unwrap() } else { 0 };
-    let main_wh_name = wh_names.join("、");
-    (main_wh_id, main_wh_name)
-}
-
-/// base_quantity 服务端统一重算入参组装（product_unit.ratio 权威），不信任前端值——与销售单同一规则
-fn base_inputs_of(items: &[PurchaseOrderItemInput]) -> Vec<(i64, String, f64, f64)> {
-    items.iter()
-        .map(|it| (it.product_id, it.unit.clone().unwrap_or_default(), it.quantity, it.base_quantity.unwrap_or(0.0)))
-        .collect()
-}
-
-/// 采购明细 → 进价更新输入映射（domain 自有类型，端口不依赖 HTTP 契约）
-fn price_inputs_of(items: &[PurchaseOrderItemInput]) -> Vec<PurchasePriceInput> {
-    items.iter()
-        .map(|it| PurchasePriceInput {
-            product_id: it.product_id,
-            unit_price: it.unit_price,
-            quantity: it.quantity,
-            base_quantity: it.base_quantity,
-            amount: it.amount,
-        })
-        .collect()
 }
 
 impl<R: PurchaseOrderRepo, P: PriceScheduleRepo> PurchaseOrderService<R, P> {
@@ -106,7 +71,7 @@ impl<R: PurchaseOrderRepo, P: PriceScheduleRepo> PurchaseOrderUseCase for Purcha
             }
         }
 
-        let (main_wh_id, main_wh_name) = derive_main_warehouse(&req.items);
+        let (main_wh_id, main_wh_name) = PurchaseOrderItemInput::derive_main_warehouse(&req.items);
 
         let order_id = match self.repo.insert_order(&req, main_wh_id, &main_wh_name).await {
             Ok(id) => id,
@@ -114,10 +79,10 @@ impl<R: PurchaseOrderRepo, P: PriceScheduleRepo> PurchaseOrderUseCase for Purcha
         };
 
         if !req.items.is_empty() {
-            let base_qtys = self.repo.compute_base_quantities(&base_inputs_of(&req.items)).await;
+            let base_qtys = self.repo.compute_base_quantities(&PurchaseOrderItemInput::base_inputs_of(&req.items)).await;
             let _ = self.repo.insert_items_batch(order_id, &req.items, &base_qtys).await;
             // 采购入库后更新商品进价（当前/最高/最低）
-            let _ = self.price.update_product_purchase_prices(&price_inputs_of(&req.items)).await;
+            let _ = self.price.update_product_purchase_prices(&PurchaseOrderItemInput::price_inputs_of(&req.items)).await;
         }
 
         Ok(PurchaseOrderOutcome::with_log(
@@ -283,10 +248,10 @@ impl<R: PurchaseOrderRepo, P: PriceScheduleRepo> PurchaseOrderUseCase for Purcha
         }
 
         // 主表仓库按明细汇总（与创建逻辑一致）
-        let (main_wh_id, main_wh_name) = derive_main_warehouse(&req.items);
+        let (main_wh_id, main_wh_name) = PurchaseOrderItemInput::derive_main_warehouse(&req.items);
 
         // base_quantity 服务端统一重算（product_unit.ratio 权威），不信任前端值——与销售单同一规则
-        let base_qtys = self.repo.compute_base_quantities(&base_inputs_of(&req.items)).await;
+        let base_qtys = self.repo.compute_base_quantities(&PurchaseOrderItemInput::base_inputs_of(&req.items)).await;
 
         match self.repo.update_order_with_items(&req, main_wh_id, &main_wh_name, ver, &base_qtys).await {
             Ok(()) => {}
@@ -303,7 +268,7 @@ impl<R: PurchaseOrderRepo, P: PriceScheduleRepo> PurchaseOrderUseCase for Purcha
 
         if !req.items.is_empty() {
             // 采购单更新后同步商品进价（当前/最高/最低）
-            let _ = self.price.update_product_purchase_prices(&price_inputs_of(&req.items)).await;
+            let _ = self.price.update_product_purchase_prices(&PurchaseOrderItemInput::price_inputs_of(&req.items)).await;
         }
         Ok(PurchaseOrderOutcome::with_log(
             "更新成功".to_string(),

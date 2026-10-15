@@ -125,6 +125,80 @@ pub struct PriceScheduleInput {
     pub purchaser_id: Option<i64>,
 }
 
+/// 价格策略时段域内纯业务规则（零 IO，紧绑 PriceScheduleInput）
+impl PriceScheduleInput {
+    /// 价格类型白名单：与前端 PriceTypeSelect 选项保持一致
+    const VALID_PRICE_TYPES: &'static [&'static str] = &[
+        "gov_procurement",
+        "supermarket_1",
+        "supermarket_2",
+        "supermarket_3",
+        "ai_realtime",
+        "supplier_contract",
+        "purchaser_contract",
+    ];
+
+    /// YYYY-MM-DD 格式校验（domain 内置，避免依赖 common crate）
+    fn is_valid_date(s: &str) -> bool {
+        if s.len() != 10 {
+            return false;
+        }
+        let bytes = s.as_bytes();
+        bytes[4] == b'-' && bytes[7] == b'-'
+            && bytes[..4].iter().all(|c| c.is_ascii_digit())
+            && bytes[5..7].iter().all(|c| c.is_ascii_digit())
+            && bytes[8..10].iter().all(|c| c.is_ascii_digit())
+    }
+
+    /// 价格类型是否合法
+    pub fn is_valid_price_type(price_type: &str) -> bool {
+        Self::VALID_PRICE_TYPES.contains(&price_type)
+    }
+
+    /// 校验录入请求的字段合法性，返回错误信息字符串（None 表示通过）
+    pub fn validate(&self) -> Option<String> {
+        if self.product_id <= 0 {
+            return Some("product_id 必须大于 0".to_string());
+        }
+        if !Self::is_valid_price_type(&self.price_type) {
+            return Some(format!(
+                "price_type 非法：{}（允许：{}）",
+                self.price_type,
+                Self::VALID_PRICE_TYPES.join(", ")
+            ));
+        }
+        // 约定价必须指定对应方
+        if self.price_type == "supplier_contract" && self.supplier_id.unwrap_or(0) <= 0 {
+            return Some("供应商约定采购价必须选择供应商".to_string());
+        }
+        if self.price_type == "purchaser_contract" && self.purchaser_id.unwrap_or(0) <= 0 {
+            return Some("采购单位约定售价必须选择采购单位".to_string());
+        }
+        // 通用价格类型不应带 supplier_id / purchaser_id
+        if self.price_type != "supplier_contract" && self.supplier_id.is_some() {
+            return Some("仅供应商约定采购价可指定 supplier_id".to_string());
+        }
+        if self.price_type != "purchaser_contract" && self.purchaser_id.is_some() {
+            return Some("仅采购单位约定售价可指定 purchaser_id".to_string());
+        }
+        if !Self::is_valid_date(&self.effective_date) {
+            return Some(format!("effective_date 格式错误：{}", self.effective_date));
+        }
+        if let Some(end) = &self.end_date {
+            if !end.is_empty() && !Self::is_valid_date(end) {
+                return Some(format!("end_date 格式错误：{}", end));
+            }
+            if !end.is_empty() && end.as_str() < self.effective_date.as_str() {
+                return Some("end_date 不能早于 effective_date".to_string());
+            }
+        }
+        if self.price < 0.0 {
+            return Some("price 不能为负数".to_string());
+        }
+        None
+    }
+}
+
 /// 价格策略仓储端口
 pub trait PriceScheduleRepo: Send + Sync {
     /// 新增时段（end_date 强制 NULL；返回 last_insert_rowid；UNIQUE 冲突以 Err 返回且消息含 "UNIQUE"）
